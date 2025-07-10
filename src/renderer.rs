@@ -16,7 +16,7 @@ use crate::math::generate_instances;
 /// 
 /// Manages all graphics resources including buffers, textures, pipelines, and rendering state.
 /// Uses instanced rendering to efficiently draw all 216 hypercube stickers.
-pub struct Renderer<'a> {
+pub(crate) struct Renderer<'a> {
     /// Reference to the window for surface operations
     window: Arc<Window>,
     /// wgpu surface for presenting rendered frames
@@ -28,7 +28,7 @@ pub struct Renderer<'a> {
     /// Surface configuration for presentation
     config: wgpu::SurfaceConfiguration,
     /// Current window size for aspect ratio calculations
-    pub size: winit::dpi::PhysicalSize<u32>,
+    pub(crate) size: winit::dpi::PhysicalSize<u32>,
     /// Graphics pipeline for cube rendering
     render_pipeline: wgpu::RenderPipeline,
     /// Buffer containing cube vertex data
@@ -59,7 +59,7 @@ pub struct Renderer<'a> {
 /// for instanced rendering of hypercube stickers.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct InstanceRaw {
+pub(crate) struct InstanceRaw {
     /// 4x4 model transformation matrix
     model: [[f32; 4]; 4],
     /// RGBA color values
@@ -69,11 +69,11 @@ pub struct InstanceRaw {
 /// CPU-side instance data for a single hypercube sticker.
 /// 
 /// Contains position and color information that gets converted to GPU format.
-pub struct Instance {
+pub(crate) struct Instance {
     /// 3D position of the sticker after 4D projection
-    pub position: Vector3<f32>,
+    pub(crate) position: Vector3<f32>,
     /// RGBA color of the sticker
-    pub color: nalgebra::Vector4<f32>,
+    pub(crate) color: nalgebra::Vector4<f32>,
 }
 
 impl Instance {
@@ -83,7 +83,7 @@ impl Instance {
     /// 
     /// # Returns
     /// GPU-compatible instance data ready for rendering
-    pub fn to_raw(&self) -> InstanceRaw {
+    pub(crate) fn to_raw(&self) -> InstanceRaw {
         const STICKER_SCALE: f32 = 0.8;
         let scale_matrix = nalgebra::Matrix4::new_scaling(STICKER_SCALE);
         let translation_matrix = nalgebra::Matrix4::new_translation(&self.position);
@@ -106,7 +106,7 @@ impl<'a> Renderer<'a> {
     /// 
     /// # Returns
     /// A fully initialized renderer ready for frame rendering
-    pub async fn new(window: Arc<Window>, hypercube: &Hypercube) -> Self {
+    pub(crate) async fn new(window: Arc<Window>, hypercube: &Hypercube) -> Self {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -325,7 +325,7 @@ impl<'a> Renderer<'a> {
     /// 
     /// # Returns
     /// Reference to the window for event handling and queries
-    pub fn window(&self) -> &Window {
+    pub(crate) fn window(&self) -> &Window {
         &self.window
     }
 
@@ -336,7 +336,7 @@ impl<'a> Renderer<'a> {
     /// 
     /// # Arguments
     /// * `new_size` - New window dimensions in pixels
-    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+    pub(crate) fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
             self.config.width = new_size.width;
@@ -370,7 +370,7 @@ impl<'a> Renderer<'a> {
     /// # Arguments
     /// * `hypercube` - Current hypercube state
     /// * `rotation_4d` - Current 4D rotation matrix
-    pub fn update_instances(&mut self, hypercube: &Hypercube, rotation_4d: &nalgebra::Matrix4<f32>) {
+    pub(crate) fn update_instances(&mut self, hypercube: &Hypercube, rotation_4d: &nalgebra::Matrix4<f32>) {
         let instances = generate_instances(hypercube, rotation_4d);
         let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
         self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instance_data));
@@ -384,7 +384,7 @@ impl<'a> Renderer<'a> {
     /// # Arguments
     /// * `camera` - Current camera state for view matrix
     /// * `projection` - Current projection parameters
-    pub fn render(&mut self, camera: &Camera, projection: &Projection) -> Result<(), wgpu::SurfaceError> {
+    pub(crate) fn render(&mut self, camera: &Camera, projection: &Projection) -> Result<(), wgpu::SurfaceError> {
         self.camera_uniform.update_view_proj(camera, projection);
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
 

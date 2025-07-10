@@ -18,17 +18,17 @@ const PROJECTION_FOVY: f32 = 45.0;
 /// 
 /// Coordinates the hypercube data, camera system, input handling, and 4D transformations
 /// to provide an interactive 4D Rubik's cube experience.
-pub struct App {
+pub(crate) struct App {
     /// The 4D hypercube being visualized
-    pub hypercube: Hypercube,
+    pub(crate) hypercube: Hypercube,
     /// 3D camera for viewing the projected hypercube
-    pub camera: Camera,
+    pub(crate) camera: Camera,
     /// Controller for handling camera movement
-    pub camera_controller: CameraController,
+    pub(crate) camera_controller: CameraController,
     /// 3D perspective projection parameters
-    pub projection: Projection,
+    pub(crate) projection: Projection,
     /// Current 4D rotation matrix applied to the hypercube
-    pub rotation_4d: nalgebra::Matrix4<f32>,
+    pub(crate) rotation_4d: nalgebra::Matrix4<f32>,
     /// Tracks current input device states
     input_state: InputState,
 }
@@ -41,7 +41,7 @@ impl App {
     /// # Arguments
     /// * `window_width` - Initial window width in pixels
     /// * `window_height` - Initial window height in pixels
-    pub fn new(window_width: u32, window_height: u32) -> Self {
+    pub(crate) fn new(window_width: u32, window_height: u32) -> Self {
         let hypercube = Hypercube::new();
         
         let mut camera = Camera {
@@ -74,7 +74,7 @@ impl App {
     /// 
     /// # Arguments
     /// * `new_size` - New window dimensions in pixels
-    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+    pub(crate) fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.projection.aspect = new_size.width as f32 / new_size.height as f32;
         }
@@ -83,7 +83,7 @@ impl App {
     /// Updates the application state for the current frame.
     /// 
     /// Currently updates the camera position based on controller state.
-    pub fn update(&mut self) {
+    pub(crate) fn update(&mut self) {
         self.camera_controller.update_camera(&mut self.camera);
     }
 }

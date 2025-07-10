@@ -10,7 +10,7 @@ use winit::keyboard::ModifiersState;
 /// 
 /// Provides a clean interface for routing input events to application components
 /// without tight coupling to specific input handling implementations.
-pub trait InputHandler {
+pub(crate) trait InputHandler {
     /// Handles window-specific input events like mouse clicks and scrolling.
     /// 
     /// # Arguments
@@ -35,14 +35,14 @@ pub trait InputHandler {
 /// 
 /// Maintains persistent state for input devices that need to be tracked
 /// across multiple events (e.g., mouse button press/release pairs).
-pub struct InputState {
+pub(crate) struct InputState {
     /// Whether the right mouse button is currently pressed
-    pub is_right_mouse_pressed: bool,
+    pub(crate) is_right_mouse_pressed: bool,
 }
 
 impl InputState {
     /// Creates a new input state with default values.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             is_right_mouse_pressed: false,
         }
@@ -53,7 +53,7 @@ impl InputState {
     /// # Arguments
     /// * `button` - The mouse button that changed state
     /// * `state` - Whether the button was pressed or released
-    pub fn update_mouse_state(&mut self, button: MouseButton, state: ElementState) {
+    pub(crate) fn update_mouse_state(&mut self, button: MouseButton, state: ElementState) {
         if button == MouseButton::Right {
             self.is_right_mouse_pressed = state == ElementState::Pressed;
         }

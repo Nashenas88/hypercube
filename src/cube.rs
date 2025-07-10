@@ -10,7 +10,7 @@ use nalgebra::Vector4;
 /// Uses standard Rubik's cube colors for the first 6 sides, with two additional
 /// colors (Purple and Brown) for the extra dimensions in 4D space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Color {
+pub(crate) enum Color {
     // Using standard Rubik's cube colors for the first 6
     White,
     Yellow,
@@ -28,11 +28,11 @@ pub enum Color {
 /// Each sticker represents one colored square that would be visible on the surface
 /// of the 4D hypercube. Contains color and 4D position information.
 #[derive(Clone, Copy, Debug)]
-pub struct Sticker {
+pub(crate) struct Sticker {
     /// Color of this sticker
-    pub color: Color,
+    pub(crate) color: Color,
     /// Position within the 4D hypercube coordinate system
-    pub position: Vector4<f32>,
+    pub(crate) position: Vector4<f32>,
 }
 
 /// One 3D side of the 4D hypercube.
@@ -40,9 +40,9 @@ pub struct Sticker {
 /// Each side is a 3x3x3 arrangement of stickers, representing one of the 8 cubic
 /// cells that make up the tesseract (4D hypercube).
 #[derive(Clone, Debug)]
-pub struct Side {
+pub(crate) struct Side {
     /// Collection of 27 stickers arranged in a 3x3x3 cube
-    pub stickers: Vec<Sticker>,
+    pub(crate) stickers: Vec<Sticker>,
 }
 
 impl Side {
@@ -57,7 +57,7 @@ impl Side {
     /// 
     /// # Returns
     /// A new side with 27 stickers arranged in a 3D grid
-    pub fn new(center_color: Color, offset: Vector4<f32>) -> Self {
+    pub(crate) fn new(center_color: Color, offset: Vector4<f32>) -> Self {
         let mut stickers = Vec::with_capacity(27);
         for i in -1..=1 {
             for j in -1..=1 {
@@ -78,9 +78,9 @@ impl Side {
 /// Consists of 8 cubic sides arranged in 4D space, representing a 4D Rubik's cube.
 /// Each side is a 3x3x3 arrangement of colored stickers.
 #[derive(Debug)]
-pub struct Hypercube {
+pub(crate) struct Hypercube {
     /// The 8 cubic sides that make up the tesseract
-    pub sides: Vec<Side>,
+    pub(crate) sides: Vec<Side>,
 }
 
 impl Hypercube {
@@ -91,7 +91,7 @@ impl Hypercube {
     /// 
     /// # Returns
     /// A solved 4D hypercube ready for visualization and manipulation
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let colors = [
             Color::White,
             Color::Yellow,
@@ -149,7 +149,7 @@ impl From<Color> for Vector4<f32> {
 /// 
 /// Defines the 8 vertices of a cube centered at origin with side length 1.
 /// Used as the base geometry for all hypercube stickers.
-pub const VERTICES: &[[f32; 3]] = &[
+pub(crate) const VERTICES: &[[f32; 3]] = &[
     [-0.5, -0.5, -0.5], // 0
     [0.5, -0.5, -0.5],  // 1
     [0.5, 0.5, -0.5],   // 2
@@ -164,7 +164,7 @@ pub const VERTICES: &[[f32; 3]] = &[
 /// 
 /// Defines how the vertices are connected to form the 6 faces of a cube.
 /// Each face is made of 2 triangles (6 indices per face).
-pub const INDICES: &[u16] = &[
+pub(crate) const INDICES: &[u16] = &[
     0, 1, 2, 2, 3, 0, // front
     1, 5, 6, 6, 2, 1, // right
     5, 4, 7, 7, 6, 5, // back

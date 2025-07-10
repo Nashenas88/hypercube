@@ -25,7 +25,7 @@ const MOUSE_SENSITIVITY: f32 = 0.5;
 /// 
 /// # Returns
 /// The projected 3D point (x, y, z)
-pub fn project_4d_to_3d(point_4d: Vector4<f32>, viewer_distance: f32) -> Vector3<f32> {
+pub(crate) fn project_4d_to_3d(point_4d: Vector4<f32>, viewer_distance: f32) -> Vector3<f32> {
     let w_distance = viewer_distance - point_4d.w;
     let scale = viewer_distance / w_distance;
     
@@ -46,7 +46,7 @@ pub fn project_4d_to_3d(point_4d: Vector4<f32>, viewer_distance: f32) -> Vector3
 /// 
 /// # Returns
 /// A 4x4 rotation matrix for the XW plane
-pub fn create_4d_rotation_xw(angle: f32) -> nalgebra::Matrix4<f32> {
+pub(crate) fn create_4d_rotation_xw(angle: f32) -> nalgebra::Matrix4<f32> {
     let cos_x = angle.cos();
     let sin_x = angle.sin();
     nalgebra::Matrix4::new(
@@ -64,7 +64,7 @@ pub fn create_4d_rotation_xw(angle: f32) -> nalgebra::Matrix4<f32> {
 /// 
 /// # Arguments
 /// * `angle` - Rotation angle in radians
-pub fn create_4d_rotation_yw(angle: f32) -> nalgebra::Matrix4<f32> {
+pub(crate) fn create_4d_rotation_yw(angle: f32) -> nalgebra::Matrix4<f32> {
     let cos_y = angle.cos();
     let sin_y = angle.sin();
     nalgebra::Matrix4::new(
@@ -87,7 +87,7 @@ pub fn create_4d_rotation_yw(angle: f32) -> nalgebra::Matrix4<f32> {
 /// 
 /// # Returns
 /// Updated 4D rotation matrix incorporating the mouse movement
-pub fn process_4d_rotation(current_rotation: &nalgebra::Matrix4<f32>, delta_x: f32, delta_y: f32) -> nalgebra::Matrix4<f32> {
+pub(crate) fn process_4d_rotation(current_rotation: &nalgebra::Matrix4<f32>, delta_x: f32, delta_y: f32) -> nalgebra::Matrix4<f32> {
     let angle_x = delta_x * MOUSE_SENSITIVITY * 0.01;
     let angle_y = delta_y * MOUSE_SENSITIVITY * 0.01;
     
@@ -108,7 +108,7 @@ pub fn process_4d_rotation(current_rotation: &nalgebra::Matrix4<f32>, delta_x: f
 /// 
 /// # Returns
 /// Vector of render instances ready for GPU upload
-pub fn generate_instances(hypercube: &Hypercube, rotation_4d: &nalgebra::Matrix4<f32>) -> Vec<Instance> {
+pub(crate) fn generate_instances(hypercube: &Hypercube, rotation_4d: &nalgebra::Matrix4<f32>) -> Vec<Instance> {
     let mut instances = Vec::new();
     
     for side in &hypercube.sides {

@@ -18,20 +18,20 @@ const MAX_DISTANCE: f32 = 50.0;
 /// 3D camera representing the viewer's position and orientation in space.
 /// 
 /// Uses a standard look-at camera model with eye position, target point, and up vector.
-pub struct Camera {
+pub(crate) struct Camera {
     /// Camera position in 3D space
-    pub eye: Point3<f32>,
+    pub(crate) eye: Point3<f32>,
     /// Point the camera is looking at (typically the origin)
-    pub target: Point3<f32>,
+    pub(crate) target: Point3<f32>,
     /// Up direction vector for camera orientation
-    pub up: Vector3<f32>,
+    pub(crate) up: Vector3<f32>,
 }
 
 impl Camera {
     /// Builds the view matrix for transforming world coordinates to camera space.
     /// 
     /// Uses right-handed coordinate system with the camera looking down the negative Z axis.
-    pub fn build_view_matrix(&self) -> Matrix4<f32> {
+    pub(crate) fn build_view_matrix(&self) -> Matrix4<f32> {
         Matrix4::look_at_rh(&self.eye, &self.target, &self.up)
     }
 }
@@ -40,15 +40,15 @@ impl Camera {
 /// 
 /// Provides mouse-controlled rotation around the target with distance-based zoom.
 /// Uses spherical coordinates (yaw/pitch) for intuitive orbital movement.
-pub struct CameraController {
+pub(crate) struct CameraController {
     /// Distance from camera to target point
-    pub distance: f32,
+    pub(crate) distance: f32,
     /// Horizontal rotation angle in degrees
-    pub yaw: f32,
+    pub(crate) yaw: f32,
     /// Vertical rotation angle in degrees (clamped to prevent flipping)
-    pub pitch: f32,
+    pub(crate) pitch: f32,
     /// Last recorded mouse position for delta calculations
-    pub last_mouse_pos: Option<(f32, f32)>,
+    pub(crate) last_mouse_pos: Option<(f32, f32)>,
 }
 
 impl CameraController {
@@ -56,7 +56,7 @@ impl CameraController {
     /// 
     /// # Arguments
     /// * `distance` - Initial distance from the camera to the target point
-    pub fn new(distance: f32) -> Self {
+    pub(crate) fn new(distance: f32) -> Self {
         Self {
             distance,
             yaw: 0.0,
@@ -71,7 +71,7 @@ impl CameraController {
     /// 
     /// # Arguments
     /// * `camera` - The camera to update with new position and orientation
-    pub fn update_camera(&self, camera: &mut Camera) {
+    pub(crate) fn update_camera(&self, camera: &mut Camera) {
         let yaw_rad = self.yaw.to_radians();
         let pitch_rad = self.pitch.to_radians();
         
@@ -91,7 +91,7 @@ impl CameraController {
     /// # Arguments
     /// * `button` - The mouse button that was pressed/released
     /// * `state` - Whether the button was pressed or released
-    pub fn process_mouse_input(&mut self, button: MouseButton, state: ElementState) {
+    pub(crate) fn process_mouse_input(&mut self, button: MouseButton, state: ElementState) {
         if button == MouseButton::Right {
             if state == ElementState::Released {
                 self.last_mouse_pos = None;
@@ -106,7 +106,7 @@ impl CameraController {
     /// # Arguments
     /// * `delta_x` - Horizontal mouse movement delta
     /// * `delta_y` - Vertical mouse movement delta
-    pub fn process_mouse_motion(&mut self, delta_x: f32, delta_y: f32) {
+    pub(crate) fn process_mouse_motion(&mut self, delta_x: f32, delta_y: f32) {
         self.yaw -= delta_x * MOUSE_SENSITIVITY;
         self.pitch += delta_y * MOUSE_SENSITIVITY;
         
@@ -119,7 +119,7 @@ impl CameraController {
     /// 
     /// # Arguments
     /// * `delta` - Scroll wheel delta (positive = zoom in, negative = zoom out)
-    pub fn process_scroll(&mut self, delta: f32) {
+    pub(crate) fn process_scroll(&mut self, delta: f32) {
         self.distance -= delta * ZOOM_SENSITIVITY;
         self.distance = self.distance.clamp(MIN_DISTANCE, MAX_DISTANCE);
     }
@@ -128,15 +128,15 @@ impl CameraController {
 /// 3D perspective projection parameters for rendering.
 /// 
 /// Defines the viewing frustum and field of view for the camera.
-pub struct Projection {
+pub(crate) struct Projection {
     /// Aspect ratio (width/height) of the viewport
-    pub aspect: f32,
+    pub(crate) aspect: f32,
     /// Vertical field of view in degrees
-    pub fovy: f32,
+    pub(crate) fovy: f32,
     /// Near clipping plane distance
-    pub znear: f32,
+    pub(crate) znear: f32,
     /// Far clipping plane distance
-    pub zfar: f32,
+    pub(crate) zfar: f32,
 }
 
 impl Projection {
@@ -146,7 +146,7 @@ impl Projection {
     /// 
     /// # Returns
     /// A 4x4 projection matrix for transforming camera space to clip space
-    pub fn build_projection_matrix(&self) -> Matrix4<f32> {
+    pub(crate) fn build_projection_matrix(&self) -> Matrix4<f32> {
         nalgebra::Matrix4::new_perspective(
             self.aspect,
             self.fovy,
@@ -161,14 +161,14 @@ impl Projection {
 /// Contains the combined view-projection matrix for vertex shader transformation.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct CameraUniform {
+pub(crate) struct CameraUniform {
     /// Combined view-projection matrix as 4x4 array
-    pub view_proj: [[f32; 4]; 4],
+    pub(crate) view_proj: [[f32; 4]; 4],
 }
 
 impl CameraUniform {
     /// Creates a new camera uniform with identity matrix.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             view_proj: nalgebra::Matrix4::identity().into(),
         }
@@ -181,7 +181,7 @@ impl CameraUniform {
     /// # Arguments
     /// * `camera` - Current camera state for view matrix
     /// * `projection` - Current projection parameters
-    pub fn update_view_proj(&mut self, camera: &Camera, projection: &Projection) {
+    pub(crate) fn update_view_proj(&mut self, camera: &Camera, projection: &Projection) {
         self.view_proj = (projection.build_projection_matrix() * camera.build_view_matrix()).into();
     }
 }
