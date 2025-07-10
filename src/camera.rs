@@ -92,11 +92,10 @@ impl CameraController {
     /// * `button` - The mouse button that was pressed/released
     /// * `state` - Whether the button was pressed or released
     pub(crate) fn process_mouse_input(&mut self, button: MouseButton, state: ElementState) {
-        if button == MouseButton::Right {
-            if state == ElementState::Released {
+        if button == MouseButton::Right
+            && state == ElementState::Released {
                 self.last_mouse_pos = None;
             }
-        }
     }
 
     /// Processes mouse movement for camera rotation.
