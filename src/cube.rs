@@ -1,4 +1,4 @@
-use nalgebra::{Vector3, Vector4, Matrix5};
+use nalgebra::Vector4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Color {
@@ -80,25 +80,6 @@ impl Hypercube {
 
         Self { sides }
     }
-}
-
-// 4D projection utilities
-pub fn project_4d_to_3d(point_4d: Vector4<f32>, viewer_distance: f32) -> Vector3<f32> {
-    // Perspective projection from 4D to 3D
-    // Similar to 3D->2D projection but with an extra dimension
-    let w_distance = viewer_distance - point_4d.w;
-    let scale = viewer_distance / w_distance;
-    
-    Vector3::new(
-        point_4d.x * scale,
-        point_4d.y * scale,
-        point_4d.z * scale,
-    )
-}
-
-pub fn rotate_4d(point: Vector4<f32>, rotation_matrix: Matrix5<f32>) -> Vector4<f32> {
-    let homogeneous = rotation_matrix * Vector4::new(point.x, point.y, point.z, point.w).insert_row(4, 1.0);
-    Vector4::new(homogeneous.x, homogeneous.y, homogeneous.z, homogeneous.w)
 }
 
 impl From<Color> for Vector4<f32> {
