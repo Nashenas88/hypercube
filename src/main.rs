@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::{
-    event::{Event, WindowEvent},
+    event::{Event, WindowEvent, MouseButton, ElementState, DeviceEvent},
     event_loop::{ControlFlow, EventLoop},
     window::Window,
 };
@@ -16,6 +16,7 @@ const STICKER_SCALE: f32 = 0.8;
 const STICKER_SPACING: f32 = 1.2;
 const SIDE_SPACING: f32 = 8.0;
 const VIEWER_DISTANCE_4D: f32 = 3.0;
+const MOUSE_SENSITIVITY: f32 = 0.5;
 
 struct Camera {
     eye: Point3<f32>,
@@ -26,6 +27,58 @@ struct Camera {
 impl Camera {
     fn build_view_matrix(&self) -> Matrix4<f32> {
         Matrix4::look_at_rh(&self.eye, &self.target, &self.up)
+    }
+}
+
+struct CameraController {
+    distance: f32,
+    yaw: f32,
+    pitch: f32,
+    is_right_mouse_pressed: bool,
+    last_mouse_pos: Option<(f32, f32)>,
+}
+
+impl CameraController {
+    fn new(distance: f32) -> Self {
+        Self {
+            distance,
+            yaw: 0.0,
+            pitch: 0.0,
+            is_right_mouse_pressed: false,
+            last_mouse_pos: None,
+        }
+    }
+
+    fn update_camera(&self, camera: &mut Camera) {
+        let yaw_rad = self.yaw.to_radians();
+        let pitch_rad = self.pitch.to_radians();
+        
+        let x = self.distance * pitch_rad.cos() * yaw_rad.sin();
+        let y = self.distance * pitch_rad.sin();
+        let z = self.distance * pitch_rad.cos() * yaw_rad.cos();
+        
+        camera.eye = Point3::new(x, y, z);
+        camera.target = Point3::new(0.0, 0.0, 0.0);
+        camera.up = Vector3::new(0.0, 1.0, 0.0);
+    }
+
+    fn process_mouse_input(&mut self, button: MouseButton, state: ElementState) {
+        if button == MouseButton::Right {
+            self.is_right_mouse_pressed = state == ElementState::Pressed;
+            if !self.is_right_mouse_pressed {
+                self.last_mouse_pos = None;
+            }
+        }
+    }
+
+    fn process_mouse_motion(&mut self, delta_x: f32, delta_y: f32) {
+        if self.is_right_mouse_pressed {
+            self.yaw += delta_x * MOUSE_SENSITIVITY;
+            self.pitch -= delta_y * MOUSE_SENSITIVITY;
+            
+            // Clamp pitch to prevent camera flipping
+            self.pitch = self.pitch.clamp(-89.0, 89.0);
+        }
     }
 }
 
@@ -86,28 +139,35 @@ fn main() {
             Event::WindowEvent {
                 window_id,
                 event,
-            } if window_id == renderer.window().id() => match event {
-                WindowEvent::CloseRequested => {
-                    elwt.exit();
-                }
-                WindowEvent::Resized(physical_size) => {
-                    renderer.resize(physical_size);
-                }
-                WindowEvent::RedrawRequested => {
-                    // Note that this is not guaranteed to be called every frame.
-                    // We should probably take a look at that later.
-                    match renderer.render() {
-                        Ok(_) => {},
-                        // Reconfigure the surface if lost
-                        Err(wgpu::SurfaceError::Lost) => renderer.resize(renderer.size),
-                        // The system is out of memory, we should probably quit
-                        Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                        // All other errors (Outdated, Timeout) should be resolved by the next frame
-                        Err(e) => eprintln!("{:?}", e),
+            } if window_id == renderer.window().id() => {
+                if !renderer.input(&event) {
+                    match event {
+                        WindowEvent::CloseRequested => {
+                            elwt.exit();
+                        }
+                        WindowEvent::Resized(physical_size) => {
+                            renderer.resize(physical_size);
+                        }
+                        WindowEvent::RedrawRequested => {
+                            // Note that this is not guaranteed to be called every frame.
+                            // We should probably take a look at that later.
+                            match renderer.render() {
+                                Ok(_) => {},
+                                // Reconfigure the surface if lost
+                                Err(wgpu::SurfaceError::Lost) => renderer.resize(renderer.size),
+                                // The system is out of memory, we should probably quit
+                                Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                                // All other errors (Outdated, Timeout) should be resolved by the next frame
+                                Err(e) => eprintln!("{:?}", e),
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
             },
+            Event::DeviceEvent { event, .. } => {
+                renderer.device_input(&event);
+            }
             Event::AboutToWait => {
                 renderer.window().request_redraw();
             }
@@ -130,6 +190,7 @@ struct Renderer<'a> {
     instance_buffer: wgpu::Buffer,
     num_instances: u32,
     camera: Camera,
+    camera_controller: CameraController,
     projection: Projection,
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
@@ -225,11 +286,14 @@ impl<'a> Renderer<'a> {
 
         surface.configure(&device, &config);
 
-        let camera = Camera {
+        let mut camera = Camera {
             eye: Point3::new(0.0, 0.0, 15.0),
             target: Point3::new(0.0, 0.0, 0.0),
             up: Vector3::new(0.0, 1.0, 0.0),
         };
+        
+        let mut camera_controller = CameraController::new(15.0);
+        camera_controller.update_camera(&mut camera);
 
         let projection = Projection {
             aspect: config.width as f32 / config.height as f32,
@@ -378,6 +442,7 @@ impl<'a> Renderer<'a> {
             instance_buffer,
             num_instances,
             camera,
+            camera_controller,
             projection,
             camera_uniform,
             camera_buffer,
@@ -387,6 +452,26 @@ impl<'a> Renderer<'a> {
 
     pub fn window(&self) -> &Window {
         &self.window
+    }
+
+    pub fn input(&mut self, event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::MouseInput { button, state, .. } => {
+                self.camera_controller.process_mouse_input(*button, *state);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn device_input(&mut self, event: &DeviceEvent) -> bool {
+        match event {
+            DeviceEvent::MouseMotion { delta } => {
+                self.camera_controller.process_mouse_motion(delta.0 as f32, delta.1 as f32);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -400,6 +485,7 @@ impl<'a> Renderer<'a> {
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        self.camera_controller.update_camera(&mut self.camera);
         self.camera_uniform.update_view_proj(&self.camera, &self.projection);
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
 
