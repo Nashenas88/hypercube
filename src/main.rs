@@ -18,6 +18,9 @@ const SIDE_SPACING: f32 = 8.0;
 const VIEWER_DISTANCE_4D: f32 = 3.0;
 const MOUSE_SENSITIVITY: f32 = 0.5;
 const PROJECTION_FOVY: f32 = 45.0;
+const ZOOM_SENSITIVITY: f32 = 1.0;
+const MIN_DISTANCE: f32 = 5.0;
+const MAX_DISTANCE: f32 = 50.0;
 
 struct Camera {
     eye: Point3<f32>,
@@ -80,6 +83,11 @@ impl CameraController {
             // Clamp pitch to prevent camera flipping
             self.pitch = self.pitch.clamp(-89.0, 89.0);
         }
+    }
+
+    fn process_scroll(&mut self, delta: f32) {
+        self.distance -= delta * ZOOM_SENSITIVITY;
+        self.distance = self.distance.clamp(MIN_DISTANCE, MAX_DISTANCE);
     }
 }
 
@@ -158,6 +166,14 @@ impl App {
         match event {
             WindowEvent::MouseInput { button, state, .. } => {
                 self.camera_controller.process_mouse_input(*button, *state);
+                true
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scroll_delta = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01,
+                };
+                self.camera_controller.process_scroll(scroll_delta);
                 true
             }
             _ => false,
