@@ -4,6 +4,7 @@ use winit::{
     event::{Event, WindowEvent, MouseButton, ElementState, DeviceEvent},
     event_loop::{ControlFlow, EventLoop},
     window::Window,
+    keyboard::ModifiersState,
 };
 
 use nalgebra::{Matrix4, Point3, Vector3};
@@ -38,7 +39,6 @@ struct CameraController {
     distance: f32,
     yaw: f32,
     pitch: f32,
-    is_right_mouse_pressed: bool,
     last_mouse_pos: Option<(f32, f32)>,
 }
 
@@ -48,7 +48,6 @@ impl CameraController {
             distance,
             yaw: 0.0,
             pitch: 0.0,
-            is_right_mouse_pressed: false,
             last_mouse_pos: None,
         }
     }
@@ -68,21 +67,18 @@ impl CameraController {
 
     fn process_mouse_input(&mut self, button: MouseButton, state: ElementState) {
         if button == MouseButton::Right {
-            self.is_right_mouse_pressed = state == ElementState::Pressed;
-            if !self.is_right_mouse_pressed {
+            if state == ElementState::Released {
                 self.last_mouse_pos = None;
             }
         }
     }
 
     fn process_mouse_motion(&mut self, delta_x: f32, delta_y: f32) {
-        if self.is_right_mouse_pressed {
-            self.yaw -= delta_x * MOUSE_SENSITIVITY;
-            self.pitch += delta_y * MOUSE_SENSITIVITY;
-            
-            // Clamp pitch to prevent camera flipping
-            self.pitch = self.pitch.clamp(-89.0, 89.0);
-        }
+        self.yaw -= delta_x * MOUSE_SENSITIVITY;
+        self.pitch += delta_y * MOUSE_SENSITIVITY;
+        
+        // Clamp pitch to prevent camera flipping
+        self.pitch = self.pitch.clamp(-89.0, 89.0);
     }
 
     fn process_scroll(&mut self, delta: f32) {
@@ -132,6 +128,8 @@ struct App {
     camera: Camera,
     camera_controller: CameraController,
     projection: Projection,
+    rotation_4d: nalgebra::Matrix4<f32>,
+    is_right_mouse_pressed: bool,
 }
 
 impl App {
@@ -159,12 +157,17 @@ impl App {
             camera,
             camera_controller,
             projection,
+            rotation_4d: nalgebra::Matrix4::identity(),
+            is_right_mouse_pressed: false,
         }
     }
 
     fn input(&mut self, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::MouseInput { button, state, .. } => {
+                if *button == MouseButton::Right {
+                    self.is_right_mouse_pressed = *state == ElementState::Pressed;
+                }
                 self.camera_controller.process_mouse_input(*button, *state);
                 true
             }
@@ -180,14 +183,49 @@ impl App {
         }
     }
 
-    fn device_input(&mut self, event: &DeviceEvent) -> bool {
+    fn device_input(&mut self, event: &DeviceEvent, modifiers: &ModifiersState) -> bool {
         match event {
             DeviceEvent::MouseMotion { delta } => {
-                self.camera_controller.process_mouse_motion(delta.0 as f32, delta.1 as f32);
+                if self.is_right_mouse_pressed {
+                    if modifiers.shift_key() {
+                        self.process_4d_rotation(delta.0 as f32, delta.1 as f32);
+                    } else {
+                        self.camera_controller.process_mouse_motion(delta.0 as f32, delta.1 as f32);
+                    }
+                }
                 true
             }
             _ => false,
         }
+    }
+
+    fn process_4d_rotation(&mut self, delta_x: f32, delta_y: f32) {
+        // Create 4D rotation matrices for XW and YW planes
+        let angle_x = delta_x * MOUSE_SENSITIVITY * 0.01;
+        let angle_y = delta_y * MOUSE_SENSITIVITY * 0.01;
+        
+        // XW rotation (around YZ plane)
+        let cos_x = angle_x.cos();
+        let sin_x = angle_x.sin();
+        let rotation_xw = nalgebra::Matrix4::new(
+            cos_x, 0.0, 0.0, -sin_x,
+            0.0,   1.0, 0.0,  0.0,
+            0.0,   0.0, 1.0,  0.0,
+            sin_x, 0.0, 0.0,  cos_x,
+        );
+        
+        // YW rotation (around XZ plane)
+        let cos_y = angle_y.cos();
+        let sin_y = angle_y.sin();
+        let rotation_yw = nalgebra::Matrix4::new(
+            1.0,  0.0,   0.0,  0.0,
+            0.0,  cos_y, 0.0, -sin_y,
+            0.0,  0.0,   1.0,  0.0,
+            0.0,  sin_y, 0.0,  cos_y,
+        );
+        
+        // Combine rotations
+        self.rotation_4d = rotation_yw * rotation_xw * self.rotation_4d;
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -216,6 +254,7 @@ fn main() {
     let window_size = window.inner_size();
     let mut app = App::new(window_size.width, window_size.height);
     let mut renderer = pollster::block_on(Renderer::new(window.clone(), &app.hypercube));
+    let mut modifiers = ModifiersState::default();
 
     event_loop
         .run(move |event, elwt| match event {
@@ -234,6 +273,7 @@ fn main() {
                         }
                         WindowEvent::RedrawRequested => {
                             app.update();
+                            renderer.update_instances(&app.hypercube, &app.rotation_4d);
                             // Note that this is not guaranteed to be called every frame.
                             // We should probably take a look at that later.
                             match renderer.render(&app.camera, &app.projection) {
@@ -246,12 +286,15 @@ fn main() {
                                 Err(e) => eprintln!("{:?}", e),
                             }
                         }
+                        WindowEvent::ModifiersChanged(new_modifiers) => {
+                            modifiers = new_modifiers.state();
+                        }
                         _ => {}
                     }
                 }
             },
             Event::DeviceEvent { event, .. } => {
-                app.device_input(&event);
+                app.device_input(&event, &modifiers);
             }
             Event::AboutToWait => {
                 renderer.window().request_redraw();
@@ -304,13 +347,14 @@ impl Instance {
     }
 }
 
-fn generate_instances(hypercube: &Hypercube) -> Vec<Instance> {
+fn generate_instances(hypercube: &Hypercube, rotation_4d: &nalgebra::Matrix4<f32>) -> Vec<Instance> {
     let mut instances = Vec::new();
     
     for side in &hypercube.sides {
         for sticker in &side.stickers {
-            // Project 4D position to 3D
-            let projected_3d = project_4d_to_3d(sticker.position * STICKER_SPACING, VIEWER_DISTANCE_4D);
+            // Apply 4D rotation, then project to 3D
+            let rotated_4d = rotation_4d * sticker.position.scale(STICKER_SPACING);
+            let projected_3d = project_4d_to_3d(rotated_4d, VIEWER_DISTANCE_4D);
             
             instances.push(Instance {
                 position: projected_3d,
@@ -508,13 +552,14 @@ impl<'a> Renderer<'a> {
 
         let num_indices = INDICES.len() as u32;
 
-        // Generate instances from the provided hypercube
-        let instances = generate_instances(hypercube);
+        // Generate instances from the provided hypercube (no rotation initially)
+        let identity = nalgebra::Matrix4::identity();
+        let instances = generate_instances(hypercube, &identity);
         let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Instance Buffer"),
             contents: bytemuck::cast_slice(&instance_data),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let num_instances = instances.len() as u32;
 
@@ -568,6 +613,12 @@ impl<'a> Renderer<'a> {
             
             self.depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
         }
+    }
+
+    pub fn update_instances(&mut self, hypercube: &Hypercube, rotation_4d: &nalgebra::Matrix4<f32>) {
+        let instances = generate_instances(hypercube, rotation_4d);
+        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+        self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instance_data));
     }
 
     fn render(&mut self, camera: &Camera, projection: &Projection) -> Result<(), wgpu::SurfaceError> {
