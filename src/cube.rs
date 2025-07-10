@@ -27,14 +27,14 @@ pub struct Side {
 }
 
 impl Side {
-    pub fn new(center_color: Color, w_position: f32) -> Self {
+    pub fn new(center_color: Color, offset: Vector4<f32>) -> Self {
         let mut stickers = Vec::with_capacity(27);
         for i in -1..=1 {
             for j in -1..=1 {
                 for k in -1..=1 {
                     stickers.push(Sticker {
                         color: center_color, // Initially, all stickers on a side are the same color
-                        position: Vector4::new(i as f32, j as f32, k as f32, w_position),
+                        position: Vector4::new(i as f32, j as f32, k as f32, 0.0) + offset,
                     });
                 }
             }
@@ -62,10 +62,20 @@ impl Hypercube {
             Color::Brown,
         ];
 
-        let sides = colors.iter().enumerate().map(|(i, &color)| {
-            // Position sides along the W axis at -1 and +1
-            let w_position = if i < 4 { -1.0 } else { 1.0 };
-            Side::new(color, w_position)
+        // Position the 8 3D cubes: 7 in first W plane arranged around center, 1 in second W plane
+        let positions = [
+            Vector4::new( 0.0,  0.0,  0.0, -2.0), // White - center of first W plane
+            Vector4::new( 4.0,  0.0,  0.0, -2.0), // Yellow - right
+            Vector4::new(-4.0,  0.0,  0.0, -2.0), // Blue - left
+            Vector4::new( 0.0,  4.0,  0.0, -2.0), // Green - up
+            Vector4::new( 0.0, -4.0,  0.0, -2.0), // Red - down
+            Vector4::new( 0.0,  0.0,  4.0, -2.0), // Orange - forward
+            Vector4::new( 0.0,  0.0, -4.0, -2.0), // Purple - back
+            Vector4::new( 0.0,  0.0,  0.0,  2.0), // Brown - center of second W plane
+        ];
+
+        let sides = colors.iter().zip(positions.iter()).map(|(&color, &position)| {
+            Side::new(color, position)
         }).collect();
 
         Self { sides }
