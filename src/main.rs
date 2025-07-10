@@ -74,8 +74,8 @@ impl CameraController {
 
     fn process_mouse_motion(&mut self, delta_x: f32, delta_y: f32) {
         if self.is_right_mouse_pressed {
-            self.yaw += delta_x * MOUSE_SENSITIVITY;
-            self.pitch -= delta_y * MOUSE_SENSITIVITY;
+            self.yaw -= delta_x * MOUSE_SENSITIVITY;
+            self.pitch += delta_y * MOUSE_SENSITIVITY;
             
             // Clamp pitch to prevent camera flipping
             self.pitch = self.pitch.clamp(-89.0, 89.0);
