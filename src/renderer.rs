@@ -1,3 +1,8 @@
+//! GPU rendering system for the 4D hypercube visualization.
+//! 
+//! This module handles all graphics rendering using wgpu, including GPU resource management,
+//! render pipeline setup, and per-frame rendering of the hypercube instances.
+
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -7,39 +12,77 @@ use crate::camera::{Camera, Projection, CameraUniform};
 use crate::cube::{Hypercube, VERTICES, INDICES};
 use crate::math::generate_instances;
 
+/// GPU renderer for the hypercube visualization.
+/// 
+/// Manages all graphics resources including buffers, textures, pipelines, and rendering state.
+/// Uses instanced rendering to efficiently draw all 216 hypercube stickers.
 pub struct Renderer<'a> {
+    /// Reference to the window for surface operations
     window: Arc<Window>,
+    /// wgpu surface for presenting rendered frames
     surface: wgpu::Surface<'a>,
+    /// GPU device for creating resources
     device: wgpu::Device,
+    /// Command queue for GPU operations
     queue: wgpu::Queue,
+    /// Surface configuration for presentation
     config: wgpu::SurfaceConfiguration,
+    /// Current window size for aspect ratio calculations
     pub size: winit::dpi::PhysicalSize<u32>,
+    /// Graphics pipeline for cube rendering
     render_pipeline: wgpu::RenderPipeline,
+    /// Buffer containing cube vertex data
     vertex_buffer: wgpu::Buffer,
+    /// Buffer containing cube index data
     index_buffer: wgpu::Buffer,
+    /// Number of indices in the index buffer
     num_indices: u32,
+    /// Buffer containing per-instance transformation data
     instance_buffer: wgpu::Buffer,
+    /// Number of instances to render
     num_instances: u32,
+    /// CPU-side camera uniform data
     camera_uniform: CameraUniform,
+    /// GPU buffer containing camera matrices
     camera_buffer: wgpu::Buffer,
+    /// Bind group for camera uniform buffer
     camera_bind_group: wgpu::BindGroup,
+    /// Depth texture for z-buffering
     depth_texture: wgpu::Texture,
+    /// Depth texture view for rendering
     depth_view: wgpu::TextureView,
 }
 
+/// GPU-compatible instance data for rendering individual cubes.
+/// 
+/// Contains transformation matrix and color data that gets uploaded to the GPU
+/// for instanced rendering of hypercube stickers.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceRaw {
+    /// 4x4 model transformation matrix
     model: [[f32; 4]; 4],
+    /// RGBA color values
     color: [f32; 4],
 }
 
+/// CPU-side instance data for a single hypercube sticker.
+/// 
+/// Contains position and color information that gets converted to GPU format.
 pub struct Instance {
+    /// 3D position of the sticker after 4D projection
     pub position: Vector3<f32>,
+    /// RGBA color of the sticker
     pub color: nalgebra::Vector4<f32>,
 }
 
 impl Instance {
+    /// Converts CPU instance data to GPU-compatible format.
+    /// 
+    /// Creates transformation matrix and formats color data for upload to GPU.
+    /// 
+    /// # Returns
+    /// GPU-compatible instance data ready for rendering
     pub fn to_raw(&self) -> InstanceRaw {
         const STICKER_SCALE: f32 = 0.8;
         let scale_matrix = nalgebra::Matrix4::new_scaling(STICKER_SCALE);
@@ -52,6 +95,17 @@ impl Instance {
 }
 
 impl<'a> Renderer<'a> {
+    /// Creates a new renderer with initialized GPU resources.
+    /// 
+    /// Sets up the complete rendering pipeline including device, surface, buffers,
+    /// and render pipeline for hypercube visualization.
+    /// 
+    /// # Arguments
+    /// * `window` - Window to render into
+    /// * `hypercube` - Initial hypercube data for setting up instance buffer
+    /// 
+    /// # Returns
+    /// A fully initialized renderer ready for frame rendering
     pub async fn new(window: Arc<Window>, hypercube: &Hypercube) -> Self {
         let size = window.inner_size();
 
@@ -267,10 +321,21 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// Returns a reference to the window being rendered to.
+    /// 
+    /// # Returns
+    /// Reference to the window for event handling and queries
     pub fn window(&self) -> &Window {
         &self.window
     }
 
+    /// Handles window resize events by updating surface and depth buffer.
+    /// 
+    /// Recreates size-dependent resources like the depth texture when the window
+    /// size changes.
+    /// 
+    /// # Arguments
+    /// * `new_size` - New window dimensions in pixels
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
@@ -297,12 +362,28 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    /// Updates the instance buffer with current hypercube state.
+    /// 
+    /// Regenerates all instance data based on current 4D rotation and uploads
+    /// to GPU for the next frame.
+    /// 
+    /// # Arguments
+    /// * `hypercube` - Current hypercube state
+    /// * `rotation_4d` - Current 4D rotation matrix
     pub fn update_instances(&mut self, hypercube: &Hypercube, rotation_4d: &nalgebra::Matrix4<f32>) {
         let instances = generate_instances(hypercube, rotation_4d);
         let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
         self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instance_data));
     }
 
+    /// Renders a single frame of the hypercube visualization.
+    /// 
+    /// Updates camera uniforms, acquires surface texture, and draws all instances
+    /// with proper depth testing.
+    /// 
+    /// # Arguments
+    /// * `camera` - Current camera state for view matrix
+    /// * `projection` - Current projection parameters
     pub fn render(&mut self, camera: &Camera, projection: &Projection) -> Result<(), wgpu::SurfaceError> {
         self.camera_uniform.update_view_proj(camera, projection);
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));

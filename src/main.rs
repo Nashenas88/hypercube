@@ -1,3 +1,9 @@
+//! 4D Hypercube visualization application.
+//! 
+//! An interactive 4D Rubik's cube that can be rotated in 4D space and viewed
+//! through 3D projection. Uses wgpu for GPU rendering and provides intuitive
+//! mouse controls for navigation.
+
 use std::sync::Arc;
 use winit::{
     event::{Event, WindowEvent},
@@ -16,6 +22,10 @@ use app::App;
 use input::InputHandler;
 use renderer::Renderer;
 
+/// Entry point for the hypercube visualization application.
+/// 
+/// Sets up the window, initializes the application and renderer, and runs
+/// the main event loop for handling input and rendering frames.
 fn main() {
     env_logger::init();
 
