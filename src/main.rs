@@ -17,6 +17,7 @@ const STICKER_SPACING: f32 = 1.2;
 const SIDE_SPACING: f32 = 8.0;
 const VIEWER_DISTANCE_4D: f32 = 3.0;
 const MOUSE_SENSITIVITY: f32 = 0.5;
+const PROJECTION_FOVY: f32 = 45.0;
 
 struct Camera {
     eye: Point3<f32>,
@@ -118,10 +119,74 @@ impl CameraUniform {
     }
 }
 
+struct App {
+    hypercube: Hypercube,
+    camera: Camera,
+    camera_controller: CameraController,
+    projection: Projection,
+}
+
+impl App {
+    fn new(window_width: u32, window_height: u32) -> Self {
+        let hypercube = Hypercube::new();
+        
+        let mut camera = Camera {
+            eye: Point3::new(0.0, 0.0, 15.0),
+            target: Point3::new(0.0, 0.0, 0.0),
+            up: Vector3::new(0.0, 1.0, 0.0),
+        };
+        
+        let mut camera_controller = CameraController::new(15.0);
+        camera_controller.update_camera(&mut camera);
+
+        let projection = Projection {
+            aspect: window_width as f32 / window_height as f32,
+            fovy: PROJECTION_FOVY,
+            znear: 0.1,
+            zfar: 100.0,
+        };
+
+        Self {
+            hypercube,
+            camera,
+            camera_controller,
+            projection,
+        }
+    }
+
+    fn input(&mut self, event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::MouseInput { button, state, .. } => {
+                self.camera_controller.process_mouse_input(*button, *state);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn device_input(&mut self, event: &DeviceEvent) -> bool {
+        match event {
+            DeviceEvent::MouseMotion { delta } => {
+                self.camera_controller.process_mouse_motion(delta.0 as f32, delta.1 as f32);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        if new_size.width > 0 && new_size.height > 0 {
+            self.projection.aspect = new_size.width as f32 / new_size.height as f32;
+        }
+    }
+
+    fn update(&mut self) {
+        self.camera_controller.update_camera(&mut self.camera);
+    }
+}
+
 fn main() {
     env_logger::init();
-
-    let hypercube = Hypercube::new();
 
     let event_loop = EventLoop::new().unwrap();
     let window = Arc::new(
@@ -132,7 +197,9 @@ fn main() {
             .unwrap(),
     );
 
-    let mut renderer = pollster::block_on(Renderer::new(window.clone()));
+    let window_size = window.inner_size();
+    let mut app = App::new(window_size.width, window_size.height);
+    let mut renderer = pollster::block_on(Renderer::new(window.clone(), &app.hypercube));
 
     event_loop
         .run(move |event, elwt| match event {
@@ -140,18 +207,20 @@ fn main() {
                 window_id,
                 event,
             } if window_id == renderer.window().id() => {
-                if !renderer.input(&event) {
+                if !app.input(&event) {
                     match event {
                         WindowEvent::CloseRequested => {
                             elwt.exit();
                         }
                         WindowEvent::Resized(physical_size) => {
+                            app.resize(physical_size);
                             renderer.resize(physical_size);
                         }
                         WindowEvent::RedrawRequested => {
+                            app.update();
                             // Note that this is not guaranteed to be called every frame.
                             // We should probably take a look at that later.
-                            match renderer.render() {
+                            match renderer.render(&app.camera, &app.projection) {
                                 Ok(_) => {},
                                 // Reconfigure the surface if lost
                                 Err(wgpu::SurfaceError::Lost) => renderer.resize(renderer.size),
@@ -166,7 +235,7 @@ fn main() {
                 }
             },
             Event::DeviceEvent { event, .. } => {
-                renderer.device_input(&event);
+                app.device_input(&event);
             }
             Event::AboutToWait => {
                 renderer.window().request_redraw();
@@ -189,9 +258,6 @@ struct Renderer<'a> {
     num_indices: u32,
     instance_buffer: wgpu::Buffer,
     num_instances: u32,
-    camera: Camera,
-    camera_controller: CameraController,
-    projection: Projection,
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
@@ -239,7 +305,7 @@ fn generate_instances(hypercube: &Hypercube) -> Vec<Instance> {
 }
 
 impl<'a> Renderer<'a> {
-    async fn new(window: Arc<Window>) -> Self {
+    async fn new(window: Arc<Window>, hypercube: &Hypercube) -> Self {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -286,24 +352,7 @@ impl<'a> Renderer<'a> {
 
         surface.configure(&device, &config);
 
-        let mut camera = Camera {
-            eye: Point3::new(0.0, 0.0, 15.0),
-            target: Point3::new(0.0, 0.0, 0.0),
-            up: Vector3::new(0.0, 1.0, 0.0),
-        };
-        
-        let mut camera_controller = CameraController::new(15.0);
-        camera_controller.update_camera(&mut camera);
-
-        let projection = Projection {
-            aspect: config.width as f32 / config.height as f32,
-            fovy: 45.0,
-            znear: 0.1,
-            zfar: 100.0,
-        };
-
         let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update_view_proj(&camera, &projection);
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
@@ -417,9 +466,8 @@ impl<'a> Renderer<'a> {
 
         let num_indices = INDICES.len() as u32;
 
-        // Create hypercube and generate instances
-        let hypercube = Hypercube::new();
-        let instances = generate_instances(&hypercube);
+        // Generate instances from the provided hypercube
+        let instances = generate_instances(hypercube);
         let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
         let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Instance Buffer"),
@@ -441,9 +489,6 @@ impl<'a> Renderer<'a> {
             num_indices,
             instance_buffer,
             num_instances,
-            camera,
-            camera_controller,
-            projection,
             camera_uniform,
             camera_buffer,
             camera_bind_group,
@@ -454,39 +499,17 @@ impl<'a> Renderer<'a> {
         &self.window
     }
 
-    pub fn input(&mut self, event: &WindowEvent) -> bool {
-        match event {
-            WindowEvent::MouseInput { button, state, .. } => {
-                self.camera_controller.process_mouse_input(*button, *state);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    pub fn device_input(&mut self, event: &DeviceEvent) -> bool {
-        match event {
-            DeviceEvent::MouseMotion { delta } => {
-                self.camera_controller.process_mouse_motion(delta.0 as f32, delta.1 as f32);
-                true
-            }
-            _ => false,
-        }
-    }
-
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-            self.projection.aspect = self.config.width as f32 / self.config.height as f32;
         }
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        self.camera_controller.update_camera(&mut self.camera);
-        self.camera_uniform.update_view_proj(&self.camera, &self.projection);
+    fn render(&mut self, camera: &Camera, projection: &Projection) -> Result<(), wgpu::SurfaceError> {
+        self.camera_uniform.update_view_proj(camera, projection);
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
 
         let output = self.surface.get_current_texture()?;
