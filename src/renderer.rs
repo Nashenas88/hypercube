@@ -17,8 +17,6 @@ use crate::math::generate_instances;
 /// Manages all graphics resources including buffers, textures, pipelines, and rendering state.
 /// Uses instanced rendering to efficiently draw all 216 hypercube stickers.
 pub(crate) struct Renderer<'a> {
-    /// Reference to the window for surface operations
-    window: Arc<Window>,
     /// wgpu surface for presenting rendered frames
     surface: wgpu::Surface<'a>,
     /// GPU device for creating resources
@@ -109,7 +107,7 @@ impl<'a> Renderer<'a> {
     pub(crate) async fn new(window: Arc<Window>, hypercube: &Hypercube) -> Self {
         let size = window.inner_size();
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
@@ -131,8 +129,9 @@ impl<'a> Renderer<'a> {
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::default(),
                     label: None,
+                    memory_hints: wgpu::MemoryHints::default(),
+                    trace: wgpu::Trace::Off,
                 },
-                None,
             )
             .await
             .unwrap();
@@ -217,11 +216,12 @@ impl<'a> Renderer<'a> {
         });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            cache: None,
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[
                     wgpu::VertexBufferLayout {
@@ -244,7 +244,7 @@ impl<'a> Renderer<'a> {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
@@ -301,7 +301,6 @@ impl<'a> Renderer<'a> {
         let num_instances = instances.len() as u32;
 
         Self {
-            window,
             surface,
             device,
             queue,
@@ -321,13 +320,6 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    /// Returns a reference to the window being rendered to.
-    /// 
-    /// # Returns
-    /// Reference to the window for event handling and queries
-    pub(crate) fn window(&self) -> &Window {
-        &self.window
-    }
 
     /// Handles window resize events by updating surface and depth buffer.
     /// 
@@ -413,6 +405,7 @@ impl<'a> Renderer<'a> {
                         }),
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
