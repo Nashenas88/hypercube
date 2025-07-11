@@ -1,9 +1,9 @@
 //! Main application state and logic for the 4D hypercube visualization.
-//! 
+//!
 //! This module coordinates all application components including the hypercube state,
 //! camera system, input handling, and 4D rotation processing.
 
-use winit::event::{WindowEvent, DeviceEvent};
+use winit::event::{DeviceEvent, WindowEvent};
 use winit::keyboard::ModifiersState;
 
 use crate::camera::{Camera, CameraController, Projection};
@@ -15,7 +15,7 @@ use crate::math::process_4d_rotation;
 const PROJECTION_FOVY: f32 = 45.0;
 
 /// Main application state containing all components for hypercube visualization.
-/// 
+///
 /// Coordinates the hypercube data, camera system, input handling, and 4D transformations
 /// to provide an interactive 4D Rubik's cube experience.
 pub(crate) struct App {
@@ -35,21 +35,21 @@ pub(crate) struct App {
 
 impl App {
     /// Creates a new application with default initial state.
-    /// 
+    ///
     /// Sets up the hypercube, camera, and projection based on window dimensions.
-    /// 
+    ///
     /// # Arguments
     /// * `window_width` - Initial window width in pixels
     /// * `window_height` - Initial window height in pixels
     pub(crate) fn new(window_width: u32, window_height: u32) -> Self {
         let hypercube = Hypercube::new();
-        
+
         let mut camera = Camera {
             eye: nalgebra::Point3::new(0.0, 0.0, 15.0),
             target: nalgebra::Point3::new(0.0, 0.0, 0.0),
             up: nalgebra::Vector3::new(0.0, 1.0, 0.0),
         };
-        
+
         let camera_controller = CameraController::new(15.0);
         camera_controller.update_camera(&mut camera);
 
@@ -71,7 +71,7 @@ impl App {
     }
 
     /// Handles window resize events by updating projection aspect ratio.
-    /// 
+    ///
     /// # Arguments
     /// * `new_size` - New window dimensions in pixels
     pub(crate) fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -81,7 +81,7 @@ impl App {
     }
 
     /// Updates the application state for the current frame.
-    /// 
+    ///
     /// Currently updates the camera position based on controller state.
     pub(crate) fn update(&mut self) {
         self.camera_controller.update_camera(&mut self.camera);
@@ -90,12 +90,12 @@ impl App {
 
 impl InputHandler for App {
     /// Handles window-level input events like mouse clicks and scrolling.
-    /// 
+    ///
     /// Processes mouse input for camera control and updates internal input state.
-    /// 
+    ///
     /// # Arguments
     /// * `event` - The window event to process
-    /// 
+    ///
     /// # Returns
     /// `true` if the event was handled, `false` otherwise
     fn handle_window_event(&mut self, event: &WindowEvent) -> bool {
@@ -118,14 +118,14 @@ impl InputHandler for App {
     }
 
     /// Handles device-level input events like mouse movement.
-    /// 
+    ///
     /// Processes mouse motion for either camera rotation or 4D hypercube rotation
     /// based on modifier key state.
-    /// 
+    ///
     /// # Arguments
     /// * `event` - The device event to process
     /// * `modifiers` - Current modifier key state (Shift, Ctrl, etc.)
-    /// 
+    ///
     /// # Returns
     /// `true` if the event was handled, `false` otherwise
     fn handle_device_event(&mut self, event: &DeviceEvent, modifiers: &ModifiersState) -> bool {
@@ -133,9 +133,11 @@ impl InputHandler for App {
             DeviceEvent::MouseMotion { delta } => {
                 if self.input_state.is_right_mouse_pressed {
                     if modifiers.shift_key() {
-                        self.rotation_4d = process_4d_rotation(&self.rotation_4d, delta.0 as f32, delta.1 as f32);
+                        self.rotation_4d =
+                            process_4d_rotation(&self.rotation_4d, delta.0 as f32, delta.1 as f32);
                     } else {
-                        self.camera_controller.process_mouse_motion(delta.0 as f32, delta.1 as f32);
+                        self.camera_controller
+                            .process_mouse_motion(delta.0 as f32, delta.1 as f32);
                     }
                 }
                 true

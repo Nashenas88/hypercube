@@ -1,19 +1,19 @@
 //! GPU rendering system for the 4D hypercube visualization.
-//! 
+//!
 //! This module handles all graphics rendering using wgpu, including GPU resource management,
 //! render pipeline setup, and per-frame rendering of the hypercube instances.
 
+use nalgebra::Vector3;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
-use nalgebra::Vector3;
 
-use crate::camera::{Camera, Projection, CameraUniform};
-use crate::cube::{Hypercube, VERTICES, INDICES};
+use crate::camera::{Camera, CameraUniform, Projection};
+use crate::cube::{Hypercube, INDICES, VERTICES};
 use crate::math::generate_instances;
 
 /// GPU renderer for the hypercube visualization.
-/// 
+///
 /// Manages all graphics resources including buffers, textures, pipelines, and rendering state.
 /// Uses instanced rendering to efficiently draw all 216 hypercube stickers.
 pub(crate) struct Renderer<'a> {
@@ -52,7 +52,7 @@ pub(crate) struct Renderer<'a> {
 }
 
 /// GPU-compatible instance data for rendering individual cubes.
-/// 
+///
 /// Contains transformation matrix and color data that gets uploaded to the GPU
 /// for instanced rendering of hypercube stickers.
 #[repr(C)]
@@ -65,7 +65,7 @@ pub(crate) struct InstanceRaw {
 }
 
 /// CPU-side instance data for a single hypercube sticker.
-/// 
+///
 /// Contains position and color information that gets converted to GPU format.
 pub(crate) struct Instance {
     /// 3D position of the sticker after 4D projection
@@ -76,9 +76,9 @@ pub(crate) struct Instance {
 
 impl Instance {
     /// Converts CPU instance data to GPU-compatible format.
-    /// 
+    ///
     /// Creates transformation matrix and formats color data for upload to GPU.
-    /// 
+    ///
     /// # Returns
     /// GPU-compatible instance data ready for rendering
     pub(crate) fn to_raw(&self) -> InstanceRaw {
@@ -94,14 +94,14 @@ impl Instance {
 
 impl<'a> Renderer<'a> {
     /// Creates a new renderer with initialized GPU resources.
-    /// 
+    ///
     /// Sets up the complete rendering pipeline including device, surface, buffers,
     /// and render pipeline for hypercube visualization.
-    /// 
+    ///
     /// # Arguments
     /// * `window` - Window to render into
     /// * `hypercube` - Initial hypercube data for setting up instance buffer
-    /// 
+    ///
     /// # Returns
     /// A fully initialized renderer ready for frame rendering
     pub(crate) async fn new(window: Arc<Window>, hypercube: &Hypercube) -> Self {
@@ -124,15 +124,13 @@ impl<'a> Renderer<'a> {
             .unwrap();
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    label: None,
-                    memory_hints: wgpu::MemoryHints::default(),
-                    trace: wgpu::Trace::Off,
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                label: None,
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+            })
             .await
             .unwrap();
 
@@ -177,9 +175,9 @@ impl<'a> Renderer<'a> {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
@@ -188,19 +186,16 @@ impl<'a> Renderer<'a> {
                         min_binding_size: None,
                     },
                     count: None,
-                }
-            ],
-            label: Some("Camera Bind Group Layout"),
-        });
+                }],
+                label: Some("Camera Bind Group Layout"),
+            });
 
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                }
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
             label: Some("Camera Bind Group"),
         });
 
@@ -209,11 +204,12 @@ impl<'a> Renderer<'a> {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&camera_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             cache: None,
@@ -234,12 +230,12 @@ impl<'a> Renderer<'a> {
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &wgpu::vertex_attr_array![
                             1 => Float32x4,
-                            2 => Float32x4, 
+                            2 => Float32x4,
                             3 => Float32x4,
                             4 => Float32x4,
                             5 => Float32x4,
                         ],
-                    }
+                    },
                 ],
             },
             fragment: Some(wgpu::FragmentState {
@@ -320,12 +316,11 @@ impl<'a> Renderer<'a> {
         }
     }
 
-
     /// Handles window resize events by updating surface and depth buffer.
-    /// 
+    ///
     /// Recreates size-dependent resources like the depth texture when the window
     /// size changes.
-    /// 
+    ///
     /// # Arguments
     /// * `new_size` - New window dimensions in pixels
     pub(crate) fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -334,7 +329,7 @@ impl<'a> Renderer<'a> {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-            
+
             self.depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Depth Texture"),
                 size: wgpu::Extent3d {
@@ -346,39 +341,58 @@ impl<'a> Renderer<'a> {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            
-            self.depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            self.depth_view = self
+                .depth_texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
         }
     }
 
     /// Updates the instance buffer with current hypercube state.
-    /// 
+    ///
     /// Regenerates all instance data based on current 4D rotation and uploads
     /// to GPU for the next frame.
-    /// 
+    ///
     /// # Arguments
     /// * `hypercube` - Current hypercube state
     /// * `rotation_4d` - Current 4D rotation matrix
-    pub(crate) fn update_instances(&mut self, hypercube: &Hypercube, rotation_4d: &nalgebra::Matrix4<f32>) {
+    pub(crate) fn update_instances(
+        &mut self,
+        hypercube: &Hypercube,
+        rotation_4d: &nalgebra::Matrix4<f32>,
+    ) {
         let instances = generate_instances(hypercube, rotation_4d);
         let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-        self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instance_data));
+        self.queue.write_buffer(
+            &self.instance_buffer,
+            0,
+            bytemuck::cast_slice(&instance_data),
+        );
     }
 
     /// Renders a single frame of the hypercube visualization.
-    /// 
+    ///
     /// Updates camera uniforms, acquires surface texture, and draws all instances
     /// with proper depth testing.
-    /// 
+    ///
     /// # Arguments
     /// * `camera` - Current camera state for view matrix
     /// * `projection` - Current projection parameters
-    pub(crate) fn render(&mut self, camera: &Camera, projection: &Projection) -> Result<(), wgpu::SurfaceError> {
+    pub(crate) fn render(
+        &mut self,
+        camera: &Camera,
+        projection: &Projection,
+    ) -> Result<(), wgpu::SurfaceError> {
         self.camera_uniform.update_view_proj(camera, projection);
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
 
         let output = self.surface.get_current_texture()?;
         let view = output
