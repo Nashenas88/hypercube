@@ -97,7 +97,7 @@ impl Side {
 ///
 /// Consists of 8 cubic sides arranged in 4D space, representing a 4D Rubik's cube.
 /// Each side is a 3x3x3 arrangement of colored stickers.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Hypercube {
     /// The 8 cubic sides that make up the tesseract
     pub(crate) sides: Vec<Side>,

@@ -3,8 +3,8 @@
 //! This module provides an orbital camera system that allows users to rotate around
 //! the hypercube origin and zoom in/out for better viewing angles.
 
+use iced::mouse;
 use nalgebra::{Matrix4, Point3, Vector3};
-use winit::event::{ElementState, MouseButton};
 
 /// Mouse rotation sensitivity for camera controls
 const MOUSE_SENSITIVITY: f32 = 0.5;
@@ -18,6 +18,7 @@ const MAX_DISTANCE: f32 = 50.0;
 /// 3D camera representing the viewer's position and orientation in space.
 ///
 /// Uses a standard look-at camera model with eye position, target point, and up vector.
+#[derive(Debug, Clone)]
 pub(crate) struct Camera {
     /// Camera position in 3D space
     pub(crate) eye: Point3<f32>,
@@ -91,8 +92,14 @@ impl CameraController {
     /// # Arguments
     /// * `button` - The mouse button that was pressed/released
     /// * `state` - Whether the button was pressed or released
-    pub(crate) fn process_mouse_input(&mut self, button: MouseButton, state: ElementState) {
-        if button == MouseButton::Right && state == ElementState::Released {
+    pub(crate) fn process_mouse_press(&mut self, button: mouse::Button) {
+        if button == mouse::Button::Right {
+            self.last_mouse_pos = None;
+        }
+    }
+
+    pub(crate) fn process_mouse_release(&mut self, button: mouse::Button) {
+        if button == mouse::Button::Right {
             self.last_mouse_pos = None;
         }
     }
@@ -126,6 +133,7 @@ impl CameraController {
 /// 3D perspective projection parameters for rendering.
 ///
 /// Defines the viewing frustum and field of view for the camera.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Projection {
     /// Aspect ratio (width/height) of the viewport
     pub(crate) aspect: f32,
@@ -153,7 +161,7 @@ impl Projection {
 ///
 /// Contains the combined view-projection matrix for vertex shader transformation.
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct CameraUniform {
     /// Combined view-projection matrix as 4x4 array
     pub(crate) view_proj: [[f32; 4]; 4],
