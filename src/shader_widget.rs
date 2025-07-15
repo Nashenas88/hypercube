@@ -36,7 +36,6 @@ impl shader::Primitive for HypercubePrimitive {
         if !storage.has::<Renderer>() {
             let renderer = pollster::block_on(Renderer::new(
                 device,
-                queue,
                 format,
                 *bounds,
                 viewport.physical_size(),
@@ -45,7 +44,7 @@ impl shader::Primitive for HypercubePrimitive {
             storage.store(renderer);
         }
         let renderer = storage.get_mut::<Renderer>().unwrap();
-        renderer.resize(device, queue, *bounds, viewport.physical_size());
+        renderer.resize(device, *bounds, viewport.physical_size());
         renderer.update_instances_compute(device, queue, &self.rotation_4d);
         renderer.update_camera(queue, &self.camera, &self.projection);
     }

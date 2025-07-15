@@ -48,12 +48,6 @@ pub(crate) struct Renderer {
     clear_vertex_buffer: wgpu::Buffer,
     /// Clear quad index buffer
     clear_index_buffer: wgpu::Buffer,
-    /// Clear texture for rendering black quad
-    clear_texture: wgpu::Texture,
-    /// Clear texture view
-    clear_texture_view: wgpu::TextureView,
-    /// Clear texture bind group
-    clear_bind_group: wgpu::BindGroup,
     /// Compute pipeline for 4D transformations
     compute_pipeline: wgpu::ComputePipeline,
     /// Output buffer for compute shader (processed instance data)
@@ -138,7 +132,6 @@ impl Renderer {
     /// A fully initialized renderer ready for frame rendering
     pub(crate) async fn new(
         device: &Device,
-        queue: &Queue,
         format: TextureFormat,
         bounds: Rectangle<f32>,
         viewport_size: Size<u32>,
@@ -309,96 +302,6 @@ impl Renderer {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // Create black texture
-        let clear_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Clear Texture"),
-            size: wgpu::Extent3d {
-                width: bounds.width as u32,
-                height: bounds.height as u32,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        let clear_texture_view = clear_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Create black texture data
-        let texture_size = (bounds.width as u32 * bounds.height as u32 * 4) as usize;
-        let black_data = vec![0u8; texture_size];
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &clear_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &black_data,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(bounds.width as u32 * 4),
-                rows_per_image: Some(bounds.height as u32),
-            },
-            wgpu::Extent3d {
-                width: bounds.width as u32,
-                height: bounds.height as u32,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        // Create texture bind group layout and bind group
-        let clear_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-                label: Some("Clear Bind Group Layout"),
-            });
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
-        let clear_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &clear_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&clear_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-            label: Some("Clear Bind Group"),
-        });
-
         // Create clear shader
         let clear_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Clear Shader"),
@@ -409,7 +312,7 @@ impl Renderer {
         let clear_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Clear Pipeline Layout"),
-                bind_group_layouts: &[&clear_bind_group_layout],
+                bind_group_layouts: &[],
                 push_constant_ranges: &[],
             });
 
@@ -580,9 +483,6 @@ impl Renderer {
             clear_pipeline,
             clear_vertex_buffer,
             clear_index_buffer,
-            clear_texture,
-            clear_texture_view,
-            clear_bind_group,
             compute_pipeline,
             compute_output_buffer,
             transform_buffer,
@@ -600,104 +500,11 @@ impl Renderer {
     pub(crate) fn resize(
         &mut self,
         device: &Device,
-        queue: &Queue,
         new_bounds: Rectangle<f32>,
         new_size: Size<u32>,
     ) {
         if new_bounds != self.bounds && new_bounds.width > 0.0 && new_bounds.height > 0.0 {
             self.bounds = new_bounds;
-
-            // Recreate clear texture with new bounds size
-            self.clear_texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Clear Texture"),
-                size: wgpu::Extent3d {
-                    width: new_bounds.width as u32,
-                    height: new_bounds.height as u32,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.clear_texture.format(),
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-
-            self.clear_texture_view = self
-                .clear_texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
-
-            // Update clear texture with black data
-            let texture_size = (new_bounds.width as u32 * new_bounds.height as u32 * 4) as usize;
-            let black_data = vec![0u8; texture_size];
-            queue.write_texture(
-                wgpu::ImageCopyTexture {
-                    texture: &self.clear_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &black_data,
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(new_bounds.width as u32 * 4),
-                    rows_per_image: Some(new_bounds.height as u32),
-                },
-                wgpu::Extent3d {
-                    width: new_bounds.width as u32,
-                    height: new_bounds.height as u32,
-                    depth_or_array_layers: 1,
-                },
-            );
-
-            // Update bind group
-            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                address_mode_u: wgpu::AddressMode::ClampToEdge,
-                address_mode_v: wgpu::AddressMode::ClampToEdge,
-                address_mode_w: wgpu::AddressMode::ClampToEdge,
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Nearest,
-                mipmap_filter: wgpu::FilterMode::Nearest,
-                ..Default::default()
-            });
-
-            let clear_bind_group_layout =
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                multisampled: false,
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                    ],
-                    label: Some("Clear Bind Group Layout"),
-                });
-
-            self.clear_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                layout: &clear_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&self.clear_texture_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
-                    },
-                ],
-                label: Some("Clear Bind Group"),
-            });
         }
 
         if new_size.width > 0
@@ -835,7 +642,6 @@ impl Renderer {
                 1.0,
             );
             clear_pass.set_pipeline(&self.clear_pipeline);
-            clear_pass.set_bind_group(0, &self.clear_bind_group, &[]);
             clear_pass.set_vertex_buffer(0, self.clear_vertex_buffer.slice(..));
             clear_pass
                 .set_index_buffer(self.clear_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
