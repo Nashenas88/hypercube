@@ -8,7 +8,6 @@ use nalgebra::Matrix4;
 /// Mouse sensitivity for 4D rotation controls
 const MOUSE_SENSITIVITY: f32 = 0.5;
 
-
 /// Creates a 4D rotation matrix around the XW plane.
 ///
 /// This rotation affects the X and W coordinates while leaving Y and Z unchanged.
@@ -67,4 +66,3 @@ pub(crate) fn process_4d_rotation(
 
     rotation_yw * rotation_xw * current_rotation
 }
-

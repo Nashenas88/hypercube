@@ -49,7 +49,12 @@ impl shader::Primitive for HypercubePrimitive {
         }
         let renderer = storage.get_mut::<Renderer>().unwrap();
         renderer.resize(device, *bounds, viewport.physical_size());
-        renderer.update_instances(queue, &self.rotation_4d, self.sticker_scale, self.face_scale);
+        renderer.update_instances(
+            queue,
+            &self.rotation_4d,
+            self.sticker_scale,
+            self.face_scale,
+        );
         renderer.update_camera(queue, &self.camera, &self.projection);
     }
 

@@ -559,7 +559,13 @@ impl Renderer {
     /// * `rotation_4d` - Current 4D rotation matrix
     /// * `sticker_scale` - Scale factor for individual stickers (from sticker scale slider)
     /// * `face_scale` - Scale factor for face spacing (from face scale slider)
-    pub(crate) fn update_instances(&mut self, queue: &Queue, rotation_4d: &nalgebra::Matrix4<f32>, sticker_scale: f32, face_scale: f32) {
+    pub(crate) fn update_instances(
+        &mut self,
+        queue: &Queue,
+        rotation_4d: &nalgebra::Matrix4<f32>,
+        sticker_scale: f32,
+        face_scale: f32,
+    ) {
         // Update transform uniform
         let transform_data = Transform4D {
             rotation_matrix: (*rotation_4d).into(),
