@@ -164,7 +164,7 @@ impl From<Color> for Vector4<f32> {
         match color {
             Color::White => Vector4::new(1.0, 1.0, 1.0, 1.0),
             Color::Yellow => Vector4::new(1.0, 1.0, 0.0, 1.0),
-            Color::Blue => Vector4::new(0.0, 0.0, 1.0, 1.0),
+            Color::Blue => Vector4::new(0.1, 0.1, 1.0, 1.0),
             Color::Green => Vector4::new(0.0, 1.0, 0.0, 1.0),
             Color::Red => Vector4::new(1.0, 0.0, 0.0, 1.0),
             Color::Orange => Vector4::new(1.0, 0.5, 0.0, 1.0),
