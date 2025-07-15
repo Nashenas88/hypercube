@@ -79,6 +79,8 @@ pub(crate) struct StickerInput {
     position_4d: [f32; 4],
     /// RGBA color of the sticker
     color: [f32; 4],
+    /// 4D position of the face center this sticker belongs to
+    face_center_4d: [f32; 4],
 }
 
 /// Transform data passed to compute shader
@@ -101,8 +103,8 @@ pub(crate) struct Transform4D {
 pub(crate) fn generate_sticker_inputs(hypercube: &Hypercube) -> Vec<StickerInput> {
     let mut inputs = Vec::new();
 
-    for side in &hypercube.sides {
-        for sticker in &side.stickers {
+    for face in &hypercube.faces {
+        for sticker in &face.stickers {
             inputs.push(StickerInput {
                 position_4d: [
                     sticker.position.x,
@@ -111,6 +113,7 @@ pub(crate) fn generate_sticker_inputs(hypercube: &Hypercube) -> Vec<StickerInput
                     sticker.position.w,
                 ],
                 color: nalgebra::Vector4::from(sticker.color).into(),
+                face_center_4d: [face.center.x, face.center.y, face.center.z, face.center.w],
             });
         }
     }

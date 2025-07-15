@@ -35,18 +35,20 @@ pub(crate) struct Sticker {
     pub(crate) position: Vector4<f32>,
 }
 
-/// One 3D side of the 4D hypercube.
+/// One 3D face of the 4D hypercube.
 ///
-/// Each side is a 3x3x3 arrangement of stickers, representing one of the 8 cubic
+/// Each face is a 3x3x3 arrangement of stickers, representing one of the 8 cubic
 /// cells that make up the tesseract (4D hypercube).
 #[derive(Clone, Debug)]
-pub(crate) struct Side {
+pub(crate) struct Face {
     /// Collection of 27 stickers arranged in a 3x3x3 cube
     pub(crate) stickers: Vec<Sticker>,
+    /// 4D center position of this face
+    pub(crate) center: Vector4<f32>,
 }
 
-impl Side {
-    /// Creates a new 3D side with all stickers of the same color.
+impl Face {
+    /// Creates a new 3D face with all stickers of the same color.
     ///
     /// Generates a 3x3x3 grid of stickers positioned using authentic tesseract geometry.
     /// Uses the coordinate pattern {-2/3, 0, +2/3} for the free dimensions.
@@ -89,18 +91,21 @@ impl Side {
                 }
             }
         }
-        Self { stickers }
+        Self {
+            stickers,
+            center: face_center,
+        }
     }
 }
 
 /// The complete 4D hypercube (tesseract) structure.
 ///
-/// Consists of 8 cubic sides arranged in 4D space, representing a 4D Rubik's cube.
-/// Each side is a 3x3x3 arrangement of colored stickers.
+/// Consists of 8 cubic faces arranged in 4D space, representing a 4D Rubik's cube.
+/// Each face is a 3x3x3 arrangement of colored stickers.
 #[derive(Debug, Clone)]
 pub(crate) struct Hypercube {
-    /// The 8 cubic sides that make up the tesseract
-    pub(crate) sides: Vec<Side>,
+    /// The 8 cubic faces that make up the tesseract
+    pub(crate) faces: Vec<Face>,
 }
 
 impl Hypercube {
@@ -137,13 +142,13 @@ impl Hypercube {
             (Vector4::new(0.0, 0.0, 0.0, 1.0), 3),  // Face 7: W = +1 (fixed_dim = 3)
         ];
 
-        let sides = colors
+        let faces = colors
             .iter()
             .zip(face_data.iter())
-            .map(|(&color, &(face_center, fixed_dim))| Side::new(color, face_center, fixed_dim))
+            .map(|(&color, &(face_center, fixed_dim))| Face::new(color, face_center, fixed_dim))
             .collect();
 
-        Self { sides }
+        Self { faces }
     }
 }
 

@@ -11,6 +11,7 @@ struct Transform4D {
 struct StickerInput {
     position_4d: vec4<f32>,
     color: vec4<f32>,
+    face_center_4d: vec4<f32>,
 }
 
 struct InstanceOutput {
@@ -83,8 +84,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     let sticker = input_stickers[index];
     
+    // Get sticker offset from its face center
+    let sticker_offset_4d = sticker.position_4d - sticker.face_center_4d;
+    
+    // Scale face centers and sticker details separately
+    let scaled_face_center = sticker.face_center_4d * transform.face_spacing;
+    let scaled_sticker_offset = sticker_offset_4d * transform.sticker_spacing;
+    let final_position_4d = scaled_face_center + scaled_sticker_offset;
+    
     // Apply 4D rotation
-    let rotated_4d = transform.rotation_matrix * (sticker.position_4d * transform.sticker_spacing);
+    let rotated_4d = transform.rotation_matrix * final_position_4d;
     
     // Project to 3D
     let projected_3d = project_4d_to_3d(rotated_4d, transform.viewer_distance);
