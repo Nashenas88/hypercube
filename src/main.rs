@@ -66,7 +66,7 @@ impl HypercubeApp {
                     .spacing(5)
                     .push(iced::widget::text("Sticker Scale"))
                     .push(
-                        Slider::new(0.1..=1.0, self.sticker_scale, Message::StickerScaleChanged)
+                        Slider::new(0.1..=5.0, self.sticker_scale, Message::StickerScaleChanged)
                             .step(0.01)
                             .width(250),
                     ),
@@ -76,7 +76,7 @@ impl HypercubeApp {
                     .spacing(5)
                     .push(iced::widget::text("Face Scale"))
                     .push(
-                        Slider::new(0.1..=1.0, self.face_scale, Message::FaceScaleChanged)
+                        Slider::new(0.1..=5.0, self.face_scale, Message::FaceScaleChanged)
                             .step(0.01)
                             .width(250),
                     ),

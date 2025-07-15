@@ -136,6 +136,8 @@ impl Renderer {
         bounds: Rectangle<f32>,
         viewport_size: Size<u32>,
         hypercube: &Hypercube,
+        sticker_scale: f32,
+        face_scale: f32,
     ) -> Self {
         let camera_uniform = CameraUniform::new();
 
@@ -380,12 +382,12 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // Create transform uniform buffer
+        // Create transform uniform buffer with initial slider values
         let transform_data = Transform4D {
             rotation_matrix: nalgebra::Matrix4::identity().into(),
             viewer_distance: 3.0,
-            sticker_spacing: 1.2,
-            face_spacing: 1.0,
+            sticker_spacing: sticker_scale,
+            face_spacing: face_scale,
             _padding: 0.0,
         };
         let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -553,16 +555,17 @@ impl Renderer {
     /// Runs the 4D transformation compute shader and copies the result to the instance buffer.
     ///
     /// # Arguments
-    /// * `device` - GPU device for creating command encoder
     /// * `queue` - GPU queue for submitting commands
     /// * `rotation_4d` - Current 4D rotation matrix
-    pub(crate) fn update_instances(&mut self, queue: &Queue, rotation_4d: &nalgebra::Matrix4<f32>) {
+    /// * `sticker_scale` - Scale factor for individual stickers (from sticker scale slider)
+    /// * `face_scale` - Scale factor for face spacing (from face scale slider)
+    pub(crate) fn update_instances(&mut self, queue: &Queue, rotation_4d: &nalgebra::Matrix4<f32>, sticker_scale: f32, face_scale: f32) {
         // Update transform uniform
         let transform_data = Transform4D {
             rotation_matrix: (*rotation_4d).into(),
             viewer_distance: 3.0,
-            sticker_spacing: 1.2,
-            face_spacing: 1.0,
+            sticker_spacing: sticker_scale,
+            face_spacing: face_scale,
             _padding: 0.0,
         };
         queue.write_buffer(

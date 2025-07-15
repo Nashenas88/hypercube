@@ -21,6 +21,8 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) camera: Camera,
     pub(crate) projection: Projection,
     pub(crate) rotation_4d: Matrix4<f32>,
+    pub(crate) sticker_scale: f32,
+    pub(crate) face_scale: f32,
 }
 
 impl shader::Primitive for HypercubePrimitive {
@@ -40,12 +42,14 @@ impl shader::Primitive for HypercubePrimitive {
                 *bounds,
                 viewport.physical_size(),
                 &self.hypercube,
+                self.sticker_scale,
+                self.face_scale,
             ));
             storage.store(renderer);
         }
         let renderer = storage.get_mut::<Renderer>().unwrap();
         renderer.resize(device, *bounds, viewport.physical_size());
-        renderer.update_instances(queue, &self.rotation_4d);
+        renderer.update_instances(queue, &self.rotation_4d, self.sticker_scale, self.face_scale);
         renderer.update_camera(queue, &self.camera, &self.projection);
     }
 
@@ -76,16 +80,16 @@ pub(crate) struct HypercubeShaderState {
 
 /// The shader program that handles 4D hypercube rendering
 pub(crate) struct HypercubeShaderProgram {
-    _sticker_scale: f32,
-    _face_scale: f32,
+    sticker_scale: f32,
+    face_scale: f32,
 }
 
 impl HypercubeShaderProgram {
     /// Create a new shader program with the given parameters
     pub(crate) fn new(sticker_scale: f32, face_scale: f32) -> Self {
         Self {
-            _sticker_scale: sticker_scale,
-            _face_scale: face_scale,
+            sticker_scale,
+            face_scale,
         }
     }
 }
@@ -134,6 +138,8 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             camera: state.camera.clone(),
             projection: state.projection,
             rotation_4d: state.rotation_4d,
+            sticker_scale: self.sticker_scale,
+            face_scale: self.face_scale,
         }
     }
 }
