@@ -45,7 +45,7 @@ impl shader::Primitive for HypercubePrimitive {
         }
         let renderer = storage.get_mut::<Renderer>().unwrap();
         renderer.resize(device, *bounds, viewport.physical_size());
-        renderer.update_instances_compute(device, queue, &self.rotation_4d);
+        renderer.update_instances(queue, &self.rotation_4d);
         renderer.update_camera(queue, &self.camera, &self.projection);
     }
 
@@ -57,6 +57,7 @@ impl shader::Primitive for HypercubePrimitive {
         _clip_bounds: &Rectangle<u32>,
     ) {
         let renderer = storage.get::<Renderer>().unwrap();
+        renderer.compute_instances(encoder);
         renderer.render(encoder, target);
     }
 }

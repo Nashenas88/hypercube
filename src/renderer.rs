@@ -556,12 +556,7 @@ impl Renderer {
     /// * `device` - GPU device for creating command encoder
     /// * `queue` - GPU queue for submitting commands
     /// * `rotation_4d` - Current 4D rotation matrix
-    pub(crate) fn update_instances_compute(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-        rotation_4d: &nalgebra::Matrix4<f32>,
-    ) {
+    pub(crate) fn update_instances(&mut self, queue: &Queue, rotation_4d: &nalgebra::Matrix4<f32>) {
         // Update transform uniform
         let transform_data = Transform4D {
             rotation_matrix: (*rotation_4d).into(),
@@ -575,12 +570,10 @@ impl Renderer {
             0,
             bytemuck::cast_slice(&[transform_data]),
         );
+    }
 
+    pub(crate) fn compute_instances(&self, encoder: &mut CommandEncoder) {
         // Run compute shader
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Compute Encoder"),
-        });
-
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Compute Pass"),
@@ -603,8 +596,6 @@ impl Renderer {
             0,
             (self.num_instances as usize * std::mem::size_of::<InstanceRaw>()) as u64,
         );
-
-        queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Renders a single frame of the hypercube visualization.
