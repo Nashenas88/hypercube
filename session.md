@@ -48,6 +48,14 @@ This session focused on establishing the foundational requirements and initial t
 17. **GPU Compute:** All 4D transformations and projections performed efficiently on GPU.
 18. **Dynamic Updates:** Real-time compute shader updates for smooth 4D transformations.
 
+### Lighting System:
+19. **Directional Lighting:** Sun-like directional light from upper right with warm color temperature.
+20. **Phong Lighting Model:** Ambient, diffuse, and specular lighting components for realistic shading.
+21. **Normal Calculation:** Normals computed from actual projected vertices in compute shader.
+22. **Multiple Rendering Pipelines:** Separate pipelines for standard lighting, normal visualization, and depth visualization.
+23. **Integrated Vertex Structure:** Normals now stored directly in vertex data for consistent access across all shaders.
+24. **Ongoing Challenge:** Normal orientation consistency across 4D transformations remains problematic.
+
 ## Architecture:
 
 *   **App Struct:** Contains all application state including hypercube data, camera controller, 4D rotation matrix, and input state.
@@ -63,6 +71,8 @@ This session focused on establishing the foundational requirements and initial t
 *   **Visual Depth Cues:** Depth testing ensures correct visual ordering of sticker cubes.
 *   **Enhanced Visibility:** Dark gray background with adjusted colors for better contrast.
 *   **Smooth Controls:** Responsive mouse controls with interactive UI sliders.
+*   **Debug Visualization Modes:** Real-time switching between standard lighting, normal map, and depth map views.
+*   **Optimized Rendering:** 36-vertex per cube architecture with baked-in normals for improved performance.
 
 ## Constants and Configuration:
 
@@ -82,7 +92,15 @@ This session focused on establishing the foundational requirements and initial t
 
 ## Next Steps:
 
-The foundation is now complete with proper 4D geometry and efficient GPU rendering for implementing Rubik's cube mechanics:
+The foundation is now complete with proper 4D geometry, efficient GPU rendering, and comprehensive debug visualization. The immediate priority is resolving the normal consistency issue:
+
+### Priority 1: Normal System Fixes:
+*   **Alternative Normal Calculation:** Investigate using 4D cross products or predefined face orientations
+*   **Determinant-Based Orientation:** Use matrix determinants to detect orientation flips during 4D-to-3D projection
+*   **Face-Specific Normal Correction:** Apply per-face orientation corrections based on 4D transformation analysis
+*   **Lighting Quality Verification:** Test lighting improvements after normal fixes
+
+### Priority 2: Game Mechanics:
 *   Add 4D rotation animations for cube "twists"
 *   Implement scrambling algorithms
 *   Add solving algorithms and move notation
@@ -90,3 +108,21 @@ The foundation is now complete with proper 4D geometry and efficient GPU renderi
 *   Add undo/redo functionality
 *   Implement save/load of cube states
 *   Expand UI controls for game mechanics
+
+### Debug Visualization System (IMPLEMENTED):
+*   **Multiple Rendering Modes:** Added UI dropdown to switch between Standard, Normal Map, and Depth Map visualization
+*   **Normal Map Debugging:** Successfully implemented normal vector visualization as RGB colors
+*   **Depth Map Rendering:** Added depth buffer visualization for debugging depth issues
+*   **36-Vertex Architecture:** Restructured from 8 shared vertices per cube to 36 dedicated vertices (6 faces × 6 vertices)
+*   **Baked-in Normals:** Each vertex now stores position, color, and normal directly - eliminated complex indexing
+*   **Sequential Rendering:** Removed index buffer usage, switched to direct vertex array rendering
+
+### Current Issues (IDENTIFIED):
+*   **Normal Inconsistency:** Despite implementing normal map visualization and improving calculation logic, some 4D faces still show inverted normals
+*   **4D Transformation Effects:** Normal orientation appears to be affected by 4D rotations in unpredictable ways
+*   **Root Cause:** Normal calculation method using 4D face direction may not account for all geometric edge cases during 4D-to-3D projection
+
+### Technical Achievements:
+*   **Diagnostic Success:** Normal map mode now clearly reveals the extent of the normal orientation problem
+*   **Architecture Improvement:** Cleaner vertex structure with direct normal storage
+*   **Debug Capability:** Real-time normal visualization enables systematic debugging of 4D geometry issues

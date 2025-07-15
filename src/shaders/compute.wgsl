@@ -17,6 +17,11 @@ struct StickerInput {
 struct VertexOutput {
     position: vec4<f32>,  // 4th component stores visibility flag (1.0 = visible, 0.0 = culled)
     color: vec4<f32>,
+    normal: vec4<f32>,    // Normal vector for this vertex (w component unused)
+}
+
+struct NormalOutput {
+    normal: vec4<f32>,    // 3D normal + padding
 }
 
 @group(0) @binding(0)
@@ -27,6 +32,9 @@ var<storage, read> input_stickers: array<StickerInput>;
 
 @group(0) @binding(2)
 var<storage, read_write> output_vertices: array<VertexOutput>;
+
+@group(0) @binding(3)
+var<storage, read_write> output_normals: array<NormalOutput>;
 
 // Projects a 4D point to 3D space using perspective projection
 fn project_4d_to_3d(point_4d: vec4<f32>, viewer_distance: f32) -> vec3<f32> {
@@ -114,6 +122,51 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         projected_vertices[i] = project_4d_to_3d(rotated_vertex_4d, transform.viewer_distance);
     }
     
+    // Calculate actual face normals from the projected vertices
+    // Define which vertices form each face (using first 3 vertices of each face for normal calculation)
+    var face_vertex_indices: array<array<u32, 3>, 6>;
+    face_vertex_indices[0] = array<u32, 3>(0u, 1u, 2u); // Front
+    face_vertex_indices[1] = array<u32, 3>(1u, 5u, 6u); // Right
+    face_vertex_indices[2] = array<u32, 3>(5u, 4u, 7u); // Back
+    face_vertex_indices[3] = array<u32, 3>(4u, 0u, 3u); // Left
+    face_vertex_indices[4] = array<u32, 3>(3u, 2u, 6u); // Top
+    face_vertex_indices[5] = array<u32, 3>(4u, 5u, 1u); // Bottom
+    
+    // Calculate the center of the projected cube for normal orientation check
+    var cube_center = vec3<f32>(0.0, 0.0, 0.0);
+    for (var i = 0u; i < 8u; i++) {
+        cube_center += projected_vertices[i];
+    }
+    cube_center = cube_center / 8.0;
+
+    // Calculate normals from actual projected vertices
+    var face_normals: array<vec3<f32>, 6>;
+    for (var face_3d = 0u; face_3d < 6u; face_3d++) {
+        let v0 = projected_vertices[face_vertex_indices[face_3d][0]];
+        let v1 = projected_vertices[face_vertex_indices[face_3d][1]];
+        let v2 = projected_vertices[face_vertex_indices[face_3d][2]];
+        
+        // Calculate normal using cross product
+        let edge1 = v1 - v0;
+        let edge2 = v2 - v0;
+        var normal = normalize(cross(edge1, edge2));
+        
+        // Use 4D face orientation to determine correct normal direction
+        // Calculate the 4D face normal direction before projection
+        let face_center_4d = sticker.face_center_4d;
+        let rotated_face_center_4d = transform.rotation_matrix * face_center_4d;
+        
+        // Project the 4D face normal to 3D
+        let face_normal_4d_direction = rotated_face_center_4d.xyz;
+        
+        // Ensure normal points in the same general direction as the 4D face normal
+        if (dot(normal, normalize(face_normal_4d_direction)) < 0.0) {
+            normal = -normal;
+        }
+        
+        face_normals[face_3d] = normal;
+    }
+    
     // Test if this face should be visible based on 4D orientation
     let rotated_face_center = transform.rotation_matrix * sticker.face_center_4d;
     
@@ -125,15 +178,44 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dot_product = dot(rotated_face_center, to_viewer);
     let visibility = select(0.0, 1.0, dot_product < 0.0);
     
-    // Store all 8 vertices with visibility flag
-    for (var i = 0u; i < 8u; i++) {
-        let vertex_output_index = index * 8u + i;
-        output_vertices[vertex_output_index].position = vec4<f32>(
-            projected_vertices[i].x, 
-            projected_vertices[i].y, 
-            projected_vertices[i].z, 
-            visibility
-        );
-        output_vertices[vertex_output_index].color = sticker.color;
+    // Store 36 vertices (6 faces × 6 vertices per face)
+    // Each triangle gets its own vertices with correct normals baked in
+    var vertex_output_index = index * 36u;
+    
+    // Define face triangle vertex indices (same as INDICES pattern)
+    var face_triangles: array<array<u32, 6>, 6>;
+    face_triangles[0] = array<u32, 6>(0u, 1u, 2u, 2u, 3u, 0u); // front
+    face_triangles[1] = array<u32, 6>(1u, 5u, 6u, 6u, 2u, 1u); // right
+    face_triangles[2] = array<u32, 6>(5u, 4u, 7u, 7u, 6u, 5u); // back
+    face_triangles[3] = array<u32, 6>(4u, 0u, 3u, 3u, 7u, 4u); // left
+    face_triangles[4] = array<u32, 6>(3u, 2u, 6u, 6u, 7u, 3u); // top
+    face_triangles[5] = array<u32, 6>(4u, 5u, 1u, 1u, 0u, 4u); // bottom
+    
+    // Generate vertices for each face
+    for (var face_id = 0u; face_id < 6u; face_id++) {
+        let face_normal = face_normals[face_id];
+        
+        // Generate 6 vertices for this face (2 triangles)
+        for (var vert_in_face = 0u; vert_in_face < 6u; vert_in_face++) {
+            let cube_vertex_index = face_triangles[face_id][vert_in_face];
+            let vertex_pos = projected_vertices[cube_vertex_index];
+            
+            output_vertices[vertex_output_index].position = vec4<f32>(
+                vertex_pos.x,
+                vertex_pos.y, 
+                vertex_pos.z,
+                visibility
+            );
+            output_vertices[vertex_output_index].color = sticker.color;
+            output_vertices[vertex_output_index].normal = vec4<f32>(face_normal, 0.0);
+            
+            vertex_output_index++;
+        }
+    }
+    
+    // Store 6 calculated normals for the cube faces
+    for (var face_3d = 0u; face_3d < 6u; face_3d++) {
+        let normal_output_index = index * 6u + face_3d;
+        output_normals[normal_output_index].normal = vec4<f32>(face_normals[face_3d], 0.0);
     }
 }

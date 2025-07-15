@@ -9,8 +9,9 @@ use iced::widget::shader::wgpu::{self, CommandEncoder, Device, Queue, TextureFor
 use iced::{Rectangle, Size};
 use wgpu::util::DeviceExt;
 
+use crate::{RenderMode};
 use crate::camera::{Camera, CameraUniform, Projection};
-use crate::cube::{Hypercube, INDICES};
+use crate::cube::{Hypercube, INDICES, NORMAL_INDICES};
 
 /// GPU renderer for the hypercube visualization.
 ///
@@ -20,21 +21,29 @@ use crate::cube::{Hypercube, INDICES};
 pub(crate) struct Renderer {
     /// Bounds within the viewport to render to.
     bounds: Rectangle<f32>,
-    /// Graphics pipeline for cube rendering
+    /// Graphics pipeline for standard rendering  
     render_pipeline: wgpu::RenderPipeline,
-    /// Buffer containing cube index data for all cubes
-    index_buffer: wgpu::Buffer,
-    /// Number of indices in the index buffer
-    num_indices: u32,
+    /// Graphics pipeline for normal visualization
+    normal_pipeline: wgpu::RenderPipeline,
+    /// Graphics pipeline for depth visualization
+    depth_pipeline: wgpu::RenderPipeline,
+    /// Current rendering mode
+    current_render_mode: RenderMode,
     /// Buffer containing vertex data from compute shader and used for rendering
     vertex_buffer: wgpu::Buffer,
-    /// Number of stickers (each generates 8 vertices)
+    /// Buffer containing normal data from compute shader
+    normal_buffer: wgpu::Buffer,
+    /// Number of stickers (each generates 36 vertices)
     num_stickers: usize,
     /// CPU-side camera uniform data
     camera_uniform: CameraUniform,
     /// GPU buffer containing camera matrices
     camera_buffer: wgpu::Buffer,
-    /// Bind group for camera uniform buffer
+    /// CPU-side light uniform data
+    light_uniform: LightUniform,
+    /// GPU buffer containing lighting data
+    light_buffer: wgpu::Buffer,
+    /// Bind group for camera and light uniform buffers
     camera_bind_group: wgpu::BindGroup,
     /// Depth texture for z-buffering
     depth_texture: wgpu::Texture,
@@ -56,15 +65,25 @@ pub(crate) struct Renderer {
 
 /// GPU-compatible vertex data output from compute shader.
 ///
-/// Each sticker generates 8 vertices that are already transformed and projected.
-/// Uses 4-component position for proper GPU alignment.
+/// Each sticker generates 36 vertices that are already transformed and projected.
+/// Uses 4-component vectors for proper GPU alignment.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct VertexRaw {
-    /// 3D position after 4D projection (4th component unused but needed for alignment)
+    /// 3D position after 4D projection (4th component stores visibility flag)
     position: [f32; 4],
     /// RGBA color values
     color: [f32; 4],
+    /// Normal vector (4th component unused but needed for alignment)
+    normal: [f32; 4],
+}
+
+/// GPU-compatible normal data output from compute shader.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct NormalRaw {
+    /// 3D normal vector (4th component unused but needed for alignment)
+    normal: [f32; 4],
 }
 
 /// Input data for compute shader - represents a sticker in 4D space
@@ -93,6 +112,21 @@ pub(crate) struct Transform4D {
     face_spacing: f32,
     /// Padding for alignment
     _padding: f32,
+}
+
+/// Lighting uniform data
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct LightUniform {
+    /// Direction of the light (normalized)
+    direction: [f32; 3],
+    _padding1: f32,
+    /// Color of the light
+    color: [f32; 3],
+    _padding2: f32,
+    /// Ambient light color
+    ambient: [f32; 3],
+    _padding3: f32,
 }
 
 /// Generates input data for the compute shader from hypercube stickers
@@ -137,8 +171,20 @@ impl Renderer {
         hypercube: &Hypercube,
         sticker_scale: f32,
         face_scale: f32,
+        render_mode: RenderMode,
     ) -> Self {
         let camera_uniform = CameraUniform::new();
+
+        // Create light uniform with sun-like directional light
+        let light_dir = nalgebra::Vector3::new(0.5, -1.0, 0.3).normalize();
+        let light_uniform = LightUniform {
+            direction: [light_dir.x, light_dir.y, light_dir.z], // Sun coming from upper right
+            _padding1: 0.0,
+            color: [1.0, 0.95, 0.8], // Warm sunlight color
+            _padding2: 0.0,
+            ambient: [0.1, 0.1, 0.15], // Cool ambient light
+            _padding3: 0.0,
+        };
 
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth Texture"),
@@ -163,27 +209,77 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Light Buffer"),
+            contents: bytemuck::cast_slice(&[light_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let sticker_inputs = generate_sticker_inputs(hypercube);
+        let num_stickers = sticker_inputs.len();
+
+        // Create normal buffer used by compute shader and vertex shader
+        let normal_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Normal Buffer"),
+            size: (num_stickers * 6 * std::mem::size_of::<NormalRaw>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
                 label: Some("Camera Bind Group Layout"),
             });
 
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: light_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: normal_buffer.as_entire_binding(),
+                },
+            ],
             label: Some("Camera Bind Group"),
         });
 
@@ -211,6 +307,7 @@ impl Renderer {
                     attributes: &wgpu::vertex_attr_array![
                         0 => Float32x4,  // position (4-component for alignment)
                         1 => Float32x4,  // color
+                        2 => Float32x4,  // normal
                     ],
                 }],
             },
@@ -247,30 +344,121 @@ impl Renderer {
             multiview: None,
         });
 
-        let sticker_inputs = generate_sticker_inputs(hypercube);
-        let num_stickers = sticker_inputs.len();
-
-        // Generate indices for all cubes (each cube needs its own set of indices)
-        let mut all_indices = Vec::new();
-        for cube_idx in 0..num_stickers {
-            let vertex_offset = (cube_idx * 8) as u16;
-            for &index in INDICES {
-                all_indices.push(index + vertex_offset);
-            }
-        }
-
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(&all_indices),
-            usage: wgpu::BufferUsages::INDEX,
+        // Create normal visualization shader and pipeline
+        let normal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Normal Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/normal_shader.wgsl").into()),
         });
 
-        let num_indices = all_indices.len() as u32;
+        let normal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Normal Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &normal_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<VertexRaw>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4,  // position (4-component for alignment)
+                        1 => Float32x4,  // color
+                        2 => Float32x4,  // normal
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &normal_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
 
-        // Create single vertex buffer used by both compute shader and vertex shader
+        // Create depth visualization shader and pipeline
+        let depth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Depth Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/depth_shader.wgsl").into()),
+        });
+
+        let depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Depth Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &depth_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<VertexRaw>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4,  // position (4-component for alignment)
+                        1 => Float32x4,  // color
+                        2 => Float32x4,  // normal
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &depth_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
+
+        // Create vertex buffer used by both compute shader and vertex shader
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vertex Buffer"),
-            size: (num_stickers * 8 * std::mem::size_of::<VertexRaw>()) as u64,
+            size: (num_stickers * 36 * std::mem::size_of::<VertexRaw>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
             mapped_at_creation: false,
         });
@@ -410,6 +598,16 @@ impl Renderer {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
                 label: Some("Compute Bind Group Layout"),
             });
@@ -429,6 +627,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: vertex_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: normal_buffer.as_entire_binding(),
                 },
             ],
             label: Some("Compute Bind Group"),
@@ -452,12 +654,16 @@ impl Renderer {
         Self {
             bounds,
             render_pipeline,
-            index_buffer,
-            num_indices,
+            normal_pipeline,
+            depth_pipeline,
+            current_render_mode: render_mode,
             vertex_buffer,
+            normal_buffer,
             num_stickers,
             camera_uniform,
             camera_buffer,
+            light_uniform,
+            light_buffer,
             camera_bind_group,
             depth_texture,
             depth_view,
@@ -526,6 +732,11 @@ impl Renderer {
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
+    }
+
+    /// Sets the current render mode
+    pub(crate) fn set_render_mode(&mut self, mode: RenderMode) {
+        self.current_render_mode = mode;
     }
 
     /// Updates the instance buffer using compute shaders for 4D transformations.
@@ -651,13 +862,19 @@ impl Renderer {
                 0.0,
                 1.0,
             );
-            render_pass.set_pipeline(&self.render_pipeline);
+            // Select pipeline based on current render mode
+            let pipeline = match self.current_render_mode {
+                RenderMode::Standard => &self.render_pipeline,
+                RenderMode::Normals => &self.normal_pipeline,
+                RenderMode::Depth => &self.depth_pipeline,
+            };
+            render_pass.set_pipeline(pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
-            // Draw all cubes at once with properly offset indices
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            // Draw all cubes sequentially (36 vertices per cube)
+            let total_vertices = (self.num_stickers * 36) as u32;
+            render_pass.draw(0..total_vertices, 0..1);
         }
     }
 }

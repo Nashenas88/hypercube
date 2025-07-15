@@ -8,7 +8,7 @@ use iced::widget::shader::{self, wgpu};
 use iced::{Point, Rectangle, event, mouse};
 use nalgebra::Matrix4;
 
-use crate::Message;
+use crate::{Message, RenderMode};
 use crate::camera::{Camera, CameraController, Projection};
 use crate::cube::Hypercube;
 use crate::math::process_4d_rotation;
@@ -23,6 +23,7 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) rotation_4d: Matrix4<f32>,
     pub(crate) sticker_scale: f32,
     pub(crate) face_scale: f32,
+    pub(crate) render_mode: RenderMode,
 }
 
 impl shader::Primitive for HypercubePrimitive {
@@ -44,6 +45,7 @@ impl shader::Primitive for HypercubePrimitive {
                 &self.hypercube,
                 self.sticker_scale,
                 self.face_scale,
+                self.render_mode,
             ));
             storage.store(renderer);
         }
@@ -56,6 +58,7 @@ impl shader::Primitive for HypercubePrimitive {
             self.face_scale,
         );
         renderer.update_camera(queue, &self.camera, &self.projection);
+        renderer.set_render_mode(self.render_mode);
     }
 
     fn render(
@@ -87,14 +90,16 @@ pub(crate) struct HypercubeShaderState {
 pub(crate) struct HypercubeShaderProgram {
     sticker_scale: f32,
     face_scale: f32,
+    render_mode: RenderMode,
 }
 
 impl HypercubeShaderProgram {
     /// Create a new shader program with the given parameters
-    pub(crate) fn new(sticker_scale: f32, face_scale: f32) -> Self {
+    pub(crate) fn new(sticker_scale: f32, face_scale: f32, render_mode: RenderMode) -> Self {
         Self {
             sticker_scale,
             face_scale,
+            render_mode,
         }
     }
 }
@@ -145,6 +150,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             rotation_4d: state.rotation_4d,
             sticker_scale: self.sticker_scale,
             face_scale: self.face_scale,
+            render_mode: self.render_mode,
         }
     }
 }

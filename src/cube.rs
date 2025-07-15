@@ -186,3 +186,16 @@ pub(crate) const INDICES: &[u16] = &[
     3, 2, 6, 6, 7, 3, // top
     4, 5, 1, 1, 0, 4, // bottom
 ];
+
+/// Normal indices for cube faces.
+///
+/// Maps each triangle vertex to its corresponding face normal.
+/// Matches the INDICES array - each vertex gets the normal of the face it belongs to.
+pub(crate) const NORMAL_INDICES: &[u16] = &[
+    0, 0, 0, 0, 0, 0, // front face - all use normal 0
+    1, 1, 1, 1, 1, 1, // right face - all use normal 1  
+    2, 2, 2, 2, 2, 2, // back face - all use normal 2
+    3, 3, 3, 3, 3, 3, // left face - all use normal 3
+    4, 4, 4, 4, 4, 4, // top face - all use normal 4
+    5, 5, 5, 5, 5, 5, // bottom face - all use normal 5
+];

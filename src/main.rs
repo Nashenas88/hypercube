@@ -3,7 +3,7 @@
 //! An interactive 4D Rubik's cube that can be rotated in 4D space and viewed
 //! through 3D projection. Uses iced for UI and wgpu for GPU rendering.
 
-use iced::widget::{Column, Row, Shader, Slider};
+use iced::widget::{Column, Row, Shader, Slider, PickList};
 use iced::{Element, Length, Settings, Task};
 
 mod camera;
@@ -14,11 +14,34 @@ mod shader_widget;
 
 use shader_widget::HypercubeShaderProgram;
 
+/// Rendering modes for visualization
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RenderMode {
+    Standard,
+    Normals,
+    Depth,
+}
+
+impl std::fmt::Display for RenderMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RenderMode::Standard => write!(f, "Standard"),
+            RenderMode::Normals => write!(f, "Normal Map"),
+            RenderMode::Depth => write!(f, "Depth Map"),
+        }
+    }
+}
+
+impl RenderMode {
+    const ALL: [RenderMode; 3] = [RenderMode::Standard, RenderMode::Normals, RenderMode::Depth];
+}
+
 /// Main application state - handles UI controls only
 #[derive(Debug)]
 pub(crate) struct HypercubeApp {
     sticker_scale: f32,
     face_scale: f32,
+    render_mode: RenderMode,
 }
 
 /// Messages that the application can receive
@@ -26,6 +49,7 @@ pub(crate) struct HypercubeApp {
 pub(crate) enum Message {
     StickerScaleChanged(f32),
     FaceScaleChanged(f32),
+    RenderModeChanged(RenderMode),
 }
 
 impl HypercubeApp {
@@ -34,6 +58,7 @@ impl HypercubeApp {
         Self {
             sticker_scale: 0.8, // Default from existing code
             face_scale: 1.0,    // New parameter for future use
+            render_mode: RenderMode::Standard,
         }
     }
 
@@ -51,6 +76,9 @@ impl HypercubeApp {
             Message::FaceScaleChanged(value) => {
                 self.face_scale = value;
             }
+            Message::RenderModeChanged(mode) => {
+                self.render_mode = mode;
+            }
         }
 
         Task::none()
@@ -61,6 +89,15 @@ impl HypercubeApp {
         // Left pane with controls
         let controls = Column::new()
             .spacing(20)
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(iced::widget::text("Render Mode"))
+                    .push(
+                        PickList::new(&RenderMode::ALL[..], Some(self.render_mode), Message::RenderModeChanged)
+                            .width(250),
+                    ),
+            )
             .push(
                 Column::new()
                     .spacing(5)
@@ -87,6 +124,7 @@ impl HypercubeApp {
             // Invert value since the slider can't work in reverse.
             1.0 - self.sticker_scale,
             self.face_scale,
+            self.render_mode,
         ))
         .width(Length::Fill)
         .height(Length::Fill);
