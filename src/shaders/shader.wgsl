@@ -18,8 +18,21 @@ fn vs_main(
     @location(1) vertex_color: vec4<f32>,
 ) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = camera.view_proj * vertex_position;
-    out.color = vertex_color;
+    
+    // Extract visibility flag from position.w component
+    let visibility = vertex_position.w;
+    
+    // If not visible (culled), move vertex off-screen
+    if (visibility < 0.5) {
+        out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0); // Behind camera
+        out.color = vec4<f32>(0.0, 0.0, 0.0, 0.0); // Transparent
+    } else {
+        // Use xyz components for actual position
+        let position_3d = vec4<f32>(vertex_position.x, vertex_position.y, vertex_position.z, 1.0);
+        out.clip_position = camera.view_proj * position_3d;
+        out.color = vertex_color;
+    }
+    
     return out;
 }
 

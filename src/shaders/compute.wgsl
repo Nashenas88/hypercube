@@ -15,7 +15,7 @@ struct StickerInput {
 }
 
 struct VertexOutput {
-    position: vec4<f32>,  // 4th component unused but needed for alignment
+    position: vec4<f32>,  // 4th component stores visibility flag (1.0 = visible, 0.0 = culled)
     color: vec4<f32>,
 }
 
@@ -81,6 +81,7 @@ fn generate_cube_vertex_4d(vertex_index: u32, fixed_axis: u32, center_4d: vec4<f
     return vertex_4d;
 }
 
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;
@@ -100,7 +101,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Determine which axis is fixed for this face
     let fixed_axis = get_fixed_axis(sticker.face_center_4d);
     
-    // Generate all 8 vertices of the cube in 4D space
+    // Generate all 8 vertices of the cube in 4D space and project them to 3D
+    var projected_vertices: array<vec3<f32>, 8>;
     for (var i = 0u; i < 8u; i++) {
         // Generate cube vertex in 4D space around sticker center
         let vertex_4d = generate_cube_vertex_4d(i, fixed_axis, sticker_center_4d, transform.sticker_scale);
@@ -109,11 +111,29 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let rotated_vertex_4d = transform.rotation_matrix * vertex_4d;
         
         // Project this vertex to 3D
-        let projected_vertex = project_4d_to_3d(rotated_vertex_4d, transform.viewer_distance);
-        
-        // Store the projected vertex in flat array
+        projected_vertices[i] = project_4d_to_3d(rotated_vertex_4d, transform.viewer_distance);
+    }
+    
+    // Test if this face should be visible based on 4D orientation
+    let rotated_face_center = transform.rotation_matrix * sticker.face_center_4d;
+    
+    // Vector from face center to viewer (viewer is at positive W looking toward negative W)
+    let viewer_position = vec4<f32>(0.0, 0.0, 0.0, transform.viewer_distance);
+    let to_viewer = viewer_position - rotated_face_center;
+    
+    // Face is visible if it's facing toward the viewer
+    let dot_product = dot(rotated_face_center, to_viewer);
+    let visibility = select(0.0, 1.0, dot_product < 0.0);
+    
+    // Store all 8 vertices with visibility flag
+    for (var i = 0u; i < 8u; i++) {
         let vertex_output_index = index * 8u + i;
-        output_vertices[vertex_output_index].position = vec4<f32>(projected_vertex.x, projected_vertex.y, projected_vertex.z, 1.0);
+        output_vertices[vertex_output_index].position = vec4<f32>(
+            projected_vertices[i].x, 
+            projected_vertices[i].y, 
+            projected_vertices[i].z, 
+            visibility
+        );
         output_vertices[vertex_output_index].color = sticker.color;
     }
 }
