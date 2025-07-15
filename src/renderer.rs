@@ -7,12 +7,10 @@ use core::f32;
 
 use iced::widget::shader::wgpu::{self, CommandEncoder, Device, Queue, TextureFormat, TextureView};
 use iced::{Rectangle, Size};
-use nalgebra::Vector3;
 use wgpu::util::DeviceExt;
 
 use crate::camera::{Camera, CameraUniform, Projection};
 use crate::cube::{Hypercube, INDICES, VERTICES};
-use crate::math::generate_instances;
 
 /// GPU renderer for the hypercube visualization.
 ///
@@ -58,8 +56,6 @@ pub(crate) struct Renderer {
     clear_bind_group: wgpu::BindGroup,
     /// Compute pipeline for 4D transformations
     compute_pipeline: wgpu::ComputePipeline,
-    /// Input buffer for compute shader (4D sticker data)
-    compute_input_buffer: wgpu::Buffer,
     /// Output buffer for compute shader (processed instance data)
     compute_output_buffer: wgpu::Buffer,
     /// Transform uniform buffer for compute shader
@@ -81,47 +77,50 @@ pub(crate) struct InstanceRaw {
     color: [f32; 4],
 }
 
-/// CPU-side instance data for a single hypercube sticker.
-///
-/// Contains position and color information that gets converted to GPU format.
-pub(crate) struct Instance {
-    /// 3D position of the sticker after 4D projection
-    pub(crate) position: Vector3<f32>,
+/// Input data for compute shader - represents a sticker in 4D space
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct StickerInput {
+    /// 4D position of the sticker
+    position_4d: [f32; 4],
     /// RGBA color of the sticker
-    pub(crate) color: nalgebra::Vector4<f32>,
+    color: [f32; 4],
 }
 
-impl Instance {
-    /// Converts CPU instance data to GPU-compatible format.
-    ///
-    /// Creates transformation matrix and formats color data for upload to GPU.
-    ///
-    /// # Returns
-    /// GPU-compatible instance data ready for rendering
-    pub(crate) fn to_raw(&self) -> InstanceRaw {
-        const STICKER_SCALE: f32 = 0.8;
-        let scale_matrix = nalgebra::Matrix4::new_scaling(STICKER_SCALE);
-        let translation_matrix = nalgebra::Matrix4::new_translation(&self.position);
-        InstanceRaw {
-            model: (translation_matrix * scale_matrix).into(),
-            color: self.color.into(),
-        }
-    }
+/// Transform data passed to compute shader
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct Transform4D {
+    /// 4D rotation matrix
+    rotation_matrix: [[f32; 4]; 4],
+    /// Distance of viewer from W=0 plane
+    viewer_distance: f32,
+    /// Spacing between stickers
+    sticker_spacing: f32,
+    /// Spacing between faces
+    face_spacing: f32,
+    /// Padding for alignment
+    _padding: f32,
 }
 
 /// Generates input data for the compute shader from hypercube stickers
 pub(crate) fn generate_sticker_inputs(hypercube: &Hypercube) -> Vec<StickerInput> {
     let mut inputs = Vec::new();
-    
+
     for side in &hypercube.sides {
         for sticker in &side.stickers {
             inputs.push(StickerInput {
-                position_4d: [sticker.position.x, sticker.position.y, sticker.position.z, sticker.position.w],
+                position_4d: [
+                    sticker.position.x,
+                    sticker.position.y,
+                    sticker.position.z,
+                    sticker.position.w,
+                ],
                 color: nalgebra::Vector4::from(sticker.color).into(),
             });
         }
     }
-    
+
     inputs
 }
 
@@ -278,15 +277,16 @@ impl Renderer {
 
         let num_indices = INDICES.len() as u32;
 
-        let identity = nalgebra::Matrix4::identity();
-        let instances = generate_instances(hypercube, &identity);
-        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
-        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let sticker_inputs = generate_sticker_inputs(hypercube);
+        let num_instances = sticker_inputs.len() as u32;
+
+        // Create instance buffer for rendering (will be populated by compute shader)
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Instance Buffer"),
-            contents: bytemuck::cast_slice(&instance_data),
+            size: (num_instances as usize * std::mem::size_of::<InstanceRaw>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        let num_instances = instances.len() as u32;
 
         // Create clear quad geometry (full-screen quad in NDC)
         let clear_vertices: &[[f32; 2]] = &[
@@ -471,7 +471,9 @@ impl Renderer {
         let compute_output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Compute Output Buffer"),
             size: (num_stickers * std::mem::size_of::<InstanceRaw>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -490,41 +492,42 @@ impl Renderer {
         });
 
         // Create compute bind group layout
-        let compute_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        let compute_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-            label: Some("Compute Bind Group Layout"),
-        });
+                ],
+                label: Some("Compute Bind Group Layout"),
+            });
 
         // Create compute bind group
         let compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -547,11 +550,12 @@ impl Renderer {
         });
 
         // Create compute pipeline
-        let compute_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Compute Pipeline Layout"),
-            bind_group_layouts: &[&compute_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let compute_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline Layout"),
+                bind_group_layouts: &[&compute_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Compute Pipeline"),
@@ -580,7 +584,6 @@ impl Renderer {
             clear_texture_view,
             clear_bind_group,
             compute_pipeline,
-            compute_input_buffer,
             compute_output_buffer,
             transform_buffer,
             compute_bind_group,
@@ -738,23 +741,28 @@ impl Renderer {
         );
     }
 
-    /// Updates the instance buffer with current hypercube state.
+    /// Updates the instance buffer using compute shaders for 4D transformations.
     ///
-    /// Regenerates all instance data based on current 4D rotation and uploads
-    /// to GPU for the next frame.
+    /// Runs the 4D transformation compute shader and copies the result to the instance buffer.
     ///
     /// # Arguments
-    /// * `hypercube` - Current hypercube state
+    /// * `device` - GPU device for creating command encoder
+    /// * `queue` - GPU queue for submitting commands
     /// * `rotation_4d` - Current 4D rotation matrix
-    pub(crate) fn update_instances(
+    pub(crate) fn update_instances_compute(
         &mut self,
         device: &Device,
         queue: &Queue,
-        hypercube: &Hypercube,
         rotation_4d: &nalgebra::Matrix4<f32>,
     ) {
-        let instances = generate_instances(hypercube, rotation_4d);
-        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+        // Update transform uniform
+        let transform_data = Transform4D {
+            rotation_matrix: (*rotation_4d).into(),
+            viewer_distance: 3.0,
+            sticker_spacing: 1.2,
+            face_spacing: 1.0,
+            _padding: 0.0,
+        };
         queue.write_buffer(
             &self.transform_buffer,
             0,
@@ -773,10 +781,10 @@ impl Renderer {
             });
             compute_pass.set_pipeline(&self.compute_pipeline);
             compute_pass.set_bind_group(0, &self.compute_bind_group, &[]);
-            
+
             // Dispatch with workgroups of 64, covering all stickers
             let workgroup_size = 64;
-            let num_workgroups = (self.num_instances + workgroup_size - 1) / workgroup_size;
+            let num_workgroups = self.num_instances.div_ceil(workgroup_size);
             compute_pass.dispatch_workgroups(num_workgroups, 1, 1);
         }
 
@@ -786,8 +794,10 @@ impl Renderer {
             0,
             &self.instance_buffer,
             0,
-            bytemuck::cast_slice(&instance_data),
+            (self.num_instances as usize * std::mem::size_of::<InstanceRaw>()) as u64,
         );
+
+        queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Renders a single frame of the hypercube visualization.
