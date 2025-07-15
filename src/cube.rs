@@ -174,21 +174,6 @@ impl From<Color> for Vector4<f32> {
     }
 }
 
-/// Vertex positions for a unit cube.
-///
-/// Defines the 8 vertices of a cube centered at origin with side length 1.
-/// Used as the base geometry for all hypercube stickers.
-pub(crate) const VERTICES: &[[f32; 3]] = &[
-    [-0.5, -0.5, -0.5], // 0
-    [0.5, -0.5, -0.5],  // 1
-    [0.5, 0.5, -0.5],   // 2
-    [-0.5, 0.5, -0.5],  // 3
-    [-0.5, -0.5, 0.5],  // 4
-    [0.5, -0.5, 0.5],   // 5
-    [0.5, 0.5, 0.5],    // 6
-    [-0.5, 0.5, 0.5],   // 7
-];
-
 /// Triangle indices for cube faces.
 ///
 /// Defines how the vertices are connected to form the 6 faces of a cube.

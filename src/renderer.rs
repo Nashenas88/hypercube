@@ -10,7 +10,7 @@ use iced::{Rectangle, Size};
 use wgpu::util::DeviceExt;
 
 use crate::camera::{Camera, CameraUniform, Projection};
-use crate::cube::{Hypercube, INDICES, VERTICES};
+use crate::cube::{Hypercube, INDICES};
 
 /// GPU renderer for the hypercube visualization.
 ///
@@ -22,16 +22,14 @@ pub(crate) struct Renderer {
     bounds: Rectangle<f32>,
     /// Graphics pipeline for cube rendering
     render_pipeline: wgpu::RenderPipeline,
-    /// Buffer containing cube vertex data
-    vertex_buffer: wgpu::Buffer,
-    /// Buffer containing cube index data
+    /// Buffer containing cube index data for all cubes
     index_buffer: wgpu::Buffer,
     /// Number of indices in the index buffer
     num_indices: u32,
-    /// Buffer containing per-instance transformation data
-    instance_buffer: wgpu::Buffer,
-    /// Number of instances to render
-    num_instances: u32,
+    /// Buffer containing vertex data from compute shader and used for rendering
+    vertex_buffer: wgpu::Buffer,
+    /// Number of stickers (each generates 8 vertices)
+    num_stickers: usize,
     /// CPU-side camera uniform data
     camera_uniform: CameraUniform,
     /// GPU buffer containing camera matrices
@@ -50,30 +48,28 @@ pub(crate) struct Renderer {
     clear_index_buffer: wgpu::Buffer,
     /// Compute pipeline for 4D transformations
     compute_pipeline: wgpu::ComputePipeline,
-    /// Output buffer for compute shader (processed instance data)
-    compute_output_buffer: wgpu::Buffer,
     /// Transform uniform buffer for compute shader
     transform_buffer: wgpu::Buffer,
     /// Bind group for compute shader
     compute_bind_group: wgpu::BindGroup,
 }
 
-/// GPU-compatible instance data for rendering individual cubes.
+/// GPU-compatible vertex data output from compute shader.
 ///
-/// Contains transformation matrix and color data that gets uploaded to the GPU
-/// for instanced rendering of hypercube stickers.
+/// Each sticker generates 8 vertices that are already transformed and projected.
+/// Uses 4-component position for proper GPU alignment.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct InstanceRaw {
-    /// 4x4 model transformation matrix
-    model: [[f32; 4]; 4],
+pub(crate) struct VertexRaw {
+    /// 3D position after 4D projection (4th component unused but needed for alignment)
+    position: [f32; 4],
     /// RGBA color values
     color: [f32; 4],
 }
 
 /// Input data for compute shader - represents a sticker in 4D space
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct StickerInput {
     /// 4D position of the sticker
     position_4d: [f32; 4],
@@ -91,8 +87,8 @@ pub(crate) struct Transform4D {
     rotation_matrix: [[f32; 4]; 4],
     /// Distance of viewer from W=0 plane
     viewer_distance: f32,
-    /// Spacing between stickers
-    sticker_spacing: f32,
+    /// Scale of individual stickers
+    sticker_scale: f32,
     /// Spacing between faces
     face_spacing: f32,
     /// Padding for alignment
@@ -209,24 +205,14 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[
-                    wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
-                    },
-                    wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &wgpu::vertex_attr_array![
-                            1 => Float32x4,
-                            2 => Float32x4,
-                            3 => Float32x4,
-                            4 => Float32x4,
-                            5 => Float32x4,
-                        ],
-                    },
-                ],
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<VertexRaw>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x4,  // position (4-component for alignment)
+                        1 => Float32x4,  // color
+                    ],
+                }],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -240,8 +226,8 @@ impl Renderer {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
-                front_face: wgpu::FrontFace::Cw,
-                cull_mode: Some(wgpu::Face::Back),
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // Disable culling to see all faces
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -261,28 +247,31 @@ impl Renderer {
             multiview: None,
         });
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let sticker_inputs = generate_sticker_inputs(hypercube);
+        let num_stickers = sticker_inputs.len();
+
+        // Generate indices for all cubes (each cube needs its own set of indices)
+        let mut all_indices = Vec::new();
+        for cube_idx in 0..num_stickers {
+            let vertex_offset = (cube_idx * 8) as u16;
+            for &index in INDICES {
+                all_indices.push(index + vertex_offset);
+            }
+        }
 
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(INDICES),
+            contents: bytemuck::cast_slice(&all_indices),
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let num_indices = INDICES.len() as u32;
+        let num_indices = all_indices.len() as u32;
 
-        let sticker_inputs = generate_sticker_inputs(hypercube);
-        let num_instances = sticker_inputs.len() as u32;
-
-        // Create instance buffer for rendering (will be populated by compute shader)
-        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Instance Buffer"),
-            size: (num_instances as usize * std::mem::size_of::<InstanceRaw>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        // Create single vertex buffer used by both compute shader and vertex shader
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Vertex Buffer"),
+            size: (num_stickers * 8 * std::mem::size_of::<VertexRaw>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
             mapped_at_creation: false,
         });
 
@@ -366,8 +355,6 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/compute.wgsl").into()),
         });
 
-        let num_stickers = sticker_inputs.len();
-
         // Create input buffer for compute shader
         let compute_input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Compute Input Buffer"),
@@ -375,21 +362,11 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Create output buffer for compute shader
-        let compute_output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Compute Output Buffer"),
-            size: (num_stickers * std::mem::size_of::<InstanceRaw>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::VERTEX
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
         // Create transform uniform buffer with initial slider values
         let transform_data = Transform4D {
             rotation_matrix: nalgebra::Matrix4::identity().into(),
             viewer_distance: 3.0,
-            sticker_spacing: sticker_scale,
+            sticker_scale,
             face_spacing: face_scale,
             _padding: 0.0,
         };
@@ -451,7 +428,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: compute_output_buffer.as_entire_binding(),
+                    resource: vertex_buffer.as_entire_binding(),
                 },
             ],
             label: Some("Compute Bind Group"),
@@ -475,11 +452,10 @@ impl Renderer {
         Self {
             bounds,
             render_pipeline,
-            vertex_buffer,
             index_buffer,
             num_indices,
-            instance_buffer,
-            num_instances,
+            vertex_buffer,
+            num_stickers,
             camera_uniform,
             camera_buffer,
             camera_bind_group,
@@ -489,7 +465,6 @@ impl Renderer {
             clear_vertex_buffer,
             clear_index_buffer,
             compute_pipeline,
-            compute_output_buffer,
             transform_buffer,
             compute_bind_group,
         }
@@ -573,7 +548,7 @@ impl Renderer {
         let transform_data = Transform4D {
             rotation_matrix: (*rotation_4d).into(),
             viewer_distance: 3.0,
-            sticker_spacing: sticker_scale,
+            sticker_scale,
             face_spacing: face_scale,
             _padding: 0.0,
         };
@@ -596,18 +571,11 @@ impl Renderer {
 
             // Dispatch with workgroups of 64, covering all stickers
             let workgroup_size = 64;
-            let num_workgroups = self.num_instances.div_ceil(workgroup_size);
+            let num_workgroups = (self.num_stickers as u32).div_ceil(workgroup_size);
             compute_pass.dispatch_workgroups(num_workgroups, 1, 1);
         }
 
-        // Copy compute output to instance buffer
-        encoder.copy_buffer_to_buffer(
-            &self.compute_output_buffer,
-            0,
-            &self.instance_buffer,
-            0,
-            (self.num_instances as usize * std::mem::size_of::<InstanceRaw>()) as u64,
-        );
+        // No copy needed - compute shader writes directly to vertex buffer
     }
 
     /// Renders a single frame of the hypercube visualization.
@@ -686,9 +654,10 @@ impl Renderer {
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.num_instances);
+
+            // Draw all cubes at once with properly offset indices
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
         }
     }
 }

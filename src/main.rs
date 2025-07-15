@@ -66,7 +66,7 @@ impl HypercubeApp {
                     .spacing(5)
                     .push(iced::widget::text("Sticker Scale"))
                     .push(
-                        Slider::new(0.1..=5.0, self.sticker_scale, Message::StickerScaleChanged)
+                        Slider::new(0.0..=0.9, self.sticker_scale, Message::StickerScaleChanged)
                             .step(0.01)
                             .width(250),
                     ),
@@ -76,7 +76,7 @@ impl HypercubeApp {
                     .spacing(5)
                     .push(iced::widget::text("Face Scale"))
                     .push(
-                        Slider::new(0.1..=5.0, self.face_scale, Message::FaceScaleChanged)
+                        Slider::new(1.0..=5.0, self.face_scale, Message::FaceScaleChanged)
                             .step(0.01)
                             .width(250),
                     ),
@@ -84,7 +84,8 @@ impl HypercubeApp {
 
         // Right pane with 3D viewport
         let viewport = Shader::new(HypercubeShaderProgram::new(
-            self.sticker_scale,
+            // Invert value since the slider can't work in reverse.
+            1.0 - self.sticker_scale,
             self.face_scale,
         ))
         .width(Length::Fill)
