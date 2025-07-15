@@ -9,9 +9,10 @@ This document outlines the requirements for the 4D Rubik's Cube application. It 
     *   There are 27 of these sticker-cubes per "side" of the 4D hypercube, arranged in a 3x3x3 grid.
     *   There are a total of 8 "sides" to the hypercube, positioned at distinct 4D coordinates.
     *   This results in a total of 8 * 27 = 216 visible sticker-cubes.
-    *   **4D Positioning:** The 8 sides are positioned as follows:
-        *   7 sides arranged around a center (0,0,0) in the W=-2.0 plane, offset by ±4 units along X, Y, and Z axes
-        *   1 side at the center (0,0,0) of the W=+2.0 plane
+    *   **4D Positioning:** The 8 faces are positioned at the vertices of a tesseract:
+        *   Face centers at coordinates with one axis fixed at ±1.0 (e.g., X=±1, Y=±1, Z=±1, W=±1)
+        *   Each face is a 3x3x3 grid with stickers offset by ±2/3 units on the 3 free axes
+        *   Face spacing parameter allows visual separation between faces
 *   **Color Scheme:** 8 distinct colors define the puzzle: White, Yellow, Blue, Green, Red, Orange, Purple, Brown.
 *   **Frame of Reference:** The center sticker-cube of each of the 8 "sides" has a fixed color and position relative to the other centers. This provides a stable frame for the puzzle.
 *   **State Management:** The application tracks the state of the cube through the `Hypercube` struct containing `Side` structs with individual `Sticker` positions and colors.
@@ -27,9 +28,10 @@ This document outlines the requirements for the 4D Rubik's Cube application. It 
     *   Per-instance model matrices and colors
     *   Real-time instance buffer updates for smooth 4D transformations
 *   **Shader System:** Custom WGSL shaders supporting:
-    *   Per-vertex position data
-    *   Per-instance model matrices (4x4) and colors (RGBA)
-    *   Camera view-projection matrices via uniform buffers
+    *   **Compute Shader:** 4D transformations, projections, and face culling
+    *   **Vertex/Fragment Shaders:** Final 3D rendering with visibility flags
+    *   **Clear Shader:** Dark gray background for better visibility
+    *   Per-instance colors and positions processed on GPU
 
 ## 3. User Interaction (IMPLEMENTED)
 
@@ -69,15 +71,19 @@ This document outlines the requirements for the 4D Rubik's Cube application. It 
 
 ## 6. Current Features (IMPLEMENTED)
 
-*   **Complete 4D Hypercube Visualization:** All 8 sides properly positioned and rendered in 4D space
+*   **Complete 4D Hypercube Visualization:** All 8 faces properly positioned and rendered in 4D space
 *   **Interactive 4D Exploration:** Users can rotate the hypercube in 4D space to see different cross-sections
 *   **Proper 3D Navigation:** Standard 3D camera controls for viewing the projected hypercube from different angles
+*   **4D Face Culling:** Intelligent culling shows only front-facing faces (typically 7 out of 8)
+*   **Hardware Triangle Culling:** GPU-based backface culling for optimal performance
 *   **Visual Depth Cues:** Depth testing ensures correct visual ordering of sticker cubes
 *   **Smooth Real-time Controls:** Responsive mouse controls with configurable sensitivity
+*   **Interactive UI:** Sliders for sticker scale and face spacing adjustment
 *   **State Management:** Clean architecture supporting future game mechanics
 
 ## 7. Future Features (TO BE IMPLEMENTED)
 
+### Game Mechanics
 *   **Move Input:** Mechanism for selecting "slabs" of the hypercube to rotate
 *   **4D Cube Mechanics:** Implementation of legal 4D Rubik's cube moves and rotations
 *   **Scrambling:** Function to randomly scramble the cube state
@@ -86,9 +92,29 @@ This document outlines the requirements for the 4D Rubik's Cube application. It 
 *   **Solving Algorithms:** Advanced feature for automated solving
 *   **Piece Classification:** Implementation of the 80 movable pieces (corners, edges, faces, cells)
 
-## 8. Technical Notes
+### Visual Enhancements
+*   **Lighting System:** Implement 3D lighting with directional light sources to enhance depth perception
+*   **Shadow Rendering:** Add shadow mapping or shadow volumes to provide visual grounding for the hypercube
 
-*   **Performance:** Instanced rendering supports smooth real-time interaction with 216 individual cubes
+## 8. Performance Requirements (NON-FUNCTIONAL)
+
+### Shader Optimization
+*   **Branch Reduction:** Minimize conditional statements in shaders for better GPU performance
+    *   Replace switch statements with lookup tables or mathematical formulas
+    *   Use select() functions instead of if/else branches where possible
+    *   Optimize culling logic to avoid divergent execution paths
+
+### Rendering Pipeline Optimization
+*   **Improved Instancing:** Optimize vertex generation and transformation pipeline
+    *   Pre-generate all cube vertices once and reuse across instances
+    *   Move 4D-to-3D projection from compute shader to vertex shader
+    *   Use vertex attributes instead of storage buffers for better cache locality
+    *   Reduce per-frame GPU memory transfers
+
+## 9. Technical Notes
+
+*   **Performance:** GPU compute shader processes all 216 cubes with efficient 4D transformations
+*   **Culling Efficiency:** Dual-stage culling (4D face + hardware triangle) minimizes overdraw
 *   **Extensibility:** Architecture designed to easily add game mechanics and move systems
 *   **Cross-platform:** `wgpu` ensures compatibility across Windows, macOS, and Linux
-*   **Memory Management:** Efficient GPU buffer management with proper usage flags for dynamic updates
+*   **Memory Management:** Efficient GPU buffer management with compute shader storage buffers

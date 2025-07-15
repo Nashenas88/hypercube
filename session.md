@@ -8,7 +8,7 @@ This session focused on establishing the foundational requirements and initial t
 *   **Cube Geometry & Visualization:**
     *   The 4D hypercube is represented as 8 separate 3x3x3 arrangements of single-colored 3D "sticker-cubes".
     *   Each "side" (3x3x3 block) has a distinct color, totaling 216 visible sticker-cubes.
-    *   The 8 sides are positioned at proper 4D coordinates: 7 sides arranged around a center in one W-plane, and 1 side in another W-plane.
+    *   The 8 faces are positioned at tesseract vertices with proper 4D coordinates at ±1.0 boundaries.
 *   **Technology Stack:**
     *   **Language:** Rust (confirmed by existing project structure).
     *   **Graphics:** `wgpu` was chosen over `vulkano` and `ash` for its safety, ease of use, and portability, allowing focus on 4D logic.
@@ -21,25 +21,32 @@ This session focused on establishing the foundational requirements and initial t
 2.  **Dependency Setup:** Added `wgpu`, `nalgebra`, `winit`, `env_logger`, `pollster`, and `bytemuck` to `Cargo.toml`.
 3.  **Core Data Structures:** Defined `Color`, `Sticker`, `Side`, and `Hypercube` structs in `src/cube.rs` to represent the 4D cube's state.
 4.  **Basic `wgpu` Boilerplate:** Set up `src/main.rs` with a complete `wgpu` application.
-5.  **Shader Creation:** Created `src/shader.wgsl` with vertex and fragment shaders supporting per-instance data.
+5.  **Shader System:** Created comprehensive shader system:
+    *   `compute.wgsl`: 4D transformations, projections, and face culling
+    *   `shader.wgsl`: Vertex and fragment shaders for final rendering
+    *   `clear.wgsl`: Dark gray background shader for better visibility
 
 ### Rendering Pipeline:
-6.  **Instanced Rendering:** Successfully implemented instanced rendering for all 216 sticker cubes.
-7.  **Camera System:** Implemented 3D camera with orbital controls around the hypercube origin.
-8.  **Depth Testing:** Added proper depth buffer and depth testing for correct z-ordering.
-9.  **4D Projection:** Implemented 4D-to-3D perspective projection with configurable viewer distance.
+6.  **GPU Compute Pipeline:** Implemented compute shader for efficient 4D transformations and culling.
+7.  **4D Face Culling:** Proper culling system showing only front-facing faces (typically 7 out of 8).
+8.  **Hardware Triangle Culling:** Combined with 4D culling for optimal performance.
+9.  **Camera System:** Implemented 3D camera with orbital controls around the hypercube origin.
+10. **Depth Testing:** Added proper depth buffer and depth testing for correct z-ordering.
+11. **4D Projection:** Implemented 4D-to-3D perspective projection with configurable viewer distance.
 
 ### Interactive Controls:
-10. **Mouse Controls:** 
+12. **Mouse Controls:** 
     *   Right mouse drag: 3D camera rotation around hypercube
     *   Right mouse drag + Shift: 4D rotation of the hypercube itself
     *   Mouse wheel: Zoom in/out with distance constraints
-11. **State Management:** Clean separation between `App` state (hypercube, camera, 4D rotation) and `Renderer` (graphics resources).
+13. **UI Controls:** Interactive sliders for sticker scale and face spacing adjustment.
+14. **State Management:** Clean separation between `App` state (hypercube, camera, 4D rotation) and `Renderer` (graphics resources).
 
 ### 4D Mathematics:
-12. **4D Positioning:** Proper 4D coordinate system with 8 sides positioned at distinct 4D locations.
-13. **4D Rotation:** Real-time 4D rotation matrices for XW and YW planes with accumulative rotation.
-14. **Dynamic Updates:** Real-time instance buffer updates for smooth 4D transformations.
+15. **4D Positioning:** Proper tesseract geometry with 8 faces positioned at ±1.0 coordinates.
+16. **4D Rotation:** Real-time 4D rotation matrices for XW and YW planes with accumulative rotation.
+17. **GPU Compute:** All 4D transformations and projections performed efficiently on GPU.
+18. **Dynamic Updates:** Real-time compute shader updates for smooth 4D transformations.
 
 ## Architecture:
 
@@ -49,11 +56,13 @@ This session focused on establishing the foundational requirements and initial t
 
 ## Current Features:
 
-*   **Complete 4D Hypercube Visualization:** All 8 sides properly positioned and rendered in 4D space.
+*   **Complete 4D Hypercube Visualization:** All 8 faces properly positioned and rendered in 4D space.
 *   **Interactive 4D Exploration:** Users can rotate the hypercube in 4D space to see different cross-sections.
 *   **Proper 3D Navigation:** Standard 3D camera controls for viewing the projected hypercube from different angles.
+*   **4D Face Culling:** Intelligent culling shows only front-facing faces for proper depth perception.
 *   **Visual Depth Cues:** Depth testing ensures correct visual ordering of sticker cubes.
-*   **Smooth Controls:** Responsive mouse and keyboard controls with configurable sensitivity.
+*   **Enhanced Visibility:** Dark gray background with adjusted colors for better contrast.
+*   **Smooth Controls:** Responsive mouse controls with interactive UI sliders.
 
 ## Constants and Configuration:
 
@@ -73,10 +82,11 @@ This session focused on establishing the foundational requirements and initial t
 
 ## Next Steps:
 
-The foundation is now complete for implementing Rubik's cube mechanics:
+The foundation is now complete with proper 4D geometry and efficient GPU rendering for implementing Rubik's cube mechanics:
 *   Add 4D rotation animations for cube "twists"
 *   Implement scrambling algorithms
 *   Add solving algorithms and move notation
 *   Enhance visual feedback for move selection
 *   Add undo/redo functionality
 *   Implement save/load of cube states
+*   Expand UI controls for game mechanics
