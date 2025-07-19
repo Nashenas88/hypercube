@@ -128,18 +128,7 @@ impl Hypercube {
     /// # Returns
     /// A solved 4D hypercube ready for visualization and manipulation
     pub(crate) fn new() -> Self {
-        let colors = [
-            Color::White,
-            Color::Yellow,
-            Color::Blue,
-            Color::Green,
-            Color::Red,
-            Color::Orange,
-            Color::Purple,
-            Color::Brown,
-        ];
-
-        let faces = colors
+        let faces = COLORS
             .iter()
             .zip(FACE_CENTERS.iter())
             .zip(FIXED_DIMS.iter())
@@ -171,6 +160,18 @@ impl From<Color> for Vector4<f32> {
         }
     }
 }
+
+/// Colors for each 4D face.
+const COLORS: [Color; 8] = [
+    Color::White,
+    Color::Yellow,
+    Color::Blue,
+    Color::Green,
+    Color::Red,
+    Color::Orange,
+    Color::Purple,
+    Color::Brown,
+];
 
 /// 36 vertices for a cube (6 faces × 6 vertices per face using 2 triangles each).
 ///

@@ -283,7 +283,6 @@ impl HypercubeShaderProgram {
                     log::debug!(
                         "Bad winding order detected for 4D face {face_idx} cube face {triangle_idx}: normal {normal:?} points inward, flipping"
                     );
-                    normal = -normal;
                     triangle_indices.swap(1, 2);
                 }
 
@@ -299,9 +298,6 @@ impl HypercubeShaderProgram {
                 indices.extend(triangle_indices.into_iter());
             }
         }
-
-        log::debug!("Indices length: {}", indices.len());
-        log::debug!("Normals length: {}", normals.len());
 
         (normals, indices)
     }
