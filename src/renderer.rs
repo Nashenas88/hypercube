@@ -244,10 +244,15 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
+        let mut vertices = CUBE_VERTICES;
+        vertices
+            .iter_mut()
+            // TODO divide by puzzle size
+            .for_each(|v| v.iter_mut().for_each(|i| *i /= 3.0));
         // Create vertex buffer for cube geometry
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(CUBE_VERTICES),
+            contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
