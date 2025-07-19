@@ -22,7 +22,13 @@ use crate::shader_widget::UiControls;
 pub(crate) struct Renderer {
     /// Bounds within the viewport to render to.
     bounds: Rectangle<f32>,
-    /// Graphics pipeline for standard rendering  
+    /// Vertex buffer for sky quad
+    sky_vertex_buffer: wgpu::Buffer,
+    /// Index buffer for sky quad
+    sky_index_buffer: wgpu::Buffer,
+    /// Graphics pipeline for sky rendering
+    sky_pipeline: wgpu::RenderPipeline,
+    /// Graphics pipeline for standard rendering
     render_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for normal visualization
     normal_pipeline: wgpu::RenderPipeline,
@@ -54,14 +60,10 @@ pub(crate) struct Renderer {
     depth_texture: wgpu::Texture,
     /// Depth texture view for rendering
     depth_view: wgpu::TextureView,
-    /// Clear quad render pipeline
-    clear_pipeline: wgpu::RenderPipeline,
-    /// Clear quad vertex buffer
-    clear_vertex_buffer: wgpu::Buffer,
-    /// Clear quad index buffer
-    clear_index_buffer: wgpu::Buffer,
     /// Transform uniform buffer for vertex shaders
     transform_buffer: wgpu::Buffer,
+    /// Skybox bind group
+    skybox_bind_group: wgpu::BindGroup,
 }
 
 /// Instance data for vertex shader - represents a sticker in 4D space
@@ -128,6 +130,136 @@ pub(crate) struct NormalsUniform {
     normals: [[f32; 4]; 48],
 }
 
+/// Loads a cross-format cubemap and creates a GPU texture.
+///
+/// The cross format is arranged as:
+/// ```ignore
+///     +Y
+/// -X  +Z  +X  -Z
+///     -Y
+/// ```
+///
+/// # Arguments
+/// * `device` - GPU device for texture creation
+/// * `queue` - GPU queue for data upload
+/// * `image_path` - Path to the cross-format cubemap image
+///
+/// # Returns
+/// A tuple containing (texture, view, sampler, bind_group)
+fn load_cross_cubemap(
+    device: &Device,
+    queue: &Queue,
+    image_path: &str,
+) -> Result<(wgpu::Texture, wgpu::TextureView, wgpu::Sampler), Box<dyn std::error::Error>> {
+    // Load the image
+    let image_bytes = std::fs::read(image_path)?;
+    let image = image::load_from_memory(&image_bytes)?.to_rgba8();
+    let (img_width, img_height) = image.dimensions();
+
+    // Validate dimensions - should be 2:3 aspect ratio for cross format (width:height = 4:3)
+    if img_width * 3 != img_height * 4 {
+        return Err("Invalid cross cubemap dimensions. Expected 4:3 aspect ratio.".into());
+    }
+
+    // Calculate face size (each face should be square)
+    let face_size = img_width / 4;
+    if face_size * 3 != img_height {
+        return Err("Invalid cross cubemap face dimensions.".into());
+    }
+
+    // Create the cubemap texture
+    let cubemap_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Skybox Cubemap"),
+        size: wgpu::Extent3d {
+            width: face_size,
+            height: face_size,
+            depth_or_array_layers: 6, // 6 faces
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    // Extract and upload each face
+    // Cross layout mapping: +X, -X, +Y, -Y, +Z, -Z
+    let face_positions = [
+        (face_size * 2, face_size), // +X (right)
+        (0, face_size),             // -X (left)
+        (face_size, 0),             // +Y (top)
+        (face_size, face_size * 2), // -Y (bottom)
+        (face_size, face_size),     // +Z (front)
+        (face_size * 3, face_size), // -Z (back)
+    ];
+
+    for (face_index, &(x_offset, y_offset)) in face_positions.iter().enumerate() {
+        let mut face_data = Vec::new();
+
+        for y in 0..face_size {
+            for x in 0..face_size {
+                let pixel_x = x_offset + x;
+                let pixel_y = y_offset + y;
+                let pixel_index = ((pixel_y * img_width + pixel_x) * 4) as usize;
+
+                // Copy RGBA data
+                face_data.extend_from_slice(&image.as_raw()[pixel_index..pixel_index + 4]);
+            }
+        }
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &cubemap_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: face_index as u32,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &face_data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(face_size * 4),
+                rows_per_image: Some(face_size),
+            },
+            wgpu::Extent3d {
+                width: face_size,
+                height: face_size,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    // Create texture view
+    let view = cubemap_texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("Skybox View"),
+        format: None,
+        dimension: Some(wgpu::TextureViewDimension::Cube),
+        aspect: wgpu::TextureAspect::All,
+        base_mip_level: 0,
+        mip_level_count: None,
+        base_array_layer: 0,
+        array_layer_count: Some(6),
+    });
+
+    // Create sampler
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("Skybox Sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+
+    Ok((cubemap_texture, view, sampler))
+}
+
 /// Generates instance data for the vertex shader from hypercube stickers
 pub(crate) fn generate_sticker_instances(hypercube: &Hypercube) -> Vec<StickerInstance> {
     let mut instances = Vec::new();
@@ -165,6 +297,7 @@ impl Renderer {
     /// A fully initialized renderer ready for frame rendering
     pub(crate) async fn new(
         device: &Device,
+        queue: &Queue,
         format: TextureFormat,
         bounds: Rectangle<f32>,
         viewport_size: Size<u32>,
@@ -267,6 +400,40 @@ impl Renderer {
             contents: bytemuck::cast_slice(indices.as_slice()),
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         });
+
+        // Create skybox bind group layout
+        let skybox_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("Skybox Bind Group Layout"),
+            });
 
         // Main shader bind group layout (transform, camera, light, face_data, normals, instances)
         let main_bind_group_layout =
@@ -542,6 +709,12 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader.wgsl").into()),
         });
 
+        let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Sky Pipeline Layout"),
+            bind_group_layouts: &[&skybox_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
@@ -562,6 +735,62 @@ impl Renderer {
                 bind_group_layouts: &[&debug_bind_group_layout],
                 push_constant_ranges: &[],
             });
+
+        let sky_vertices: &[[f32; 2]] = &[
+            [-1.0, -1.0], // bottom-left
+            [1.0, -1.0],  // bottom-right
+            [1.0, 1.0],   // top-right
+            [-1.0, 1.0],  // top-left
+        ];
+        let sky_indices: &[u16] = &[0, 1, 2, 0, 2, 3];
+
+        let sky_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Clear Vertex Buffer"),
+            contents: bytemuck::cast_slice(sky_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let sky_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Clear Index Buffer"),
+            contents: bytemuck::cast_slice(sky_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Sky"),
+            layout: Some(&sky_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_sky",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_sky",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                front_face: wgpu::FrontFace::Ccw,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
@@ -600,11 +829,7 @@ impl Renderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
+            multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
 
@@ -710,82 +935,36 @@ impl Renderer {
             multiview: None,
         });
 
-        // Create clear quad geometry (full-screen quad in NDC)
-        let clear_vertices: &[[f32; 2]] = &[
-            [-1.0, -1.0], // bottom-left
-            [1.0, -1.0],  // bottom-right
-            [1.0, 1.0],   // top-right
-            [-1.0, 1.0],  // top-left
-        ];
-        let clear_indices: &[u16] = &[0, 1, 2, 0, 2, 3];
+        // Load skybox cubemap texture
+        let (_skybox_texture, skybox_view, skybox_sampler) =
+            load_cross_cubemap(device, queue, "src/resources/Cubemap_Sky_02-512x512.png")
+                .expect("Failed to load skybox texture");
 
-        let clear_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Clear Vertex Buffer"),
-            contents: bytemuck::cast_slice(clear_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let clear_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Clear Index Buffer"),
-            contents: bytemuck::cast_slice(clear_indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        // Create clear shader
-        let clear_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Clear Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/clear.wgsl").into()),
-        });
-
-        // Create clear pipeline
-        let clear_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Clear Pipeline Layout"),
-                bind_group_layouts: &[],
-                push_constant_ranges: &[],
-            });
-
-        let clear_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Clear Pipeline"),
-            layout: Some(&clear_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &clear_shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &clear_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
+        // Create skybox bind group
+        let skybox_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &skybox_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&skybox_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&skybox_sampler),
+                },
+            ],
+            label: Some("Skybox Bind Group"),
         });
 
         Self {
             bounds,
+            sky_vertex_buffer,
+            sky_index_buffer,
+            sky_pipeline,
             render_pipeline,
             normal_pipeline,
             depth_pipeline,
@@ -802,10 +981,8 @@ impl Renderer {
             debug_bind_group,
             depth_texture,
             depth_view,
-            clear_pipeline,
-            clear_vertex_buffer,
-            clear_index_buffer,
             transform_buffer,
+            skybox_bind_group,
         }
     }
 
@@ -934,89 +1111,60 @@ impl Renderer {
     /// * `camera` - Current camera state for view matrix
     /// * `projection` - Current projection parameters
     pub(crate) fn render(&self, encoder: &mut CommandEncoder, target: &TextureView) {
-        // First pass: Clear only the bounds area with black quad
-        {
-            let mut clear_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Clear Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // Don't clear the entire target
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            clear_pass.set_viewport(
-                self.bounds.x,
-                self.bounds.y,
-                self.bounds.width,
-                self.bounds.height,
-                0.0,
-                1.0,
-            );
-            clear_pass.set_pipeline(&self.clear_pipeline);
-            clear_pass.set_vertex_buffer(0, self.clear_vertex_buffer.slice(..));
-            clear_pass
-                .set_index_buffer(self.clear_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            clear_pass.draw_indexed(0..6, 0, 0..1);
-        }
-
-        // Second pass: Render the hypercube within bounds
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // Don't clear, we already cleared selectively
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Render Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load, // Don't clear, we already cleared selectively
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
                 }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
 
-            render_pass.set_viewport(
-                self.bounds.x,
-                self.bounds.y,
-                self.bounds.width,
-                self.bounds.height,
-                0.0,
-                1.0,
-            );
-            // Select pipeline and bind group based on current render mode
-            let (pipeline, bind_group) = match self.current_render_mode {
-                RenderMode::Standard => (&self.render_pipeline, &self.main_bind_group),
-                RenderMode::Normals => (&self.normal_pipeline, &self.normal_bind_group),
-                RenderMode::Depth => (&self.depth_pipeline, &self.debug_bind_group),
-            };
-            render_pass.set_pipeline(pipeline);
-            render_pass.set_bind_group(0, bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass
-                .set_index_buffer(self.face_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        render_pass.set_viewport(
+            self.bounds.x,
+            self.bounds.y,
+            self.bounds.width,
+            self.bounds.height,
+            0.0,
+            1.0,
+        );
 
-            // Draw all cubes using instanced rendering (36 vertices per cube, num_stickers instances)
-            // render_pass.draw(0..36, 0..self.num_stickers as u32);
-            render_pass.draw_indexed(
-                0..BASE_INDICES.len() as u32 * 8,
-                0,
-                0..self.num_stickers as u32,
-            );
-        }
+        // First render the skybox
+        render_pass.set_pipeline(&self.sky_pipeline);
+        render_pass.set_bind_group(0, &self.skybox_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.sky_vertex_buffer.slice(..));
+        render_pass.set_index_buffer(self.sky_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        render_pass.draw_indexed(0..6, 0, 0..1);
+
+        // Then render the hypercube
+        let (pipeline, bind_group) = match self.current_render_mode {
+            RenderMode::Standard => (&self.render_pipeline, &self.main_bind_group),
+            RenderMode::Normals => (&self.normal_pipeline, &self.normal_bind_group),
+            RenderMode::Depth => (&self.depth_pipeline, &self.debug_bind_group),
+        };
+        render_pass.set_pipeline(pipeline);
+        render_pass.set_bind_group(0, bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_index_buffer(self.face_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+
+        // Draw all cubes using instanced rendering (36 vertices per cube, num_stickers instances)
+        render_pass.draw_indexed(
+            0..BASE_INDICES.len() as u32 * 8,
+            0,
+            0..self.num_stickers as u32,
+        );
     }
 }

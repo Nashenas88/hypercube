@@ -17,6 +17,10 @@ cargo run
 
 ![Screenshot](screenshot.png)
 
+# Notes
+
+Skybox obtained from https://opengameart.org/content/cloudy-skyboxes-0, Public Domain (CC0), Copyright Screaming Brain Studios.
+
 ## License
 
 Licensed under either of:

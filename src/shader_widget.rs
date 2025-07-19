@@ -47,6 +47,7 @@ impl shader::Primitive for HypercubePrimitive {
         if !storage.has::<Renderer>() {
             let renderer = pollster::block_on(Renderer::new(
                 device,
+                queue,
                 format,
                 *bounds,
                 viewport.physical_size(),

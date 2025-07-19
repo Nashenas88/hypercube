@@ -214,3 +214,44 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     return vec4<f32>(final_color, in.color.a);
 }
+
+// Skybox shaders
+@group(0) @binding(0)
+var<uniform> sky_camera: CameraUniform;
+
+@group(0) @binding(1)
+var sky_texture: texture_cube<f32>;
+
+@group(0) @binding(2)
+var sky_sampler: sampler;
+
+struct SkyboxVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+}
+
+// Skybox vertex shader
+@vertex
+fn vs_sky(@location(0) position: vec2<f32>) -> SkyboxVertexOutput {
+    var out: SkyboxVertexOutput;
+    
+    // Use the vertex position from the vertex buffer
+    let x = position.x;
+    let y = position.y;
+    
+    out.clip_position = vec4<f32>(x, y, 1.0, 1.0);
+    
+    // Convert screen position back to world direction for cubemap sampling
+    // Inverse of view-projection matrix to get world space direction
+    let inverse_view_proj = transpose(sky_camera.view_proj);
+    let world_pos = inverse_view_proj * vec4<f32>(x, y, 1.0, 1.0);
+    out.world_position = normalize(world_pos.xyz / world_pos.w);
+    
+    return out;
+}
+
+// Skybox fragment shader
+@fragment
+fn fs_sky(in: SkyboxVertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(sky_texture, sky_sampler, in.world_position);
+}
