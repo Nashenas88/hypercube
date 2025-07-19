@@ -11,7 +11,7 @@ use wgpu::util::DeviceExt;
 
 use crate::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
-use crate::cube::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube};
+use crate::cube::{BASE_INDICES, CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube};
 
 /// GPU renderer for the hypercube visualization.
 ///
@@ -33,6 +33,8 @@ pub(crate) struct Renderer {
     vertex_buffer: wgpu::Buffer,
     /// Number of stickers (each generates 36 vertices)
     num_stickers: usize,
+    /// Index buffers for each 4D face
+    face_index_buffer: wgpu::Buffer,
     /// CPU-side camera uniform data
     camera_uniform: CameraUniform,
     /// GPU buffer containing camera matrices
@@ -254,6 +256,17 @@ impl Renderer {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let indices = BASE_INDICES
+            .into_iter()
+            .cycle()
+            .take(BASE_INDICES.len() * 8)
+            .collect::<Vec<_>>();
+        let face_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Face Index Buffer"),
+            contents: bytemuck::cast_slice(indices.as_slice()),
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         });
 
         // Main shader bind group layout (transform, camera, light, face_data, normals, instances)
@@ -576,7 +589,7 @@ impl Renderer {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back), // Enable back-face culling
+                cull_mode: Some(wgpu::Face::Back),
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -779,6 +792,7 @@ impl Renderer {
             depth_pipeline,
             current_render_mode: render_mode,
             vertex_buffer,
+            face_index_buffer,
             num_stickers,
             camera_uniform,
             camera_buffer,
@@ -908,6 +922,10 @@ impl Renderer {
         );
     }
 
+    pub(crate) fn update_indices(&mut self, queue: &Queue, indices: &[u16]) {
+        queue.write_buffer(&self.face_index_buffer, 0, bytemuck::cast_slice(indices));
+    }
+
     /// Renders a single frame of the hypercube visualization.
     ///
     /// Updates camera uniforms, acquires surface texture, and draws all instances
@@ -990,9 +1008,16 @@ impl Renderer {
             render_pass.set_pipeline(pipeline);
             render_pass.set_bind_group(0, bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass
+                .set_index_buffer(self.face_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
             // Draw all cubes using instanced rendering (36 vertices per cube, num_stickers instances)
-            render_pass.draw(0..36, 0..self.num_stickers as u32);
+            // render_pass.draw(0..36, 0..self.num_stickers as u32);
+            render_pass.draw_indexed(
+                0..BASE_INDICES.len() as u32 * 8,
+                0,
+                0..self.num_stickers as u32,
+            );
         }
     }
 }

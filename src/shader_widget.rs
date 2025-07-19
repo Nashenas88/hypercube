@@ -9,7 +9,7 @@ use iced::{Point, Rectangle, event, mouse};
 use nalgebra::{Matrix4, Vector3};
 
 use crate::camera::{Camera, CameraController, Projection};
-use crate::cube::Hypercube;
+use crate::cube::{BASE_INDICES, CUBE_VERTICES, Hypercube};
 use crate::math::process_4d_rotation;
 use crate::renderer::Renderer;
 use crate::{Message, RenderMode};
@@ -24,6 +24,7 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) sticker_scale: f32,
     pub(crate) face_scale: f32,
     pub(crate) render_mode: RenderMode,
+    pub(crate) cached_indices: Vec<u16>,
     pub(crate) cached_normals: Vec<Vector3<f32>>,
 }
 
@@ -60,6 +61,7 @@ impl shader::Primitive for HypercubePrimitive {
         );
         renderer.update_camera(queue, &self.camera, &self.projection);
         renderer.update_normals(queue, &self.cached_normals);
+        renderer.update_indices(queue, &self.cached_indices);
         renderer.set_render_mode(self.render_mode);
     }
 
@@ -85,6 +87,7 @@ pub(crate) struct HypercubeShaderState {
     mouse_pressed: bool,
     last_mouse_pos: Option<Point>,
     shift_pressed: bool,
+    cached_indices: Vec<u16>,
     cached_normals: Vec<Vector3<f32>>,
 }
 
@@ -146,7 +149,8 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 
         // Recalculate normals if rotation changed
         if rotation_changed {
-            state.cached_normals = Self::calculate_normals(&state.rotation_4d);
+            (state.cached_normals, state.cached_indices) =
+                Self::calculate_normals_and_indices(&state.rotation_4d);
         }
 
         (status, None)
@@ -166,57 +170,42 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             sticker_scale: self.sticker_scale,
             face_scale: self.face_scale,
             render_mode: self.render_mode,
+            cached_indices: state.cached_indices.clone(),
             cached_normals: state.cached_normals.clone(),
         }
     }
 }
 
+const FACE_CENTERS: [nalgebra::Vector4<f32>; 8] = [
+    nalgebra::Vector4::new(0.0, 0.0, 0.0, -1.0), // Face 0: W = -1
+    nalgebra::Vector4::new(0.0, 0.0, -1.0, 0.0), // Face 1: Z = -1
+    nalgebra::Vector4::new(0.0, -1.0, 0.0, 0.0), // Face 2: Y = -1
+    nalgebra::Vector4::new(-1.0, 0.0, 0.0, 0.0), // Face 3: X = -1
+    nalgebra::Vector4::new(1.0, 0.0, 0.0, 0.0),  // Face 4: X = +1
+    nalgebra::Vector4::new(0.0, 1.0, 0.0, 0.0),  // Face 5: Y = +1
+    nalgebra::Vector4::new(0.0, 0.0, 1.0, 0.0),  // Face 6: Z = +1
+    nalgebra::Vector4::new(0.0, 0.0, 0.0, 1.0),  // Face 7: W = +1
+];
+
+const FIXED_DIMENSIONS: [usize; 8] = [3, 2, 1, 0, 0, 1, 2, 3];
+
+const VIEWER_DISTANCE: f32 = 3.0;
+
 impl HypercubeShaderProgram {
     /// Calculate normals for all cube faces after 4D transformation and 3D projection
-    fn calculate_normals(rotation_4d: &nalgebra::Matrix4<f32>) -> Vec<Vector3<f32>> {
+    fn calculate_normals_and_indices(
+        rotation_4d: &nalgebra::Matrix4<f32>,
+    ) -> (Vec<Vector3<f32>>, Vec<u16>) {
         let mut normals = Vec::with_capacity(48); // 8 faces × 6 normals each
+        let mut indices = Vec::with_capacity(288); // 36 indices * 8 4d faces
 
-        // 4D face centers and their fixed dimensions (matching shader logic)
-        let face_data = [
-            (nalgebra::Vector4::new(0.0, 0.0, 0.0, -1.0), 3), // Face 0: W = -1
-            (nalgebra::Vector4::new(0.0, 0.0, -1.0, 0.0), 2), // Face 1: Z = -1
-            (nalgebra::Vector4::new(0.0, -1.0, 0.0, 0.0), 1), // Face 2: Y = -1
-            (nalgebra::Vector4::new(-1.0, 0.0, 0.0, 0.0), 0), // Face 3: X = -1
-            (nalgebra::Vector4::new(1.0, 0.0, 0.0, 0.0), 0),  // Face 4: X = +1
-            (nalgebra::Vector4::new(0.0, 1.0, 0.0, 0.0), 1),  // Face 5: Y = +1
-            (nalgebra::Vector4::new(0.0, 0.0, 1.0, 0.0), 2),  // Face 6: Z = +1
-            (nalgebra::Vector4::new(0.0, 0.0, 0.0, 1.0), 3),  // Face 7: W = +1
-        ];
-
-        // Standard cube vertices (8 vertices) - use full size for normal calculation
-        let cube_vertices = [
-            [-1.0, -1.0, -1.0], // 0
-            [1.0, -1.0, -1.0],  // 1
-            [1.0, 1.0, -1.0],   // 2
-            [-1.0, 1.0, -1.0],  // 3
-            [-1.0, -1.0, 1.0],  // 4
-            [1.0, -1.0, 1.0],   // 5
-            [1.0, 1.0, 1.0],    // 6
-            [-1.0, 1.0, 1.0],   // 7
-        ];
-
-        // One triangle per face to calculate normal (6 faces)
-        let face_triangles = [
-            [0, 1, 2], // Front face (z = -1/3)
-            [1, 5, 6], // Right face (x = +1/3)
-            [5, 4, 7], // Back face (z = +1/3)
-            [4, 0, 3], // Left face (x = -1/3)
-            [3, 2, 6], // Top face (y = +1/3)
-            [4, 5, 1], // Bottom face (y = -1/3)
-        ];
-
-        const VIEWER_DISTANCE: f32 = 3.0;
-
-        for (face_idx, (face_center_4d, fixed_dim)) in face_data.iter().enumerate() {
+        for (face_idx, (face_center_4d, fixed_dim)) in
+            FACE_CENTERS.iter().zip(FIXED_DIMENSIONS.iter()).enumerate()
+        {
             // Transform 8 cube vertices to 3D
-            let mut transformed_vertices = [Vector3::<f32>::default(); 64];
+            let mut transformed_vertices = Vec::with_capacity(36);
 
-            for (vertex_idx, vertex) in cube_vertices.iter().enumerate() {
+            for (vertex_idx, vertex) in CUBE_VERTICES.iter().enumerate() {
                 let local_vertex = Vector3::new(vertex[0], vertex[1], vertex[2]);
 
                 // Generate vertex in 4D space around face center (matching shader logic)
@@ -254,14 +243,16 @@ impl HypercubeShaderProgram {
                     "{face_idx} * 8 + {vertex_idx} = {}",
                     face_idx * 8 + vertex_idx
                 );
-                transformed_vertices[face_idx * 8 + vertex_idx] = vertex_3d;
+                transformed_vertices.push(vertex_3d);
             }
 
             // Calculate one normal per cube face (6 faces)
-            for (cube_face_idx, triangle_indices) in face_triangles.iter().enumerate() {
-                let v0 = transformed_vertices[face_idx * 8 + triangle_indices[0]];
-                let v1 = transformed_vertices[face_idx * 8 + triangle_indices[1]];
-                let v2 = transformed_vertices[face_idx * 8 + triangle_indices[2]];
+            for (triangle_idx, mut triangle_indices) in
+                BASE_INDICES.as_chunks::<3>().0.iter().copied().enumerate()
+            {
+                let v0 = transformed_vertices[triangle_indices[0] as usize];
+                let v1 = transformed_vertices[triangle_indices[1] as usize];
+                let v2 = transformed_vertices[triangle_indices[2] as usize];
 
                 // Calculate triangle normal using cross product
                 let edge1 = v1 - v0;
@@ -275,7 +266,7 @@ impl HypercubeShaderProgram {
                 } else {
                     // Degenerate triangle, use a default normal
                     log::warn!(
-                        "Degenerate triangle detected for 4D face {face_idx} cube face {cube_face_idx}: vertices {v0:?}, {v1:?}, {v2:?}"
+                        "Degenerate triangle detected for 4D face {face_idx} triangle {triangle_idx}: vertices {v0:?}, {v1:?}, {v2:?}"
                     );
                     normal = Vector3::new(0.0, 0.0, 1.0);
                 }
@@ -284,20 +275,29 @@ impl HypercubeShaderProgram {
                 let centroid = transformed_vertices.iter().sum::<Vector3<f32>>() / 8.0;
                 if normal.dot(&centroid) < 0.0 {
                     log::warn!(
-                        "Bad winding order detected for 4D face {face_idx} cube face {cube_face_idx}: normal {normal:?} points inward, flipping"
+                        "Bad winding order detected for 4D face {face_idx} cube face {triangle_idx}: normal {normal:?} points inward, flipping"
                     );
                     normal = -normal;
+                    triangle_indices.swap(1, 2);
                 }
 
-                log::info!("normal: {normal:?} for face {cube_face_idx}, {face_idx}");
-                // Add this normal for all 6 vertices of this cube face (2 triangles × 3 vertices)
-                normals.push(normal);
+                if triangle_idx % 2 == 0 {
+                    log::info!(
+                        "normal: {normal:?} for face {}, {face_idx}",
+                        triangle_idx / 2
+                    );
+                    // Add this normal for all 6 vertices of this cube face (2 triangles × 3 vertices)
+                    normals.push(normal);
+                }
+
+                indices.extend(triangle_indices.into_iter());
             }
         }
 
+        log::debug!("Indices length: {}", indices.len());
         log::debug!("Normals length: {}", normals.len());
 
-        normals
+        (normals, indices)
     }
 
     /// Handle mouse events for 3D navigation and 4D rotation
@@ -418,7 +418,8 @@ impl Default for HypercubeShaderState {
         };
 
         let rotation_4d = nalgebra::Matrix4::identity();
-        let cached_normals = HypercubeShaderProgram::calculate_normals(&rotation_4d);
+        let (cached_normals, cached_indices) =
+            HypercubeShaderProgram::calculate_normals_and_indices(&rotation_4d);
 
         Self {
             hypercube,
@@ -429,6 +430,7 @@ impl Default for HypercubeShaderState {
             mouse_pressed: false,
             last_mouse_pos: None,
             shift_pressed: false,
+            cached_indices,
             cached_normals,
         }
     }

@@ -222,3 +222,15 @@ pub(crate) const CUBE_VERTICES: [[f32; 3]; 36] = [
     [-1.0, -1.0, -1.0], // 0
     [-1.0, -1.0,  1.0], // 4
 ];
+
+/// Used to manage winding issues that occur when rotating in 4D. Copied for each 4d face, and
+/// each face can swap indices if there's a winding issue.
+#[rustfmt::skip]
+pub(crate) const BASE_INDICES: [u16; 36] = [
+    0, 1, 2, 3, 4, 5,       // face 0
+    6, 7, 8, 9, 10, 11,     // face 1
+    12, 13, 14, 15, 16, 17, // face 2
+    18, 19, 20, 21, 22, 23, // face 3
+    24, 25, 26, 27, 28, 29, // face 4
+    30, 31, 32, 33, 34, 35, // face 5
+];
