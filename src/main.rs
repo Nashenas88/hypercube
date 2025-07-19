@@ -3,7 +3,7 @@
 //! An interactive 4D Rubik's cube that can be rotated in 4D space and viewed
 //! through 3D projection. Uses iced for UI and wgpu for GPU rendering.
 
-use iced::widget::{Column, Row, Shader, Slider, PickList};
+use iced::widget::{Column, PickList, Row, Shader, Slider};
 use iced::{Element, Length, Settings, Task};
 
 mod camera;
@@ -56,8 +56,8 @@ impl HypercubeApp {
     /// Create a new application instance
     pub(crate) fn new() -> Self {
         Self {
-            sticker_scale: 0.8, // Default from existing code
-            face_scale: 1.0,    // New parameter for future use
+            sticker_scale: 0.5, // Default from existing code
+            face_scale: 2.0,    // New parameter for future use
             render_mode: RenderMode::Standard,
         }
     }
@@ -94,8 +94,12 @@ impl HypercubeApp {
                     .spacing(5)
                     .push(iced::widget::text("Render Mode"))
                     .push(
-                        PickList::new(&RenderMode::ALL[..], Some(self.render_mode), Message::RenderModeChanged)
-                            .width(250),
+                        PickList::new(
+                            &RenderMode::ALL[..],
+                            Some(self.render_mode),
+                            Message::RenderModeChanged,
+                        )
+                        .width(250),
                     ),
             )
             .push(
@@ -145,7 +149,7 @@ impl HypercubeApp {
 
 /// Entry point for the hypercube visualization application
 fn main() -> iced::Result {
-    env_logger::init();
+    env_logger::builder().format_timestamp(None).init();
 
     let app = HypercubeApp::new();
     iced::application(app.title(), HypercubeApp::update, HypercubeApp::view)

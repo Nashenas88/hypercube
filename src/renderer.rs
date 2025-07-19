@@ -9,9 +9,9 @@ use iced::widget::shader::wgpu::{self, CommandEncoder, Device, Queue, TextureFor
 use iced::{Rectangle, Size};
 use wgpu::util::DeviceExt;
 
-use crate::{RenderMode};
+use crate::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
-use crate::cube::{Hypercube, INDICES, NORMAL_INDICES};
+use crate::cube::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube};
 
 /// GPU renderer for the hypercube visualization.
 ///
@@ -29,10 +29,10 @@ pub(crate) struct Renderer {
     depth_pipeline: wgpu::RenderPipeline,
     /// Current rendering mode
     current_render_mode: RenderMode,
-    /// Buffer containing vertex data from compute shader and used for rendering
+    /// Buffer containing instance data for each sticker
+    instance_buffer: wgpu::Buffer,
+    /// Buffer containing cube vertex positions
     vertex_buffer: wgpu::Buffer,
-    /// Buffer containing normal data from compute shader
-    normal_buffer: wgpu::Buffer,
     /// Number of stickers (each generates 36 vertices)
     num_stickers: usize,
     /// CPU-side camera uniform data
@@ -43,8 +43,20 @@ pub(crate) struct Renderer {
     light_uniform: LightUniform,
     /// GPU buffer containing lighting data
     light_buffer: wgpu::Buffer,
-    /// Bind group for camera and light uniform buffers
-    camera_bind_group: wgpu::BindGroup,
+    /// CPU-side face data uniform
+    face_data_uniform: FaceDataUniform,
+    /// GPU buffer containing face data
+    face_data_buffer: wgpu::Buffer,
+    /// CPU-side normals uniform data
+    normals_uniform: NormalsUniform,
+    /// GPU buffer containing normals data
+    normals_buffer: wgpu::Buffer,
+    /// Bind group for main shader (transform, camera, light, normals, instances)
+    main_bind_group: wgpu::BindGroup,
+    /// Bind group for normal shader (transform, camera, normals, instances)
+    normal_bind_group: wgpu::BindGroup,
+    /// Bind group for debug shaders (transform, camera, instances)
+    debug_bind_group: wgpu::BindGroup,
     /// Depth texture for z-buffering
     depth_texture: wgpu::Texture,
     /// Depth texture view for rendering
@@ -55,47 +67,22 @@ pub(crate) struct Renderer {
     clear_vertex_buffer: wgpu::Buffer,
     /// Clear quad index buffer
     clear_index_buffer: wgpu::Buffer,
-    /// Compute pipeline for 4D transformations
-    compute_pipeline: wgpu::ComputePipeline,
-    /// Transform uniform buffer for compute shader
+    /// Transform uniform buffer for vertex shaders
     transform_buffer: wgpu::Buffer,
-    /// Bind group for compute shader
-    compute_bind_group: wgpu::BindGroup,
 }
 
-/// GPU-compatible vertex data output from compute shader.
-///
-/// Each sticker generates 36 vertices that are already transformed and projected.
-/// Uses 4-component vectors for proper GPU alignment.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct VertexRaw {
-    /// 3D position after 4D projection (4th component stores visibility flag)
-    position: [f32; 4],
-    /// RGBA color values
-    color: [f32; 4],
-    /// Normal vector (4th component unused but needed for alignment)
-    normal: [f32; 4],
-}
-
-/// GPU-compatible normal data output from compute shader.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct NormalRaw {
-    /// 3D normal vector (4th component unused but needed for alignment)
-    normal: [f32; 4],
-}
-
-/// Input data for compute shader - represents a sticker in 4D space
+/// Instance data for vertex shader - represents a sticker in 4D space
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct StickerInput {
+pub(crate) struct StickerInstance {
     /// 4D position of the sticker
     position_4d: [f32; 4],
     /// RGBA color of the sticker
     color: [f32; 4],
-    /// 4D position of the face center this sticker belongs to
-    face_center_4d: [f32; 4],
+    /// Face ID (0-7) for this sticker
+    face_id: u32,
+    /// Padding for alignment
+    _padding: [u32; 3],
 }
 
 /// Transform data passed to compute shader
@@ -129,13 +116,32 @@ pub(crate) struct LightUniform {
     _padding3: f32,
 }
 
-/// Generates input data for the compute shader from hypercube stickers
-pub(crate) fn generate_sticker_inputs(hypercube: &Hypercube) -> Vec<StickerInput> {
-    let mut inputs = Vec::new();
+/// Face data uniform - contains face centers and fixed dimensions for all 8 faces
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct FaceDataUniform {
+    /// Face centers for all 8 faces (vec4<f32>)
+    face_centers: [[f32; 4]; 8],
+    /// Fixed dimensions for all 8 faces, only first index is used, rest are for padding
+    fixed_dims: [[u32; 4]; 8],
+}
 
-    for face in &hypercube.faces {
+/// Normals uniform data (8 faces × 6 normals each)
+/// Note: WGSL vec3<f32> arrays have 16-byte alignment, so we pad to vec4<f32>
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct NormalsUniform {
+    /// 48 normals (8 faces × 6 normals each), padded to vec4<f32> for alignment
+    normals: [[f32; 4]; 48],
+}
+
+/// Generates instance data for the vertex shader from hypercube stickers
+pub(crate) fn generate_sticker_instances(hypercube: &Hypercube) -> Vec<StickerInstance> {
+    let mut instances = Vec::new();
+
+    for (face_id, face) in hypercube.faces.iter().enumerate() {
         for sticker in &face.stickers {
-            inputs.push(StickerInput {
+            instances.push(StickerInstance {
                 position_4d: [
                     sticker.position.x,
                     sticker.position.y,
@@ -143,12 +149,13 @@ pub(crate) fn generate_sticker_inputs(hypercube: &Hypercube) -> Vec<StickerInput
                     sticker.position.w,
                 ],
                 color: nalgebra::Vector4::from(sticker.color).into(),
-                face_center_4d: [face.center.x, face.center.y, face.center.z, face.center.w],
+                face_id: face_id as u32,
+                _padding: [0; 3],
             });
         }
     }
 
-    inputs
+    instances
 }
 
 impl Renderer {
@@ -215,19 +222,47 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let sticker_inputs = generate_sticker_inputs(hypercube);
-        let num_stickers = sticker_inputs.len();
-
-        // Create normal buffer used by compute shader and vertex shader
-        let normal_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Normal Buffer"),
-            size: (num_stickers * 6 * std::mem::size_of::<NormalRaw>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
+        // Create face data uniform from constants
+        let face_data_uniform = FaceDataUniform {
+            face_centers: FACE_CENTERS.map(|v| [v.x, v.y, v.z, v.w]),
+            fixed_dims: FIXED_DIMS.map(|d| [d as u32, 0, 0, 0]),
+        };
+        let face_data_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Face Data Buffer"),
+            contents: bytemuck::cast_slice(&[face_data_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Create initial normals uniform (will be updated later)
+        let normals_uniform = NormalsUniform {
+            normals: [[0.0; 4]; 48],
+        };
 
-        let camera_bind_group_layout =
+        let normals_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Normals Buffer"),
+            contents: bytemuck::cast_slice(&[normals_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let sticker_instances = generate_sticker_instances(hypercube);
+        let num_stickers = sticker_instances.len();
+
+        // Create instance buffer for sticker data
+        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Instance Buffer"),
+            contents: bytemuck::cast_slice(&sticker_instances),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Create vertex buffer for cube geometry
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(CUBE_VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        // Main shader bind group layout (transform, camera, light, face_data, normals, instances)
+        let main_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
@@ -242,7 +277,75 @@ impl Renderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+                label: Some("Main Bind Group Layout"),
+            });
+
+        // Normal shader bind group layout (transform, camera, face_data, normals, instances)
+        let normal_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -254,6 +357,26 @@ impl Renderer {
                         binding: 2,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
@@ -261,26 +384,150 @@ impl Renderer {
                         count: None,
                     },
                 ],
-                label: Some("Camera Bind Group Layout"),
+                label: Some("Normal Bind Group Layout"),
             });
 
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &camera_bind_group_layout,
+        // Debug shaders bind group layout (transform, camera, face_data, instances)
+        let debug_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+                label: Some("Debug Bind Group Layout"),
+            });
+
+        // Create transform uniform buffer with initial slider values
+        let transform_data = Transform4D {
+            rotation_matrix: nalgebra::Matrix4::identity().into(),
+            viewer_distance: 3.0,
+            sticker_scale,
+            face_spacing: face_scale,
+            _padding: 0.0,
+        };
+        let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Transform Buffer"),
+            contents: bytemuck::cast_slice(&[transform_data]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let main_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &main_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
+                    resource: transform_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: light_buffer.as_entire_binding(),
+                    resource: camera_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: normal_buffer.as_entire_binding(),
+                    resource: light_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: face_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: normals_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: instance_buffer.as_entire_binding(),
                 },
             ],
-            label: Some("Camera Bind Group"),
+            label: Some("Main Bind Group"),
+        });
+
+        let normal_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &normal_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: transform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: face_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: normals_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: instance_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("Normal Bind Group"),
+        });
+
+        let debug_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &debug_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: transform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: face_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: instance_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("Debug Bind Group"),
         });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -291,7 +538,21 @@ impl Renderer {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout],
+                bind_group_layouts: &[&main_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let normal_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Normal Pipeline Layout"),
+                bind_group_layouts: &[&normal_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let debug_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Debug Pipeline Layout"),
+                bind_group_layouts: &[&debug_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -302,13 +563,9 @@ impl Renderer {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<VertexRaw>() as wgpu::BufferAddress,
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x4,  // position (4-component for alignment)
-                        1 => Float32x4,  // color
-                        2 => Float32x4,  // normal
-                    ],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -352,18 +609,14 @@ impl Renderer {
 
         let normal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Normal Pipeline"),
-            layout: Some(&render_pipeline_layout),
+            layout: Some(&normal_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &normal_shader,
                 entry_point: "vs_main",
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<VertexRaw>() as wgpu::BufferAddress,
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x4,  // position (4-component for alignment)
-                        1 => Float32x4,  // color
-                        2 => Float32x4,  // normal
-                    ],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -407,18 +660,14 @@ impl Renderer {
 
         let depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Depth Pipeline"),
-            layout: Some(&render_pipeline_layout),
+            layout: Some(&debug_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &depth_shader,
                 entry_point: "vs_main",
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<VertexRaw>() as wgpu::BufferAddress,
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x4,  // position (4-component for alignment)
-                        1 => Float32x4,  // color
-                        2 => Float32x4,  // normal
-                    ],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -452,15 +701,6 @@ impl Renderer {
                 alpha_to_coverage_enabled: false,
             },
             multiview: None,
-        });
-
-
-        // Create vertex buffer used by both compute shader and vertex shader
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Vertex Buffer"),
-            size: (num_stickers * 36 * std::mem::size_of::<VertexRaw>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
-            mapped_at_creation: false,
         });
 
         // Create clear quad geometry (full-screen quad in NDC)
@@ -537,142 +777,32 @@ impl Renderer {
             multiview: None,
         });
 
-        // Set up compute pipeline for 4D transformations
-        let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Compute Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/compute.wgsl").into()),
-        });
-
-        // Create input buffer for compute shader
-        let compute_input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Compute Input Buffer"),
-            contents: bytemuck::cast_slice(&sticker_inputs),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
-
-        // Create transform uniform buffer with initial slider values
-        let transform_data = Transform4D {
-            rotation_matrix: nalgebra::Matrix4::identity().into(),
-            viewer_distance: 3.0,
-            sticker_scale,
-            face_spacing: face_scale,
-            _padding: 0.0,
-        };
-        let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Transform Buffer"),
-            contents: bytemuck::cast_slice(&[transform_data]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        // Create compute bind group layout
-        let compute_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-                label: Some("Compute Bind Group Layout"),
-            });
-
-        // Create compute bind group
-        let compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &compute_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: transform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: compute_input_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: vertex_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: normal_buffer.as_entire_binding(),
-                },
-            ],
-            label: Some("Compute Bind Group"),
-        });
-
-        // Create compute pipeline
-        let compute_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Compute Pipeline Layout"),
-                bind_group_layouts: &[&compute_bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Compute Pipeline"),
-            layout: Some(&compute_pipeline_layout),
-            module: &compute_shader,
-            entry_point: "main",
-        });
-
         Self {
             bounds,
             render_pipeline,
             normal_pipeline,
             depth_pipeline,
             current_render_mode: render_mode,
+            instance_buffer,
             vertex_buffer,
-            normal_buffer,
             num_stickers,
             camera_uniform,
             camera_buffer,
             light_uniform,
             light_buffer,
-            camera_bind_group,
+            face_data_uniform,
+            face_data_buffer,
+            normals_uniform,
+            normals_buffer,
+            main_bind_group,
+            normal_bind_group,
+            debug_bind_group,
             depth_texture,
             depth_view,
             clear_pipeline,
             clear_vertex_buffer,
             clear_index_buffer,
-            compute_pipeline,
             transform_buffer,
-            compute_bind_group,
         }
     }
 
@@ -770,23 +900,22 @@ impl Renderer {
         );
     }
 
-    pub(crate) fn compute_instances(&self, encoder: &mut CommandEncoder) {
-        // Run compute shader
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Compute Pass"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&self.compute_pipeline);
-            compute_pass.set_bind_group(0, &self.compute_bind_group, &[]);
-
-            // Dispatch with workgroups of 64, covering all stickers
-            let workgroup_size = 64;
-            let num_workgroups = (self.num_stickers as u32).div_ceil(workgroup_size);
-            compute_pass.dispatch_workgroups(num_workgroups, 1, 1);
+    /// Updates the normals uniform buffer with pre-calculated normals.
+    ///
+    /// # Arguments
+    /// * `queue` - GPU command queue for buffer updates
+    /// * `normals` - Pre-calculated normals (48 vec3s: 8 faces × 6 normals each)
+    pub(crate) fn update_normals(&mut self, queue: &Queue, normals: &[nalgebra::Vector3<f32>]) {
+        // Convert Vec<Vector3> to [[f32; 4]; 48] (pad to vec4 for WGSL alignment)
+        for (i, normal) in normals.iter().enumerate().take(48) {
+            self.normals_uniform.normals[i] = [normal.x, normal.y, normal.z, 0.0];
         }
 
-        // No copy needed - compute shader writes directly to vertex buffer
+        queue.write_buffer(
+            &self.normals_buffer,
+            0,
+            bytemuck::cast_slice(&[self.normals_uniform]),
+        );
     }
 
     /// Renders a single frame of the hypercube visualization.
@@ -862,19 +991,18 @@ impl Renderer {
                 0.0,
                 1.0,
             );
-            // Select pipeline based on current render mode
-            let pipeline = match self.current_render_mode {
-                RenderMode::Standard => &self.render_pipeline,
-                RenderMode::Normals => &self.normal_pipeline,
-                RenderMode::Depth => &self.depth_pipeline,
+            // Select pipeline and bind group based on current render mode
+            let (pipeline, bind_group) = match self.current_render_mode {
+                RenderMode::Standard => (&self.render_pipeline, &self.main_bind_group),
+                RenderMode::Normals => (&self.normal_pipeline, &self.normal_bind_group),
+                RenderMode::Depth => (&self.depth_pipeline, &self.debug_bind_group),
             };
             render_pass.set_pipeline(pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(0, bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
 
-            // Draw all cubes sequentially (36 vertices per cube)
-            let total_vertices = (self.num_stickers * 36) as u32;
-            render_pass.draw(0..total_vertices, 0..1);
+            // Draw all cubes using instanced rendering (36 vertices per cube, num_stickers instances)
+            render_pass.draw(0..36, 0..self.num_stickers as u32);
         }
     }
 }

@@ -7,5 +7,6 @@ edition = "2024"
 iced = { version = "0.13.1", features = ["wgpu", "advanced"] }
 nalgebra = "0.33.2"
 env_logger = "0.11"
+log = "0.4.27"
 pollster = "0.4.0"
 bytemuck = { version = "1.12", features = ["derive"] }

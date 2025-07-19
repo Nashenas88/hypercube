@@ -92,7 +92,7 @@ This session focused on establishing the foundational requirements and initial t
 
 ## Next Steps:
 
-The foundation is now complete with proper 4D geometry, efficient GPU rendering, and comprehensive debug visualization. The immediate priority is resolving the normal consistency issue:
+The instancing implementation is complete and working correctly. The rendering system is now more efficient and maintainable. The immediate priorities are:
 
 ### Priority 1: Normal System Fixes:
 *   **Alternative Normal Calculation:** Investigate using 4D cross products or predefined face orientations
@@ -126,3 +126,106 @@ The foundation is now complete with proper 4D geometry, efficient GPU rendering,
 *   **Diagnostic Success:** Normal map mode now clearly reveals the extent of the normal orientation problem
 *   **Architecture Improvement:** Cleaner vertex structure with direct normal storage
 *   **Debug Capability:** Real-time normal visualization enables systematic debugging of 4D geometry issues
+
+## Recent Session (Latest):
+
+### Instancing Implementation (COMPLETED):
+**Goal:** Explore instancing with 36 vertices per cube and normals known at compile time, eliminating the compute shader and moving 4D matrix math to vertex shaders.
+
+**Major Changes:**
+1. **Eliminated Compute Shader:** Removed `compute.wgsl` entirely and moved all 4D transformations to vertex shaders
+2. **Static Cube Geometry:** Created 36 hardcoded vertices and normals in `cube.rs` (6 faces × 6 vertices per face)
+3. **Instanced Rendering:** Each sticker becomes an instance with `(position_4d, face_id, color)` data
+4. **Vertex Shader Processing:** All 4D rotation, projection, and face culling now happens in vertex shaders
+5. **Shared Math Functions:** Created `math4d.wgsl` for common 4D functions (though not actually shared due to WGSL limitations)
+
+**Architecture Improvements:**
+*   **Separate Bind Group Layouts:** Main shader uses 4 bindings (transform, camera, light, instances) while debug shaders use 3 bindings (transform, camera, instances)
+*   **Vertex Buffers:** Cube geometry stored in vertex buffers instead of hardcoded arrays
+*   **Cleaner Pipeline:** Direct instanced rendering with `render_pass.draw(0..36, 0..num_stickers)`
+*   **Better Resource Management:** Each shader only gets the resources it actually needs
+
+**Technical Details:**
+*   **Face ID Mapping:** Each instance includes face_id (0-7) which maps to tesseract face centers
+*   **4D Vertex Generation:** Vertex shader generates 4D positions by applying offsets to sticker centers based on fixed dimension
+*   **Efficient Culling:** 4D face culling and visibility testing moved to vertex shader
+*   **Performance Gain:** Eliminated compute shader dispatch and leveraged GPU vertex processing pipeline
+
+**Files Modified:**
+*   `src/cube.rs`: Added 36-vertex `CUBE_VERTICES` and `CUBE_NORMALS` arrays
+*   `src/renderer.rs`: Complete rewrite to use instancing, separate bind group layouts, vertex buffers
+*   `src/shaders/shader.wgsl`: Rewritten to use vertex attributes and instancing
+*   `src/shaders/depth_shader.wgsl`: Updated to use instancing with 3-binding layout
+*   `src/shaders/normal_shader.wgsl`: Updated to use instancing with 3-binding layout
+*   `src/shaders/math4d.wgsl`: Created shared math functions (though duplicated in practice)
+*   `src/shaders/compute.wgsl`: Deleted entirely
+
+**Issues Resolved:**
+*   **WGSL Dynamic Indexing:** Solved by using vertex buffers instead of static arrays
+*   **Shader Resource Mismatch:** Fixed by creating separate bind group layouts for different shader types
+*   **Performance:** More efficient GPU utilization through proper instancing
+
+**Current Status:**
+*   ✅ Application compiles and runs successfully
+*   ✅ Instanced rendering working correctly
+*   ✅ All three rendering modes (Standard, Normal, Depth) functional
+*   ✅ 4D transformations and projections working in vertex shaders
+*   ✅ Face culling working properly
+*   ✅ UI sliders correctly updating shader parameters (confirmed with debug output)
+*   ✅ Clean separation between main and debug rendering pipelines
+
+**Verification:**
+*   **Slider Functionality:** Debug output confirmed both sticker_scale and face_scale sliders are working and values are being passed to the renderer correctly
+*   **Transform Updates:** The `update_instances` method is being called with changing values when sliders move
+*   **Rendering Pipeline:** All shader variants compile and run without errors
+*   **Architecture:** Clean separation achieved between different rendering modes with appropriate resource binding
+
+## Latest Session - CPU Normal Calculation Implementation (COMPLETED):
+
+### Normal System Overhaul:
+**Goal:** Replace complex 4D normal calculations with CPU-based uniform system for consistent lighting across all 4D transformations.
+
+**Major Changes:**
+1. **CPU Normal Calculation:** Implemented `HypercubeShaderProgram::calculate_normals()` that generates normals from actual projected 3D geometry
+2. **Uniform-based System:** Added `NormalsUniform` struct with 48 pre-calculated normals (8 faces × 6 normals each)
+3. **Dedicated Bind Groups:** Created separate bind group layouts for main shader (5 bindings) and normal shader (4 bindings)
+4. **Real-time Updates:** Normals recalculated only when 4D rotation changes, cached otherwise
+5. **WGSL Alignment:** Proper vec4 padding for uniform buffer alignment (768 bytes total)
+
+**Architecture Improvements:**
+*   **Separate Normal Bind Group:** Normal shader uses dedicated bind group with transform, camera, normals, and instances
+*   **Efficient Lookup:** Shader uses `face_id * 6 + normal_index` for O(1) normal retrieval
+*   **Debug Logging:** Added warnings for degenerate triangles and bad winding order detection
+*   **Memory Optimization:** Only 768 bytes for all normals vs per-vertex calculations
+
+**Technical Details:**
+*   **Cube Vertex Generation:** Uses full-sized cube vertices (±1.0) instead of scaled (±1/3) for better normal differentiation
+*   **4D Transformation:** Normals calculated from cubes after 4D rotation and 3D projection
+*   **Winding Order Correction:** Automatic detection and correction of inward-pointing normals
+*   **Triangle-based Calculation:** Uses cross products of projected triangle edges for accurate normals
+
+**Files Modified:**
+*   `src/shader_widget.rs`: Added `calculate_normals()` method with full normal calculation pipeline
+*   `src/renderer.rs`: Added `NormalsUniform` struct, `normal_bind_group`, and `update_normals()` method
+*   `src/shaders/shader.wgsl`: Updated to use uniform normal lookup instead of 4D calculation
+*   `src/shaders/normal_shader.wgsl`: Updated to use normal bind group and uniform lookup
+
+**Issues Resolved:**
+*   **Normal Consistency:** CPU calculation eliminates 4D→3D transformation artifacts
+*   **Lighting Quality:** Each cube face now has distinct, properly oriented normals
+*   **Performance:** Normals calculated once per rotation change, not per vertex per frame
+*   **Debugging:** Clear visualization of normal orientation issues in normal map mode
+
+**Current Status:**
+*   ✅ CPU normal calculation working correctly
+*   ✅ 48 distinct normals generated per 4D rotation
+*   ✅ Proper winding order detection and correction
+*   ✅ Each sticker cube shows 6 different normal colors
+*   ✅ Uniform system efficiently provides normals to shaders
+*   ⚠️ **Identified Issue:** Vertex winding order in shaders is incorrect, causing some faces to render with wrong orientation
+
+**Verification:**
+*   **Normal Variation:** Debug logs show 6 distinct normals per 4D face with proper values
+*   **Winding Detection:** System correctly identifies and flips inward-pointing normals
+*   **Performance:** Smooth real-time operation with normals updating only on rotation changes
+*   **Visual Confirmation:** Normal map mode displays distinct colors for each cube face

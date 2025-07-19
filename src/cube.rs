@@ -5,6 +5,21 @@
 
 use nalgebra::Vector4;
 
+/// Face centers for the 8 faces of the tesseract
+pub(crate) const FACE_CENTERS: [Vector4<f32>; 8] = [
+    Vector4::new(0.0, 0.0, 0.0, -1.0), // Face 0: W = -1
+    Vector4::new(0.0, 0.0, -1.0, 0.0), // Face 1: Z = -1
+    Vector4::new(0.0, -1.0, 0.0, 0.0), // Face 2: Y = -1
+    Vector4::new(-1.0, 0.0, 0.0, 0.0), // Face 3: X = -1
+    Vector4::new(1.0, 0.0, 0.0, 0.0),  // Face 4: X = +1
+    Vector4::new(0.0, 1.0, 0.0, 0.0),  // Face 5: Y = +1
+    Vector4::new(0.0, 0.0, 1.0, 0.0),  // Face 6: Z = +1
+    Vector4::new(0.0, 0.0, 0.0, 1.0),  // Face 7: W = +1
+];
+
+/// Fixed dimensions for each face (0=X, 1=Y, 2=Z, 3=W)
+pub(crate) const FIXED_DIMS: [usize; 8] = [3, 2, 1, 0, 0, 1, 2, 3];
+
 /// Colors for the 8 sides of the 4D hypercube.
 ///
 /// Uses standard Rubik's cube colors for the first 6 sides, with two additional
@@ -129,23 +144,11 @@ impl Hypercube {
             Color::Brown,
         ];
 
-        // Tesseract face centers. Each face has one coordinate fixed at ±1.0, others are free for
-        // the 3x3x3 grid
-        let face_data = [
-            (Vector4::new(0.0, 0.0, 0.0, -1.0), 3), // Face 0: W = -1 (fixed_dim = 3)
-            (Vector4::new(0.0, 0.0, -1.0, 0.0), 2), // Face 1: Z = -1 (fixed_dim = 2)
-            (Vector4::new(0.0, -1.0, 0.0, 0.0), 1), // Face 2: Y = -1 (fixed_dim = 1)
-            (Vector4::new(-1.0, 0.0, 0.0, 0.0), 0), // Face 3: X = -1 (fixed_dim = 0)
-            (Vector4::new(1.0, 0.0, 0.0, 0.0), 0),  // Face 4: X = +1 (fixed_dim = 0)
-            (Vector4::new(0.0, 1.0, 0.0, 0.0), 1),  // Face 5: Y = +1 (fixed_dim = 1)
-            (Vector4::new(0.0, 0.0, 1.0, 0.0), 2),  // Face 6: Z = +1 (fixed_dim = 2)
-            (Vector4::new(0.0, 0.0, 0.0, 1.0), 3),  // Face 7: W = +1 (fixed_dim = 3)
-        ];
-
         let faces = colors
             .iter()
-            .zip(face_data.iter())
-            .map(|(&color, &(face_center, fixed_dim))| Face::new(color, face_center, fixed_dim))
+            .zip(FACE_CENTERS.iter())
+            .zip(FIXED_DIMS.iter())
+            .map(|((&color, &face_center), &fixed_dim)| Face::new(color, face_center, fixed_dim))
             .collect();
 
         Self { faces }
@@ -174,28 +177,52 @@ impl From<Color> for Vector4<f32> {
     }
 }
 
-/// Triangle indices for cube faces.
+/// 36 vertices for a cube (6 faces × 6 vertices per face using 2 triangles each).
 ///
-/// Defines how the vertices are connected to form the 6 faces of a cube.
-/// Each face is made of 2 triangles (6 indices per face).
-pub(crate) const INDICES: &[u16] = &[
-    0, 1, 2, 2, 3, 0, // front
-    1, 5, 6, 6, 2, 1, // right
-    5, 4, 7, 7, 6, 5, // back
-    4, 0, 3, 3, 7, 4, // left
-    3, 2, 6, 6, 7, 3, // top
-    4, 5, 1, 1, 0, 4, // bottom
-];
-
-/// Normal indices for cube faces.
-///
-/// Maps each triangle vertex to its corresponding face normal.
-/// Matches the INDICES array - each vertex gets the normal of the face it belongs to.
-pub(crate) const NORMAL_INDICES: &[u16] = &[
-    0, 0, 0, 0, 0, 0, // front face - all use normal 0
-    1, 1, 1, 1, 1, 1, // right face - all use normal 1  
-    2, 2, 2, 2, 2, 2, // back face - all use normal 2
-    3, 3, 3, 3, 3, 3, // left face - all use normal 3
-    4, 4, 4, 4, 4, 4, // top face - all use normal 4
-    5, 5, 5, 5, 5, 5, // bottom face - all use normal 5
+/// Each face is defined by 2 triangles (6 vertices total).
+/// Vertices are arranged by face: front, right, back, left, top, bottom.
+/// Scaled to 1/3 size to match the original sticker scale.
+pub(crate) const CUBE_VERTICES: &[[f32; 3]] = &[
+    // Front face (2 triangles: 0,1,2 and 2,3,0)
+    [-0.333333, -0.333333, -0.333333], // 0
+    [0.333333, -0.333333, -0.333333],  // 1
+    [0.333333, 0.333333, -0.333333],   // 2
+    [0.333333, 0.333333, -0.333333],   // 2
+    [-0.333333, 0.333333, -0.333333],  // 3
+    [-0.333333, -0.333333, -0.333333], // 0
+    // Right face (2 triangles: 1,5,6 and 6,2,1)
+    [0.333333, -0.333333, -0.333333], // 1
+    [0.333333, -0.333333, 0.333333],  // 5
+    [0.333333, 0.333333, 0.333333],   // 6
+    [0.333333, 0.333333, 0.333333],   // 6
+    [0.333333, 0.333333, -0.333333],  // 2
+    [0.333333, -0.333333, -0.333333], // 1
+    // Back face (2 triangles: 5,4,7 and 7,6,5)
+    [0.333333, -0.333333, 0.333333],  // 5
+    [-0.333333, -0.333333, 0.333333], // 4
+    [-0.333333, 0.333333, 0.333333],  // 7
+    [-0.333333, 0.333333, 0.333333],  // 7
+    [0.333333, 0.333333, 0.333333],   // 6
+    [0.333333, -0.333333, 0.333333],  // 5
+    // Left face (2 triangles: 4,0,3 and 3,7,4)
+    [-0.333333, -0.333333, 0.333333],  // 4
+    [-0.333333, -0.333333, -0.333333], // 0
+    [-0.333333, 0.333333, -0.333333],  // 3
+    [-0.333333, 0.333333, -0.333333],  // 3
+    [-0.333333, 0.333333, 0.333333],   // 7
+    [-0.333333, -0.333333, 0.333333],  // 4
+    // Top face (2 triangles: 3,2,6 and 6,7,3)
+    [-0.333333, 0.333333, -0.333333], // 3
+    [0.333333, 0.333333, -0.333333],  // 2
+    [0.333333, 0.333333, 0.333333],   // 6
+    [0.333333, 0.333333, 0.333333],   // 6
+    [-0.333333, 0.333333, 0.333333],  // 7
+    [-0.333333, 0.333333, -0.333333], // 3
+    // Bottom face (2 triangles: 4,5,1 and 1,0,4)
+    [-0.333333, -0.333333, 0.333333],  // 4
+    [0.333333, -0.333333, 0.333333],   // 5
+    [0.333333, -0.333333, -0.333333],  // 1
+    [0.333333, -0.333333, -0.333333],  // 1
+    [-0.333333, -0.333333, -0.333333], // 0
+    [-0.333333, -0.333333, 0.333333],  // 4
 ];
