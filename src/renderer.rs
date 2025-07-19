@@ -12,6 +12,7 @@ use wgpu::util::DeviceExt;
 use crate::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
 use crate::cube::{BASE_INDICES, CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube};
+use crate::shader_widget::UiControls;
 
 /// GPU renderer for the hypercube visualization.
 ///
@@ -168,9 +169,7 @@ impl Renderer {
         bounds: Rectangle<f32>,
         viewport_size: Size<u32>,
         hypercube: &Hypercube,
-        sticker_scale: f32,
-        face_scale: f32,
-        render_mode: RenderMode,
+        ui_controls: UiControls,
     ) -> Self {
         let camera_uniform = CameraUniform::new();
 
@@ -447,8 +446,8 @@ impl Renderer {
         let transform_data = Transform4D {
             rotation_matrix: nalgebra::Matrix4::identity().into(),
             viewer_distance: 3.0,
-            sticker_scale,
-            face_spacing: face_scale,
+            sticker_scale: ui_controls.sticker_scale,
+            face_spacing: ui_controls.face_scale,
             _padding: 0.0,
         };
         let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -790,7 +789,7 @@ impl Renderer {
             render_pipeline,
             normal_pipeline,
             depth_pipeline,
-            current_render_mode: render_mode,
+            current_render_mode: ui_controls.render_mode,
             vertex_buffer,
             face_index_buffer,
             num_stickers,

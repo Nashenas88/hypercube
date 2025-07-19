@@ -14,6 +14,14 @@ use crate::math::process_4d_rotation;
 use crate::renderer::Renderer;
 use crate::{Message, RenderMode};
 
+/// Parameters controlled from the ui.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UiControls {
+    pub(crate) sticker_scale: f32,
+    pub(crate) face_scale: f32,
+    pub(crate) render_mode: RenderMode,
+}
+
 /// Custom primitive for rendering our 4D hypercube
 #[derive(Debug, Clone)]
 pub(crate) struct HypercubePrimitive {
@@ -21,9 +29,7 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) camera: Camera,
     pub(crate) projection: Projection,
     pub(crate) rotation_4d: Matrix4<f32>,
-    pub(crate) sticker_scale: f32,
-    pub(crate) face_scale: f32,
-    pub(crate) render_mode: RenderMode,
+    pub(crate) ui_controls: UiControls,
     pub(crate) cached_indices: Vec<u16>,
     pub(crate) cached_normals: Vec<Vector3<f32>>,
 }
@@ -45,9 +51,7 @@ impl shader::Primitive for HypercubePrimitive {
                 *bounds,
                 viewport.physical_size(),
                 &self.hypercube,
-                self.sticker_scale,
-                self.face_scale,
-                self.render_mode,
+                self.ui_controls,
             ));
             storage.store(renderer);
         }
@@ -56,13 +60,13 @@ impl shader::Primitive for HypercubePrimitive {
         renderer.update_instances(
             queue,
             &self.rotation_4d,
-            self.sticker_scale,
-            self.face_scale,
+            self.ui_controls.sticker_scale,
+            self.ui_controls.face_scale,
         );
         renderer.update_camera(queue, &self.camera, &self.projection);
         renderer.update_normals(queue, &self.cached_normals);
         renderer.update_indices(queue, &self.cached_indices);
-        renderer.set_render_mode(self.render_mode);
+        renderer.set_render_mode(self.ui_controls.render_mode);
     }
 
     fn render(
@@ -167,9 +171,11 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             camera: state.camera.clone(),
             projection: state.projection,
             rotation_4d: state.rotation_4d,
-            sticker_scale: self.sticker_scale,
-            face_scale: self.face_scale,
-            render_mode: self.render_mode,
+            ui_controls: UiControls {
+                sticker_scale: self.sticker_scale,
+                face_scale: self.face_scale,
+                render_mode: self.render_mode,
+            },
             cached_indices: state.cached_indices.clone(),
             cached_normals: state.cached_normals.clone(),
         }
@@ -274,7 +280,7 @@ impl HypercubeShaderProgram {
                 // Check winding order: normal should point outward from cube center
                 let centroid = transformed_vertices.iter().sum::<Vector3<f32>>() / 8.0;
                 if normal.dot(&centroid) < 0.0 {
-                    log::warn!(
+                    log::debug!(
                         "Bad winding order detected for 4D face {face_idx} cube face {triangle_idx}: normal {normal:?} points inward, flipping"
                     );
                     normal = -normal;
@@ -282,7 +288,7 @@ impl HypercubeShaderProgram {
                 }
 
                 if triangle_idx % 2 == 0 {
-                    log::info!(
+                    log::debug!(
                         "normal: {normal:?} for face {}, {face_idx}",
                         triangle_idx / 2
                     );

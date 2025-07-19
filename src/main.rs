@@ -47,9 +47,9 @@ pub(crate) struct HypercubeApp {
 /// Messages that the application can receive
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
-    StickerScaleChanged(f32),
-    FaceScaleChanged(f32),
-    RenderModeChanged(RenderMode),
+    StickerScale(f32),
+    FaceScale(f32),
+    RenderMode(RenderMode),
 }
 
 impl HypercubeApp {
@@ -70,13 +70,13 @@ impl HypercubeApp {
     /// Update the application state
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::StickerScaleChanged(value) => {
+            Message::StickerScale(value) => {
                 self.sticker_scale = value;
             }
-            Message::FaceScaleChanged(value) => {
+            Message::FaceScale(value) => {
                 self.face_scale = value;
             }
-            Message::RenderModeChanged(mode) => {
+            Message::RenderMode(mode) => {
                 self.render_mode = mode;
             }
         }
@@ -97,7 +97,7 @@ impl HypercubeApp {
                         PickList::new(
                             &RenderMode::ALL[..],
                             Some(self.render_mode),
-                            Message::RenderModeChanged,
+                            Message::RenderMode,
                         )
                         .width(250),
                     ),
@@ -107,7 +107,7 @@ impl HypercubeApp {
                     .spacing(5)
                     .push(iced::widget::text("Sticker Scale"))
                     .push(
-                        Slider::new(0.0..=0.9, self.sticker_scale, Message::StickerScaleChanged)
+                        Slider::new(0.0..=0.9, self.sticker_scale, Message::StickerScale)
                             .step(0.01)
                             .width(250),
                     ),
@@ -117,7 +117,7 @@ impl HypercubeApp {
                     .spacing(5)
                     .push(iced::widget::text("Face Scale"))
                     .push(
-                        Slider::new(1.0..=5.0, self.face_scale, Message::FaceScaleChanged)
+                        Slider::new(1.0..=5.0, self.face_scale, Message::FaceScale)
                             .step(0.01)
                             .width(250),
                     ),
