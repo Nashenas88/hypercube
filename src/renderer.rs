@@ -29,8 +29,6 @@ pub(crate) struct Renderer {
     depth_pipeline: wgpu::RenderPipeline,
     /// Current rendering mode
     current_render_mode: RenderMode,
-    /// Buffer containing instance data for each sticker
-    instance_buffer: wgpu::Buffer,
     /// Buffer containing cube vertex positions
     vertex_buffer: wgpu::Buffer,
     /// Number of stickers (each generates 36 vertices)
@@ -39,14 +37,6 @@ pub(crate) struct Renderer {
     camera_uniform: CameraUniform,
     /// GPU buffer containing camera matrices
     camera_buffer: wgpu::Buffer,
-    /// CPU-side light uniform data
-    light_uniform: LightUniform,
-    /// GPU buffer containing lighting data
-    light_buffer: wgpu::Buffer,
-    /// CPU-side face data uniform
-    face_data_uniform: FaceDataUniform,
-    /// GPU buffer containing face data
-    face_data_buffer: wgpu::Buffer,
     /// CPU-side normals uniform data
     normals_uniform: NormalsUniform,
     /// GPU buffer containing normals data
@@ -783,15 +773,10 @@ impl Renderer {
             normal_pipeline,
             depth_pipeline,
             current_render_mode: render_mode,
-            instance_buffer,
             vertex_buffer,
             num_stickers,
             camera_uniform,
             camera_buffer,
-            light_uniform,
-            light_buffer,
-            face_data_uniform,
-            face_data_buffer,
             normals_uniform,
             normals_buffer,
             main_bind_group,

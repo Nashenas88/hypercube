@@ -58,8 +58,6 @@ pub(crate) struct Sticker {
 pub(crate) struct Face {
     /// Collection of 27 stickers arranged in a 3x3x3 cube
     pub(crate) stickers: Vec<Sticker>,
-    /// 4D center position of this face
-    pub(crate) center: Vector4<f32>,
 }
 
 impl Face {
@@ -106,10 +104,7 @@ impl Face {
                 }
             }
         }
-        Self {
-            stickers,
-            center: face_center,
-        }
+        Self { stickers }
     }
 }
 
