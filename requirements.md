@@ -47,21 +47,26 @@ This document outlines the requirements for the 4D Rubik's Cube application. It 
 
 ## 4. Architecture (IMPLEMENTED)
 
-*   **App Struct:** Contains all application state:
-    *   Hypercube data structure
-    *   Camera and projection settings
-    *   4D rotation matrix
-    *   Input state tracking
-*   **Renderer Struct:** Pure rendering system that accepts external data:
-    *   Graphics resources (buffers, pipelines, textures)
-    *   Methods for updating instance data and rendering frames
-*   **Clean Separation:** App handles logic and input, Renderer handles graphics, with clear interfaces.
+*   **HypercubeApp Struct:** Main application state containing UI controls:
+    *   Sticker scale and face scale parameters
+    *   Current render mode (Standard, Normal Map, Depth Map)
+    *   UI message handling and state updates
+*   **HypercubeShaderProgram:** Custom iced shader widget managing 3D rendering:
+    *   Camera controller and 4D rotation state
+    *   Mouse and keyboard input handling
+    *   Integration with iced's rendering pipeline
+*   **Renderer Struct:** Pure GPU rendering system:
+    *   wgpu resources (buffers, pipelines, textures)
+    *   Instanced rendering for all 216 sticker cubes
+    *   Multiple rendering modes with specialized shaders
+*   **Clean Separation:** UI state, 3D logic, and graphics rendering are clearly separated with well-defined interfaces.
 
 ## 5. Technical Configuration
 
 *   **Language:** Rust (2024 edition)
-*   **Graphics:** `wgpu` 0.20 with `winit` 0.29 for windowing
-*   **Mathematics:** `nalgebra` 0.32 for 4D linear algebra
+*   **UI Framework:** `iced` 0.13.1 with wgpu integration for modern GUI
+*   **Graphics:** `wgpu` via iced for GPU-accelerated rendering
+*   **Mathematics:** `nalgebra` 0.33.2 for 4D linear algebra
 *   **Constants:**
     *   Sticker scale: 0.8 (size of individual cubes)
     *   Sticker spacing: 1.2 (gap between stickers)
@@ -74,11 +79,14 @@ This document outlines the requirements for the 4D Rubik's Cube application. It 
 *   **Complete 4D Hypercube Visualization:** All 8 faces properly positioned and rendered in 4D space
 *   **Interactive 4D Exploration:** Users can rotate the hypercube in 4D space to see different cross-sections
 *   **Proper 3D Navigation:** Standard 3D camera controls for viewing the projected hypercube from different angles
-*   **4D Face Culling:** Intelligent culling shows only front-facing faces (typically 7 out of 8)
-*   **Hardware Triangle Culling:** GPU-based backface culling for optimal performance
-*   **Visual Depth Cues:** Depth testing ensures correct visual ordering of sticker cubes
-*   **Smooth Real-time Controls:** Responsive mouse controls with configurable sensitivity
-*   **Interactive UI:** Sliders for sticker scale and face spacing adjustment
+*   **4D Face Culling:** Culling shows only front-facing faces (typically 7 out of 8)
+*   **Hardware Triangle Culling:** GPU-based backface culling
+*   **Visual Depth Cues:** Depth testing provides visual ordering of sticker cubes
+*   **Real-time Controls:** Responsive mouse controls with configurable sensitivity
+*   **UI Framework:** iced-based interface with controls
+*   **Interactive Controls:** Sliders for sticker scale and face spacing
+*   **Debug Visualization:** Dropdown menu for switching between rendering modes
+*   **Lighting System:** Directional lighting with normal calculations across all 4D transformations
 *   **State Management:** Clean architecture supporting future game mechanics
 
 ## 7. Future Features (TO BE IMPLEMENTED)
@@ -93,28 +101,29 @@ This document outlines the requirements for the 4D Rubik's Cube application. It 
 *   **Piece Classification:** Implementation of the 80 movable pieces (corners, edges, faces, cells)
 
 ### Visual Enhancements
-*   **Lighting System:** Implement 3D lighting with directional light sources to enhance depth perception
+*   **Lighting System:** Directional light sources with Phong lighting model provide enhanced depth perception ✓
 *   **Shadow Rendering:** Add shadow mapping or shadow volumes to provide visual grounding for the hypercube
 
 ## 8. Performance Requirements (NON-FUNCTIONAL)
 
-### Shader Optimization
-*   **Branch Reduction:** Minimize conditional statements in shaders for better GPU performance
-    *   Replace switch statements with lookup tables or mathematical formulas
-    *   Use select() functions instead of if/else branches where possible
-    *   Optimize culling logic to avoid divergent execution paths
+### Current Performance Status (IMPLEMENTED)
+*   **Instanced Rendering:** ✓ Instanced rendering with 36 vertices per cube
+*   **Vertex Shader Processing:** ✓ All 4D transformations moved to vertex shaders 
+*   **Static Geometry:** ✓ Pre-generated cube vertices stored in vertex buffers
+*   **GPU Resource Management:** ✓ Bind group layouts for different shader types
+*   **CPU Normal Calculation:** ✓ Normals calculated on CPU, cached, and passed via uniforms
 
-### Rendering Pipeline Optimization
-*   **Improved Instancing:** Optimize vertex generation and transformation pipeline
-    *   Pre-generate all cube vertices once and reuse across instances
-    *   Move 4D-to-3D projection from compute shader to vertex shader
-    *   Use vertex attributes instead of storage buffers for better cache locality
-    *   Reduce per-frame GPU memory transfers
+### Remaining Optimizations
+*   **Branch Reduction:** Minimize conditional statements in shaders for better GPU performance
+*   **Memory Layout:** Improve uniform buffer layouts and alignment
 
 ## 9. Technical Notes
 
-*   **Performance:** GPU compute shader processes all 216 cubes with efficient 4D transformations
-*   **Culling Efficiency:** Dual-stage culling (4D face + hardware triangle) minimizes overdraw
-*   **Extensibility:** Architecture designed to easily add game mechanics and move systems
-*   **Cross-platform:** `wgpu` ensures compatibility across Windows, macOS, and Linux
-*   **Memory Management:** Efficient GPU buffer management with compute shader storage buffers
+*   **Performance:** Vertex shader-based instanced rendering processes all 216 cubes
+*   **UI Integration:** Integration with iced framework for desktop application experience
+*   **Culling System:** Dual-stage culling (4D face + hardware triangle) reduces overdraw
+*   **Normal Calculation:** CPU-calculated normals provide lighting across 4D transformations
+*   **Debug Features:** Multiple rendering modes (Standard/Normal/Depth) for development and debugging
+*   **Extensibility:** Clean architecture designed to easily add game mechanics and move systems
+*   **Cross-platform:** iced + wgpu support Windows, macOS, and Linux
+*   **Memory Management:** GPU buffer management with vertex attributes and uniform buffers
