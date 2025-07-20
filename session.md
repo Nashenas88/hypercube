@@ -8,6 +8,7 @@ A 4D Rubik's Cube visualization application built with Rust, iced, and wgpu, fea
 *   **Complete 4D Hypercube Visualization:** 8 faces with 27 stickers each (216 total) positioned in authentic tesseract geometry
 *   **Interactive 4D Exploration:** Real-time 4D rotation using mouse controls (Shift + right drag)
 *   **3D Camera System:** Orbital camera with right mouse drag and mouse wheel zoom
+*   **Mouse Sticker Highlighting:** Real-time sticker highlighting on mouse hover with accurate 3D ray casting
 *   **UI:** iced-based interface with dropdown menus and sliders
 *   **Multiple Rendering Modes:** Standard lighting, Normal map visualization, and Depth map debugging
 *   **GPU-Accelerated Rendering:** Instanced rendering with vertex shader-based 4D transformations
@@ -29,6 +30,13 @@ A 4D Rubik's Cube visualization application built with Rust, iced, and wgpu, fea
 
 ## Recent Major Developments
 
+### Mouse Sticker Highlighting Implementation:
+*   **CPU-Based Ray Casting:** 3D mouse ray calculation from screen coordinates through camera projection
+*   **Optimized Intersection Testing:** Multi-level filtering with face-level AABB, sticker AABB, and triangle intersection
+*   **Shader Integration:** Added highlighting uniform buffer and fragment shader modifications for visual feedback
+*   **Performance Optimizations:** Face visibility culling and hierarchical intersection testing to reduce computation
+*   **Accurate Geometry Matching:** CPU ray casting uses identical vertex transformation logic as GPU shaders
+*   **Current Status:** Functional but still has accuracy issues in certain viewing angles and edge cases
 
 ### Technical Implementation:
 *   **Custom Shader Widget:** Implemented `HypercubeShaderProgram` as iced shader widget
@@ -67,6 +75,7 @@ A 4D Rubik's Cube visualization application built with Rust, iced, and wgpu, fea
 *   **Right Mouse + Drag:** 3D camera orbital rotation around hypercube
 *   **Right Mouse + Shift + Drag:** 4D hypercube rotation (XW and YW planes)
 *   **Mouse Wheel:** Zoom in/out (5.0 to 50.0 units)
+*   **Mouse Hover:** Real-time sticker highlighting with yellow highlight color
 *   **UI Sliders:** Real-time parameter adjustment
 *   **Dropdown Menu:** Render mode selection
 
@@ -80,9 +89,10 @@ A 4D Rubik's Cube visualization application built with Rust, iced, and wgpu, fea
 
 ## Files Structure:
 
-*   `src/main.rs`: iced application setup and UI message handling (161 lines)
-*   `src/shader_widget.rs`: Custom shader widget for 3D rendering (440 lines)
-*   `src/renderer.rs`: GPU rendering system and resource management (1170 lines)
+*   `src/main.rs`: iced application setup and UI message handling (162 lines)
+*   `src/shader_widget.rs`: Custom shader widget for 3D rendering and mouse interaction (444 lines)
+*   `src/renderer.rs`: GPU rendering system and resource management (1155 lines)
+*   `src/ray_casting.rs`: CPU-based ray casting for mouse sticker selection (426 lines)
 *   `src/cube.rs`: 4D geometry and data structures (237 lines)
 *   `src/camera.rs`: 3D camera system (188 lines)
 *   `src/math.rs`: 4D mathematics utilities (68 lines)
@@ -98,6 +108,7 @@ A 4D Rubik's Cube visualization application built with Rust, iced, and wgpu, fea
 *   Solving algorithms and automated solving
 
 ### Visual Enhancements:
+*   Fix mouse highlighting accuracy issues in edge cases and complex viewing angles
 *   Animation system for smooth move transitions
 *   Enhanced lighting with shadow mapping
 *   Particle effects for move feedback
@@ -115,5 +126,6 @@ A 4D Rubik's Cube visualization application built with Rust, iced, and wgpu, fea
 ✅ Desktop application experience
 ✅ Debug visualization modes
 ✅ GPU rendering pipeline
+✅ Mouse sticker highlighting system
 ✅ Clean, maintainable architecture
 ✅ Cross-platform compatibility

@@ -79,6 +79,7 @@ This document outlines the requirements for the 4D Rubik's Cube application. It 
 *   **Complete 4D Hypercube Visualization:** All 8 faces properly positioned and rendered in 4D space
 *   **Interactive 4D Exploration:** Users can rotate the hypercube in 4D space to see different cross-sections
 *   **Proper 3D Navigation:** Standard 3D camera controls for viewing the projected hypercube from different angles
+*   **Mouse Sticker Highlighting:** Real-time highlighting of individual stickers on mouse hover with accurate ray casting
 *   **4D Face Culling:** Culling shows only front-facing faces (typically 7 out of 8)
 *   **Hardware Triangle Culling:** GPU-based backface culling
 *   **Visual Depth Cues:** Depth testing provides visual ordering of sticker cubes

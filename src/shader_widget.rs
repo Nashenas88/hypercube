@@ -11,6 +11,7 @@ use nalgebra::{Matrix4, Vector3};
 use crate::camera::{Camera, CameraController, Projection};
 use crate::cube::{BASE_INDICES, CUBE_VERTICES, Hypercube};
 use crate::math::process_4d_rotation;
+use crate::ray_casting::{calculate_mouse_ray, find_intersected_sticker};
 use crate::renderer::Renderer;
 use crate::{Message, RenderMode};
 
@@ -32,6 +33,7 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) ui_controls: UiControls,
     pub(crate) cached_indices: Vec<u16>,
     pub(crate) cached_normals: Vec<Vector3<f32>>,
+    pub(crate) hovered_sticker: Option<usize>,
 }
 
 impl shader::Primitive for HypercubePrimitive {
@@ -67,6 +69,7 @@ impl shader::Primitive for HypercubePrimitive {
         renderer.update_camera(queue, &self.camera, &self.projection);
         renderer.update_normals(queue, &self.cached_normals);
         renderer.update_indices(queue, &self.cached_indices);
+        renderer.update_highlighting(queue, self.hovered_sticker);
         renderer.set_render_mode(self.ui_controls.render_mode);
     }
 
@@ -94,6 +97,7 @@ pub(crate) struct HypercubeShaderState {
     shift_pressed: bool,
     cached_indices: Vec<u16>,
     cached_normals: Vec<Vector3<f32>>,
+    hovered_sticker: Option<usize>,
 }
 
 /// The shader program that handles 4D hypercube rendering
@@ -179,6 +183,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             },
             cached_indices: state.cached_indices.clone(),
             cached_normals: state.cached_normals.clone(),
+            hovered_sticker: state.hovered_sticker,
         }
     }
 }
@@ -199,6 +204,22 @@ const FIXED_DIMENSIONS: [usize; 8] = [3, 2, 1, 0, 0, 1, 2, 3];
 const VIEWER_DISTANCE: f32 = 3.0;
 
 impl HypercubeShaderProgram {
+    /// Generate sticker data for ray casting
+    /// Returns (sticker_positions, face_ids) where each sticker has a 4D position and face ID
+    fn generate_sticker_data(hypercube: &Hypercube) -> (Vec<nalgebra::Vector4<f32>>, Vec<usize>) {
+        let mut sticker_positions = Vec::new();
+        let mut face_ids = Vec::new();
+        
+        for (face_id, face) in hypercube.faces.iter().enumerate() {
+            for sticker in &face.stickers {
+                sticker_positions.push(sticker.position);
+                face_ids.push(face_id);
+            }
+        }
+        
+        (sticker_positions, face_ids)
+    }
+
     /// Calculate normals for all cube faces after 4D transformation and 3D projection
     fn calculate_normals_and_indices(
         rotation_4d: &nalgebra::Matrix4<f32>,
@@ -314,8 +335,10 @@ impl HypercubeShaderProgram {
         match mouse_event {
             mouse::Event::CursorMoved { .. } => {
                 let Some(position) = cursor.position_in(bounds) else {
+                    state.hovered_sticker = None;
                     return event::Status::Ignored;
                 };
+                
                 // Calculate mouse delta for camera movement
                 if let Some(last_pos) = state.last_mouse_pos {
                     let delta_x = position.x - last_pos.x;
@@ -335,6 +358,25 @@ impl HypercubeShaderProgram {
                         }
                     }
                 }
+                
+                // Perform ray casting for sticker hover detection (only when not dragging)
+                if !state.mouse_pressed {
+                    let mouse_ray = calculate_mouse_ray(position, bounds, &state.camera, &state.projection);
+                    
+                    // Generate sticker data for ray casting
+                    let (sticker_positions, face_ids) = Self::generate_sticker_data(&state.hypercube);
+                    
+                    state.hovered_sticker = find_intersected_sticker(
+                        &mouse_ray,
+                        &sticker_positions,
+                        &face_ids,
+                        &state.rotation_4d,
+                        1.0 - self.sticker_scale, // Invert because UI slider is inverted
+                        self.face_scale,
+                        VIEWER_DISTANCE,
+                    );
+                }
+                
                 state.last_mouse_pos = Some(position);
                 return event::Status::Captured;
             }
@@ -362,8 +404,12 @@ impl HypercubeShaderProgram {
                     return event::Status::Captured;
                 }
             }
-            mouse::Event::CursorEntered | mouse::Event::CursorLeft => {
-                // Handle cursor enter/leave if needed
+            mouse::Event::CursorEntered => {
+                // Handle cursor enter if needed
+            }
+            mouse::Event::CursorLeft => {
+                // Clear hover state when cursor leaves the viewport
+                state.hovered_sticker = None;
             }
         }
 
@@ -435,6 +481,7 @@ impl Default for HypercubeShaderState {
             shift_pressed: false,
             cached_indices,
             cached_normals,
+            hovered_sticker: None,
         }
     }
 }

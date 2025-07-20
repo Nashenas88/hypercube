@@ -9,6 +9,7 @@ use iced::{Element, Length, Settings, Task};
 mod camera;
 mod cube;
 mod math;
+mod ray_casting;
 mod renderer;
 mod shader_widget;
 

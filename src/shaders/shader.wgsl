@@ -36,6 +36,14 @@ struct NormalsUniform {
     normals: array<vec3<f32>, 48>,  // 8 faces × 6 normals each
 };
 
+struct HighlightingUniform {
+    hovered_sticker_index: u32,
+    highlight_intensity: f32,
+    _padding1: vec2<f32>,
+    highlight_color: vec3<f32>,
+    _padding2: f32,
+};
+
 // Instance data for each sticker
 struct StickerInstance {
     position_4d: vec4<f32>,
@@ -62,11 +70,15 @@ var<uniform> normals: NormalsUniform;
 @group(0) @binding(5)
 var<storage, read> instances: array<StickerInstance>;
 
+@group(0) @binding(6)
+var<uniform> highlighting: HighlightingUniform;
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec4<f32>,
     @location(1) world_position: vec3<f32>,
     @location(2) world_normal: vec3<f32>,
+    @location(3) instance_index: u32,
 }
 
 // Include math4d functions directly (until WGSL supports imports)
@@ -180,6 +192,7 @@ fn vs_main(
     out.color = instance.color;
     out.world_position = vertex_3d;
     out.world_normal = world_normal;
+    out.instance_index = instance_index;
     
     return out;
 }
@@ -210,7 +223,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular = specular_strength * light.color * 0.3; // Reduced specular intensity
     
     // Combine all lighting components
-    let final_color = ambient + diffuse + specular;
+    var final_color = ambient + diffuse + specular;
+    
+    // Apply highlighting if this sticker is hovered
+    if (in.instance_index == highlighting.hovered_sticker_index) {
+        // Mix the final color with the highlight color
+        final_color = mix(final_color, highlighting.highlight_color, highlighting.highlight_intensity);
+    }
     
     return vec4<f32>(final_color, in.color.a);
 }

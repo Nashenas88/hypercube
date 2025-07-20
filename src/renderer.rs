@@ -50,6 +50,10 @@ pub(crate) struct Renderer {
     normals_uniform: NormalsUniform,
     /// GPU buffer containing normals data
     normals_buffer: wgpu::Buffer,
+    /// CPU-side highlighting uniform data
+    highlighting_uniform: HighlightingUniform,
+    /// GPU buffer containing highlighting data
+    highlighting_buffer: wgpu::Buffer,
     /// Bind group for main shader (transform, camera, light, normals, instances)
     main_bind_group: wgpu::BindGroup,
     /// Bind group for normal shader (transform, camera, normals, instances)
@@ -128,6 +132,22 @@ pub(crate) struct FaceDataUniform {
 pub(crate) struct NormalsUniform {
     /// 48 normals (8 faces × 6 normals each), padded to vec4<f32> for alignment
     normals: [[f32; 4]; 48],
+}
+
+/// Highlighting uniform data for sticker hover effects
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct HighlightingUniform {
+    /// Index of the hovered sticker (u32::MAX if none)
+    hovered_sticker_index: u32,
+    /// Highlighting intensity (0.0 to 1.0)
+    highlight_intensity: f32,
+    /// Padding for vec3 alignment
+    _padding1: [f32; 2],
+    /// Highlighting color (RGB)
+    highlight_color: [f32; 3],
+    /// Padding for alignment
+    _padding2: f32,
 }
 
 /// Loads a cross-format cubemap and creates a GPU texture.
@@ -368,6 +388,21 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Create initial highlighting uniform (no sticker highlighted)
+        let highlighting_uniform = HighlightingUniform {
+            hovered_sticker_index: u32::MAX, // No sticker highlighted
+            highlight_intensity: 0.3, // 30% intensity
+            _padding1: [0.0; 2],
+            highlight_color: [1.0, 1.0, 0.0], // Yellow highlight
+            _padding2: 0.0,
+        };
+
+        let highlighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Highlighting Buffer"),
+            contents: bytemuck::cast_slice(&[highlighting_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         let sticker_instances = generate_sticker_instances(hypercube);
         let num_stickers = sticker_instances.len();
 
@@ -494,6 +529,16 @@ impl Renderer {
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -649,6 +694,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: instance_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: highlighting_buffer.as_entire_binding(),
                 },
             ],
             label: Some("Main Bind Group"),
@@ -976,6 +1025,8 @@ impl Renderer {
             camera_buffer,
             normals_uniform,
             normals_buffer,
+            highlighting_uniform,
+            highlighting_buffer,
             main_bind_group,
             normal_bind_group,
             debug_bind_group,
@@ -1100,6 +1151,23 @@ impl Renderer {
 
     pub(crate) fn update_indices(&mut self, queue: &Queue, indices: &[u16]) {
         queue.write_buffer(&self.face_index_buffer, 0, bytemuck::cast_slice(indices));
+    }
+
+    /// Updates the highlighting uniform buffer with the currently hovered sticker.
+    ///
+    /// # Arguments
+    /// * `queue` - GPU command queue for buffer updates
+    /// * `hovered_sticker_index` - Index of the sticker being hovered (None if no hover)
+    pub(crate) fn update_highlighting(&mut self, queue: &Queue, hovered_sticker_index: Option<usize>) {
+        self.highlighting_uniform.hovered_sticker_index = hovered_sticker_index
+            .map(|index| index as u32)
+            .unwrap_or(u32::MAX);
+
+        queue.write_buffer(
+            &self.highlighting_buffer,
+            0,
+            bytemuck::cast_slice(&[self.highlighting_uniform]),
+        );
     }
 
     /// Renders a single frame of the hypercube visualization.
