@@ -12,6 +12,7 @@ use crate::cube::{FACE_CENTERS, NORMAL_TO_BASE_INDICES};
 use crate::math::{
     calc_sticker_center, is_face_visible, project_4d_to_3d, transform_sticker_vertices_to_3d,
 };
+use crate::renderer::DebugInstanceWithDistance;
 
 /// 3D ray for intersection testing
 #[derive(Debug, Clone)]
@@ -20,6 +21,8 @@ pub(crate) struct Ray {
     pub(crate) origin: Point3<f32>,
     /// Ray direction vector (normalized)
     pub(crate) direction: Vector3<f32>,
+    /// Ray inverse direction vector (normalized)
+    pub(crate) inverse_direction: Vector3<f32>,
 }
 
 /// Axis-aligned bounding box in 3D space
@@ -97,6 +100,7 @@ pub(crate) fn calculate_mouse_ray(
     Ray {
         origin: ray_start,
         direction,
+        inverse_direction: direction.map(|i| 1.0 / i),
     }
 }
 
@@ -105,38 +109,30 @@ pub(crate) fn calculate_mouse_ray(
 /// Returns Some(distance) if the ray intersects the box, None otherwise.
 /// Uses the standard 3D slab method for ray-AABB intersection.
 pub(crate) fn ray_aabb_intersection(ray: &Ray, aabb: &AABB) -> Option<f32> {
-    // Pre-compute inverse ray direction to avoid division in the loop
-    let inv_dir = Vector3::new(
-        1.0 / ray.direction.x,
-        1.0 / ray.direction.y,
-        1.0 / ray.direction.z,
-    );
-
     // Calculate intersection distances with each pair of parallel planes
     // X-axis slab: two planes at aabb.min.x and aabb.max.x
-    let t1 = (aabb.min.x - ray.origin.x) * inv_dir.x; // Distance to min X plane
-    let t2 = (aabb.max.x - ray.origin.x) * inv_dir.x; // Distance to max X plane
+    let t1 = (aabb.min.x - ray.origin.x) * ray.inverse_direction.x; // Distance to min X plane
+    let t2 = (aabb.max.x - ray.origin.x) * ray.inverse_direction.x; // Distance to max X plane
 
     // Y-axis slab: two planes at aabb.min.y and aabb.max.y
-    let t3 = (aabb.min.y - ray.origin.y) * inv_dir.y; // Distance to min Y plane
-    let t4 = (aabb.max.y - ray.origin.y) * inv_dir.y; // Distance to max Y plane
+    let t3 = (aabb.min.y - ray.origin.y) * ray.inverse_direction.y; // Distance to min Y plane
+    let t4 = (aabb.max.y - ray.origin.y) * ray.inverse_direction.y; // Distance to max Y plane
 
     // Z-axis slab: two planes at aabb.min.z and aabb.max.z
-    let t5 = (aabb.min.z - ray.origin.z) * inv_dir.z; // Distance to min Z plane
-    let t6 = (aabb.max.z - ray.origin.z) * inv_dir.z; // Distance to max Z plane
+    let t5 = (aabb.min.z - ray.origin.z) * ray.inverse_direction.z; // Distance to min Z plane
+    let t6 = (aabb.max.z - ray.origin.z) * ray.inverse_direction.z; // Distance to max Z plane
 
     // Find the farthest near intersection and nearest far intersection
     // tmin = where the ray ENTERS the 3D box (latest of all near intersections)
     // tmax = where the ray EXITS the 3D box (earliest of all far intersections)
-    let tmin = t1
-        .min(t2) // Entry distance for X slab
-        .max(t3.min(t4)) // Take latest entry (X or Y)
-        .max(t5.min(t6)); // Take latest entry (X, Y, or Z)
-
-    let tmax = t1
-        .max(t2) // Exit distance for X slab
-        .min(t3.max(t4)) // Take earliest exit (X or Y)
-        .min(t5.max(t6)); // Take earliest exit (X, Y, or Z)
+    let tmin = f32::max(
+        f32::max(f32::min(t1, t2), f32::min(t3, t4)),
+        f32::min(t5, t6),
+    );
+    let tmax = f32::min(
+        f32::min(f32::max(t1, t2), f32::max(t3, t4)),
+        f32::max(t5, t6),
+    );
 
     // Check for intersection conditions:
     // 1. tmax < 0: The box is entirely behind the ray (no intersection)
@@ -268,8 +264,23 @@ fn calculate_face_aabb(
     AABB::from_center_size(face_center_3d, face_size)
 }
 
+/// Get debug color for each face (8 distinct colors for visualization)
+fn get_face_debug_color(face_id: usize) -> [f32; 4] {
+    match face_id {
+        0 => [1.0, 0.0, 0.0, 0.3], // Red with 30% alpha
+        1 => [0.0, 1.0, 0.0, 0.3], // Green
+        2 => [0.0, 0.0, 1.0, 0.3], // Blue
+        3 => [1.0, 1.0, 0.0, 0.3], // Yellow
+        4 => [1.0, 0.0, 1.0, 0.3], // Magenta
+        5 => [0.0, 1.0, 1.0, 0.3], // Cyan
+        6 => [0.8, 0.4, 0.0, 0.3], // Orange
+        7 => [0.5, 0.0, 0.8, 0.3], // Purple
+        _ => [0.5, 0.5, 0.5, 0.3], // Gray fallback
+    }
+}
+
 /// Find the sticker that the 3D mouse ray intersects
-/// Returns the sticker index if found, None otherwise
+/// Returns the sticker index and debug AABBs for intersected faces
 pub(crate) fn find_intersected_sticker(
     ray: &Ray,
     sticker_positions: &[Vector4<f32>],
@@ -278,16 +289,29 @@ pub(crate) fn find_intersected_sticker(
     sticker_scale: f32,
     face_spacing: f32,
     viewer_distance: f32,
-) -> Option<usize> {
+    camera: &Camera,
+) -> (Option<usize>, Vec<DebugInstanceWithDistance>) {
+    let camera_pos = [camera.eye.x, camera.eye.y, camera.eye.z];
+
     // First, determine which faces are visible and ray-intersectable
     let mut intersectable_faces = Vec::new();
+    let mut debug_instances = Vec::new();
+
     for face_id in 0..8 {
         if is_face_visible(face_id, rotation_4d, viewer_distance) {
             // Check if ray intersects face-level AABB
             let face_aabb =
                 calculate_face_aabb(face_id, rotation_4d, face_spacing, viewer_distance);
             if ray_aabb_intersection(ray, &face_aabb).is_some() {
+                log::info!("Ray hit face {face_id}");
                 intersectable_faces.push(face_id);
+
+                // Create debug instance for this intersected face AABB
+                let color = get_face_debug_color(face_id);
+                let min: [f32; 3] = face_aabb.min.coords.as_slice().try_into().unwrap();
+                let max: [f32; 3] = face_aabb.max.coords.as_slice().try_into().unwrap();
+                let debug_instance = DebugInstanceWithDistance::new(min, max, color, camera_pos);
+                debug_instances.push(debug_instance);
             }
         }
     }
@@ -328,5 +352,8 @@ pub(crate) fn find_intersected_sticker(
         }
     }
 
-    closest_sticker
+    // Sort debug instances back-to-front for proper transparency rendering
+    debug_instances.sort_by(|a, b| b.distance.partial_cmp(&a.distance).unwrap());
+
+    (closest_sticker, debug_instances)
 }

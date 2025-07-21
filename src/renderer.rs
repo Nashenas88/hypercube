@@ -38,6 +38,8 @@ pub(crate) struct Renderer {
     normal_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for depth visualization
     depth_pipeline: wgpu::RenderPipeline,
+    /// Graphics pipeline for debug AABB rendering
+    debug_pipeline: wgpu::RenderPipeline,
     /// Current rendering mode
     current_render_mode: RenderMode,
     /// Buffer containing cube vertex positions
@@ -58,12 +60,16 @@ pub(crate) struct Renderer {
     highlighting_uniform: HighlightingUniform,
     /// GPU buffer containing highlighting data
     highlighting_buffer: wgpu::Buffer,
+    /// GPU buffer for debug instance data (vertex attributes)
+    debug_instance_buffer: wgpu::Buffer,
     /// Bind group for main shader (transform, camera, light, normals, instances)
     main_bind_group: wgpu::BindGroup,
     /// Bind group for normal shader (transform, camera, normals, instances)
     normal_bind_group: wgpu::BindGroup,
     /// Bind group for debug shaders (transform, camera, instances)
     debug_bind_group: wgpu::BindGroup,
+    /// Bind group for debug AABB rendering (camera, debug_instances)
+    debug_aabb_bind_group: wgpu::BindGroup,
     /// Depth texture for z-buffering
     depth_texture: wgpu::Texture,
     /// Depth texture view for rendering
@@ -164,6 +170,60 @@ pub(crate) struct HighlightingUniform {
     highlight_color: [f32; 3],
     /// Padding for alignment
     _padding2: f32,
+}
+
+/// Debug instance data for GPU vertex attributes (transparent bounding box rendering)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct DebugInstance {
+    /// Transform matrix for AABB positioning and scaling (4x4 matrix)
+    transform: [[f32; 4]; 4],
+    /// RGBA color for this AABB
+    color: [f32; 4],
+}
+
+/// CPU-side debug instance with distance for sorting
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct DebugInstanceWithDistance {
+    /// GPU data that will be uploaded to vertex buffer
+    pub gpu_data: DebugInstance,
+    /// Distance from camera (for back-to-front sorting)
+    pub distance: f32,
+}
+
+impl DebugInstanceWithDistance {
+    /// Create a new debug instance for an AABB
+    pub fn new(min: [f32; 3], max: [f32; 3], color: [f32; 4], camera_pos: [f32; 3]) -> Self {
+        // Calculate center and size
+        let center = [
+            (min[0] + max[0]) * 0.5,
+            (min[1] + max[1]) * 0.5,
+            (min[2] + max[2]) * 0.5,
+        ];
+        let size = [
+            (max[0] - min[0]) * 0.5,
+            (max[1] - min[1]) * 0.5,
+            (max[2] - min[2]) * 0.5,
+        ];
+
+        // Create transform matrix: scale then translate
+        let transform = [
+            [size[0], 0.0, 0.0, 0.0],
+            [0.0, size[1], 0.0, 0.0],
+            [0.0, 0.0, size[2], 0.0],
+            [center[0], center[1], center[2], 1.0],
+        ];
+
+        // Calculate distance from camera for sorting
+        let dx = center[0] - camera_pos[0];
+        let dy = center[1] - camera_pos[1];
+        let dz = center[2] - camera_pos[2];
+        let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+
+        let gpu_data = DebugInstance { transform, color };
+
+        Self { gpu_data, distance }
+    }
 }
 
 /// Line transform uniform for positioning cylindrical lines
@@ -437,6 +497,19 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Create debug instance buffer for transparent AABB rendering
+        // Initialize with dummy instances to avoid zero-size buffer
+        let dummy_instance = DebugInstance {
+            transform: [[0.0; 4]; 4],    // Zero matrix (won't be visible)
+            color: [0.0, 0.0, 0.0, 0.0], // Transparent
+        };
+        let debug_instances = vec![dummy_instance; 25]; // 25 dummy elements
+        let debug_instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Debug Instance Buffer"),
+            contents: bytemuck::cast_slice(&debug_instances),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
         let mut vertices = CUBE_VERTICES;
         vertices
             .iter_mut()
@@ -691,6 +764,34 @@ impl Renderer {
                 label: Some("Debug Bind Group Layout"),
             });
 
+        // Debug AABB bind group layout (camera, debug_instances)
+        let debug_aabb_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+                label: Some("Debug AABB Bind Group Layout"),
+            });
+
         // Line shader bind group layout (camera, line_transform)
         let line_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -848,6 +949,22 @@ impl Renderer {
             label: Some("Line Bind Group"),
         });
 
+        // Create debug AABB bind group
+        let debug_aabb_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &debug_aabb_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: debug_instance_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("Debug AABB Bind Group"),
+        });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader.wgsl").into()),
@@ -877,6 +994,13 @@ impl Renderer {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Debug Pipeline Layout"),
                 bind_group_layouts: &[&debug_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let debug_aabb_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Debug AABB Pipeline Layout"),
+                bind_group_layouts: &[&debug_aabb_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -1085,6 +1209,57 @@ impl Renderer {
             multiview: None,
         });
 
+        // Create debug AABB shader and pipeline for transparent rendering
+        let debug_aabb_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Debug AABB Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/debug_shader.wgsl").into()),
+        });
+
+        let debug_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Debug AABB Pipeline"),
+            layout: Some(&debug_aabb_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &debug_aabb_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &debug_aabb_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING), // Enable transparency
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false, // Don't write depth for transparency
+                depth_compare: wgpu::CompareFunction::Less, // Still test depth
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
         // Create line shader and pipeline
         let line_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Line Shader"),
@@ -1180,6 +1355,7 @@ impl Renderer {
             render_pipeline,
             normal_pipeline,
             depth_pipeline,
+            debug_pipeline,
             current_render_mode: ui_controls.render_mode,
             vertex_buffer,
             face_index_buffer,
@@ -1190,9 +1366,11 @@ impl Renderer {
             normals_buffer,
             highlighting_uniform,
             highlighting_buffer,
+            debug_instance_buffer,
             main_bind_group,
             normal_bind_group,
             debug_bind_group,
+            debug_aabb_bind_group,
             depth_texture,
             depth_view,
             transform_buffer,
@@ -1343,6 +1521,30 @@ impl Renderer {
         );
     }
 
+    /// Updates the debug instances buffer for AABB visualization
+    ///
+    /// # Arguments
+    /// * `queue` - GPU command queue for buffer updates
+    /// * `debug_instances` - Debug instances to render as transparent AABBs
+    pub(crate) fn update_debug_instances(
+        &mut self,
+        queue: &Queue,
+        debug_instances: &[DebugInstanceWithDistance],
+    ) {
+        // Extract GPU data from debug instances (already sorted back-to-front)
+        let gpu_instances: Vec<DebugInstance> = debug_instances
+            .iter()
+            .map(|instance| instance.gpu_data)
+            .collect();
+
+        // Write to GPU buffer
+        queue.write_buffer(
+            &self.debug_instance_buffer,
+            0,
+            bytemuck::cast_slice(&gpu_instances),
+        );
+    }
+
     /// Updates the line transform matrix for ray visualization
     pub(crate) fn update_line_transform(&mut self, queue: &Queue, ray: &Ray) {
         use nalgebra::{Matrix4, Vector3};
@@ -1449,6 +1651,62 @@ impl Renderer {
             0,
             0..self.num_stickers as u32,
         );
+    }
+
+    /// Renders transparent debug AABB visualization
+    ///
+    /// # Arguments
+    /// * `encoder` - Command encoder for GPU commands
+    /// * `target` - Target texture view to render to
+    /// * `debug_instance_count` - Number of debug instances to render
+    pub(crate) fn render_debug_aabb(
+        &self,
+        encoder: &mut CommandEncoder,
+        target: &TextureView,
+        debug_instance_count: u32,
+    ) {
+        if debug_instance_count == 0 {
+            return; // Nothing to render
+        }
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Debug AABB Render Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load, // Don't clear - render on top of existing content
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load, // Keep existing depth values
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        render_pass.set_viewport(
+            self.bounds.x,
+            self.bounds.y,
+            self.bounds.width,
+            self.bounds.height,
+            0.0,
+            1.0,
+        );
+
+        // Render transparent debug AABBs
+        render_pass.set_pipeline(&self.debug_pipeline);
+        render_pass.set_bind_group(0, &self.debug_aabb_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..)); // Use same cube vertices
+
+        // Draw debug instances (36 vertices per cube, debug_instance_count instances)
+        render_pass.draw(0..36, 0..debug_instance_count);
     }
 
     /// Renders the mouse ray visualization if one exists

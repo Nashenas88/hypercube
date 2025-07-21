@@ -15,7 +15,7 @@ use crate::cube::{
 };
 use crate::math::{VIEWER_DISTANCE, process_4d_rotation, project_cube_point};
 use crate::ray_casting::{Ray, calculate_mouse_ray, find_intersected_sticker};
-use crate::renderer::Renderer;
+use crate::renderer::{Renderer, DebugInstanceWithDistance};
 use crate::{Message, RenderMode};
 
 /// Parameters controlled from the ui.
@@ -38,6 +38,7 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) cached_normals: Vec<Vector3<f32>>,
     pub(crate) hovered_sticker: Option<usize>,
     pub(crate) click_ray: Option<Ray>,
+    pub(crate) debug_instances: Vec<DebugInstanceWithDistance>,
 }
 
 impl shader::Primitive for HypercubePrimitive {
@@ -74,6 +75,7 @@ impl shader::Primitive for HypercubePrimitive {
         renderer.update_normals(queue, &self.cached_normals);
         renderer.update_indices(queue, &self.cached_indices);
         renderer.update_highlighting(queue, self.hovered_sticker);
+        renderer.update_debug_instances(queue, &self.debug_instances);
         renderer.set_render_mode(self.ui_controls.render_mode);
 
         // Update line transform if we have a click ray
@@ -91,6 +93,9 @@ impl shader::Primitive for HypercubePrimitive {
     ) {
         let renderer = storage.get::<Renderer>().unwrap();
         renderer.render(encoder, target);
+
+        // Render transparent debug AABBs
+        renderer.render_debug_aabb(encoder, target, self.debug_instances.len() as u32);
 
         // Render line if we have a click ray
         if self.click_ray.is_some() {
@@ -113,6 +118,7 @@ pub(crate) struct HypercubeShaderState {
     cached_normals: Vec<Vector3<f32>>,
     hovered_sticker: Option<usize>,
     click_ray: Option<Ray>,
+    debug_instances: Vec<DebugInstanceWithDistance>,
 }
 
 /// The shader program that handles 4D hypercube rendering
@@ -200,6 +206,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             cached_normals: state.cached_normals.clone(),
             hovered_sticker: state.hovered_sticker,
             click_ray: state.click_ray.clone(),
+            debug_instances: state.debug_instances.clone(),
         }
     }
 }
@@ -350,7 +357,7 @@ impl HypercubeShaderProgram {
                     let (sticker_positions, face_ids) =
                         Self::generate_sticker_data(&state.hypercube);
 
-                    state.hovered_sticker = find_intersected_sticker(
+                    let (hovered_sticker, debug_instances) = find_intersected_sticker(
                         &mouse_ray,
                         &sticker_positions,
                         &face_ids,
@@ -358,7 +365,10 @@ impl HypercubeShaderProgram {
                         1.0 - self.sticker_scale, // Invert because UI slider is inverted
                         self.face_scale,
                         VIEWER_DISTANCE,
+                        &state.camera,
                     );
+                    state.hovered_sticker = hovered_sticker;
+                    state.debug_instances = debug_instances;
                 }
 
                 state.last_mouse_pos = Some(position);
@@ -476,6 +486,7 @@ impl Default for HypercubeShaderState {
             cached_normals,
             hovered_sticker: None,
             click_ray: None,
+            debug_instances: Vec::new(),
         }
     }
 }
