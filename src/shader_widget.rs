@@ -333,7 +333,7 @@ impl HypercubeShaderProgram {
 
                     let (hovered_sticker, debug_instances) = find_intersected_sticker(
                         &mouse_ray,
-                        &state,
+                        state,
                         self.sticker_scale,
                         self.face_scale,
                         VIEWER_DISTANCE,
