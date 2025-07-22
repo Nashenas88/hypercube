@@ -9,8 +9,8 @@ use iced::{Point, Rectangle, event, mouse};
 use nalgebra::{Matrix4, Vector3};
 
 use crate::camera::{Camera, CameraController, Projection};
-use crate::cube::{BASE_INDICES, CUBE_VERTICES, Hypercube};
-use crate::math::process_4d_rotation;
+use crate::cube::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube, VERTEX_NORMAL_INDICES};
+use crate::math::{VIEWER_DISTANCE, process_4d_rotation, project_4d_to_3d};
 use crate::ray_casting::{calculate_mouse_ray, find_intersected_sticker};
 use crate::renderer::Renderer;
 use crate::{Message, RenderMode};
@@ -188,35 +188,20 @@ impl shader::Program<Message> for HypercubeShaderProgram {
     }
 }
 
-const FACE_CENTERS: [nalgebra::Vector4<f32>; 8] = [
-    nalgebra::Vector4::new(0.0, 0.0, 0.0, -1.0), // Face 0: W = -1
-    nalgebra::Vector4::new(0.0, 0.0, -1.0, 0.0), // Face 1: Z = -1
-    nalgebra::Vector4::new(0.0, -1.0, 0.0, 0.0), // Face 2: Y = -1
-    nalgebra::Vector4::new(-1.0, 0.0, 0.0, 0.0), // Face 3: X = -1
-    nalgebra::Vector4::new(1.0, 0.0, 0.0, 0.0),  // Face 4: X = +1
-    nalgebra::Vector4::new(0.0, 1.0, 0.0, 0.0),  // Face 5: Y = +1
-    nalgebra::Vector4::new(0.0, 0.0, 1.0, 0.0),  // Face 6: Z = +1
-    nalgebra::Vector4::new(0.0, 0.0, 0.0, 1.0),  // Face 7: W = +1
-];
-
-const FIXED_DIMENSIONS: [usize; 8] = [3, 2, 1, 0, 0, 1, 2, 3];
-
-const VIEWER_DISTANCE: f32 = 3.0;
-
 impl HypercubeShaderProgram {
     /// Generate sticker data for ray casting
     /// Returns (sticker_positions, face_ids) where each sticker has a 4D position and face ID
     fn generate_sticker_data(hypercube: &Hypercube) -> (Vec<nalgebra::Vector4<f32>>, Vec<usize>) {
         let mut sticker_positions = Vec::new();
         let mut face_ids = Vec::new();
-        
+
         for (face_id, face) in hypercube.faces.iter().enumerate() {
             for sticker in &face.stickers {
                 sticker_positions.push(sticker.position);
                 face_ids.push(face_id);
             }
         }
-        
+
         (sticker_positions, face_ids)
     }
 
@@ -228,7 +213,7 @@ impl HypercubeShaderProgram {
         let mut indices = Vec::with_capacity(288); // 36 indices * 8 4d faces
 
         for (face_idx, (face_center_4d, fixed_dim)) in
-            FACE_CENTERS.iter().zip(FIXED_DIMENSIONS.iter()).enumerate()
+            FACE_CENTERS.iter().zip(FIXED_DIMS.iter()).enumerate()
         {
             // Transform 8 cube vertices to 3D
             let mut transformed_vertices = Vec::with_capacity(36);
@@ -255,17 +240,9 @@ impl HypercubeShaderProgram {
                     "Face {face_idx}, vertex {vertex_idx} Mapping {local_vertex:?} to {vertex_4d:?}"
                 );
 
-                // Apply 4D rotation
-                let rotated_vertex_4d = rotation_4d * vertex_4d;
-
-                // Project to 3D (matching shader logic)
-                let w_distance = VIEWER_DISTANCE - rotated_vertex_4d.w;
-                let scale = VIEWER_DISTANCE / w_distance;
-                let vertex_3d = Vector3::new(
-                    rotated_vertex_4d.x * scale,
-                    rotated_vertex_4d.y * scale,
-                    rotated_vertex_4d.z * scale,
-                );
+                // Use shared transformation logic from math.rs
+                let vertex_3d_point = project_4d_to_3d(vertex_4d, rotation_4d, VIEWER_DISTANCE);
+                let vertex_3d = vertex_3d_point.coords;
 
                 log::debug!(
                     "{face_idx} * 8 + {vertex_idx} = {}",
@@ -275,8 +252,12 @@ impl HypercubeShaderProgram {
             }
 
             // Calculate one normal per cube face (6 faces)
-            for (triangle_idx, mut triangle_indices) in
-                BASE_INDICES.as_chunks::<3>().0.iter().copied().enumerate()
+            for (triangle_idx, mut triangle_indices) in VERTEX_NORMAL_INDICES
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .copied()
+                .enumerate()
             {
                 let v0 = transformed_vertices[triangle_indices[0] as usize];
                 let v1 = transformed_vertices[triangle_indices[1] as usize];
@@ -338,7 +319,7 @@ impl HypercubeShaderProgram {
                     state.hovered_sticker = None;
                     return event::Status::Ignored;
                 };
-                
+
                 // Calculate mouse delta for camera movement
                 if let Some(last_pos) = state.last_mouse_pos {
                     let delta_x = position.x - last_pos.x;
@@ -358,14 +339,16 @@ impl HypercubeShaderProgram {
                         }
                     }
                 }
-                
+
                 // Perform ray casting for sticker hover detection (only when not dragging)
                 if !state.mouse_pressed {
-                    let mouse_ray = calculate_mouse_ray(position, bounds, &state.camera, &state.projection);
-                    
+                    let mouse_ray =
+                        calculate_mouse_ray(position, bounds, &state.camera, &state.projection);
+
                     // Generate sticker data for ray casting
-                    let (sticker_positions, face_ids) = Self::generate_sticker_data(&state.hypercube);
-                    
+                    let (sticker_positions, face_ids) =
+                        Self::generate_sticker_data(&state.hypercube);
+
                     state.hovered_sticker = find_intersected_sticker(
                         &mouse_ray,
                         &sticker_positions,
@@ -376,7 +359,7 @@ impl HypercubeShaderProgram {
                         VIEWER_DISTANCE,
                     );
                 }
-                
+
                 state.last_mouse_pos = Some(position);
                 return event::Status::Captured;
             }

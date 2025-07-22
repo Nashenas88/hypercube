@@ -1,12 +1,17 @@
 //! 4D mathematics utilities for hypercube visualization.
 //!
-//! This module provides CPU-side 4D rotation calculations and mouse input processing.
-//! The heavy 4D-to-3D projection and instance generation is now handled by compute shaders.
+//! This module provides CPU-side 4D rotation calculations, 4D-to-3D projections,
+//! and shared transformation logic to eliminate code duplication.
 
-use nalgebra::Matrix4;
+use nalgebra::{Matrix4, Point3, Vector3, Vector4};
+
+use crate::cube::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS};
 
 /// Mouse sensitivity for 4D rotation controls
 const MOUSE_SENSITIVITY: f32 = 0.5;
+
+/// 4D viewer distance for perspective projection
+pub(crate) const VIEWER_DISTANCE: f32 = 3.0;
 
 /// Creates a 4D rotation matrix around the XW plane.
 ///
@@ -65,4 +70,150 @@ pub(crate) fn process_4d_rotation(
     let rotation_yw = create_4d_rotation_yw(angle_y);
 
     rotation_yw * rotation_xw * current_rotation
+}
+
+/// Transform a 4D position to 3D world space using perspective projection.
+///
+/// This is the core transformation used throughout the application for
+/// projecting 4D coordinates to visible 3D space. Replaces duplicate logic
+/// in ray_casting.rs and shader_widget.rs.
+///
+/// # Arguments
+/// * `position_4d` - 4D position to transform
+/// * `rotation_4d` - 4D rotation matrix
+/// * `viewer_distance` - Distance of 4D viewer from W=0 plane
+///
+/// # Returns
+/// Projected 3D position
+pub(crate) fn project_4d_to_3d(
+    position_4d: Vector4<f32>,
+    rotation_4d: &Matrix4<f32>,
+    viewer_distance: f32,
+) -> Point3<f32> {
+    // Apply 4D rotation
+    let rotated_4d = rotation_4d * position_4d;
+
+    // Project to 3D using perspective projection
+    let w_distance = viewer_distance - rotated_4d.w;
+    let scale = viewer_distance / w_distance;
+
+    Point3::new(
+        rotated_4d.x * scale,
+        rotated_4d.y * scale,
+        rotated_4d.z * scale,
+    )
+}
+
+/// Transform a 4D sticker position to 3D world space.
+///
+/// Combines sticker offset calculation with 4D rotation and 3D projection.
+/// Replaces duplicate logic in ray_casting.rs transform_sticker_to_3d().
+///
+/// # Arguments
+/// * `sticker_position_4d` - 4D position of the sticker
+/// * `face_id` - Face ID (0-7) to determine face center and fixed dimension
+/// * `rotation_4d` - 4D rotation matrix
+/// * `face_spacing` - Spacing multiplier for face separation
+/// * `viewer_distance` - Distance of 4D viewer from W=0 plane
+///
+/// # Returns
+/// 3D world position of the transformed sticker
+pub(crate) fn transform_sticker_to_3d(
+    sticker_position_4d: Vector4<f32>,
+    face_id: usize,
+    rotation_4d: &Matrix4<f32>,
+    face_spacing: f32,
+    viewer_distance: f32,
+) -> Point3<f32> {
+    // Get face information
+    let face_center_4d = FACE_CENTERS[face_id];
+
+    // Calculate sticker center in 4D (matching shader logic)
+    let sticker_offset_4d = sticker_position_4d - face_center_4d;
+    let scaled_face_center = face_center_4d * face_spacing;
+    let sticker_center_4d = scaled_face_center + sticker_offset_4d;
+
+    project_4d_to_3d(sticker_center_4d, rotation_4d, viewer_distance)
+}
+
+/// Transform all vertices of a sticker cube to 3D space.
+///
+/// Replaces the duplicate vertex transformation logic in both
+/// ray_casting.rs and shader_widget.rs.
+///
+/// # Arguments
+/// * `sticker_position_4d` - 4D position of the sticker
+/// * `face_id` - Face ID (0-7) to determine face center and fixed dimension  
+/// * `rotation_4d` - 4D rotation matrix
+/// * `sticker_scale` - Scale factor for individual stickers
+/// * `face_spacing` - Spacing multiplier for face separation
+/// * `viewer_distance` - Distance of 4D viewer from W=0 plane
+///
+/// # Returns
+/// Vector of 36 transformed 3D vertices (one complete cube)
+pub(crate) fn transform_sticker_vertices_to_3d(
+    sticker_position_4d: Vector4<f32>,
+    face_id: usize,
+    rotation_4d: &Matrix4<f32>,
+    sticker_scale: f32,
+    face_spacing: f32,
+    viewer_distance: f32,
+) -> Vec<Point3<f32>> {
+    let face_center_4d = FACE_CENTERS[face_id];
+    let fixed_dim = FIXED_DIMS[face_id];
+
+    // Calculate sticker center in 4D (matching shader logic exactly)
+    let sticker_offset_4d = sticker_position_4d - face_center_4d;
+    let scaled_face_center = face_center_4d * face_spacing;
+    let sticker_center_4d = scaled_face_center + sticker_offset_4d;
+
+    // Transform each cube vertex exactly like the shader does
+    let mut world_vertices = Vec::with_capacity(36);
+    for vertex in &CUBE_VERTICES {
+        let local_vertex = Vector3::new(vertex[0], vertex[1], vertex[2]) * sticker_scale;
+
+        // Generate vertex in 4D space around sticker center (matching shader logic)
+        let mut vertex_4d = sticker_center_4d;
+        let mut offset_idx = 0;
+
+        for axis in 0..4 {
+            if axis != fixed_dim {
+                match offset_idx {
+                    0 => vertex_4d[axis] += local_vertex.x,
+                    1 => vertex_4d[axis] += local_vertex.y,
+                    2 => vertex_4d[axis] += local_vertex.z,
+                    _ => {}
+                }
+                offset_idx += 1;
+            }
+        }
+
+        world_vertices.push(project_4d_to_3d(vertex_4d, rotation_4d, viewer_distance));
+    }
+
+    world_vertices
+}
+
+/// Check if a 4D face is visible from the viewer position.
+///
+/// Replaces the duplicate implementation in ray_casting.rs is_face_visible().
+///
+/// # Arguments
+/// * `face_id` - Face ID (0-7) to check visibility for
+/// * `rotation_4d` - 4D rotation matrix
+/// * `viewer_distance` - Distance of 4D viewer from W=0 plane
+///
+/// # Returns
+/// true if the face is visible, false if it should be culled
+pub(crate) fn is_face_visible(
+    face_id: usize,
+    rotation_4d: &Matrix4<f32>,
+    viewer_distance: f32,
+) -> bool {
+    let face_center_4d = FACE_CENTERS[face_id];
+    let rotated_face_center = rotation_4d * face_center_4d;
+    let viewer_position = Vector4::new(0.0, 0.0, 0.0, viewer_distance);
+    let to_viewer = viewer_position - rotated_face_center;
+    let dot_product = rotated_face_center.dot(&to_viewer);
+    dot_product < 0.0
 }

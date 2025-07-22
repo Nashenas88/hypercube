@@ -179,55 +179,66 @@ const COLORS: [Color; 8] = [
 /// Vertices are arranged by face: front, right, back, left, top, bottom.
 /// Scaled to 1/3 size to match the original sticker scale.
 #[rustfmt::skip]
+pub(crate) const BASE_CUBE_VERTICES: [[f32; 3]; 8] = [
+    [-1.0, -1.0, -1.0], // 0
+    [ 1.0, -1.0, -1.0], // 1
+    [ 1.0,  1.0, -1.0], // 2
+    [-1.0,  1.0, -1.0], // 3
+    [-1.0, -1.0,  1.0], // 4
+    [ 1.0, -1.0,  1.0], // 5
+    [ 1.0,  1.0,  1.0], // 6
+    [-1.0,  1.0,  1.0], // 7
+];
+#[rustfmt::skip]
 pub(crate) const CUBE_VERTICES: [[f32; 3]; 36] = [
     // Front face (2 triangles: 0,1,2 and 2,3,0)
-    [-1.0, -1.0, -1.0], // 0
-    [ 1.0, -1.0, -1.0], // 1
-    [ 1.0,  1.0, -1.0], // 2
-    [ 1.0,  1.0, -1.0], // 2
-    [-1.0,  1.0, -1.0], // 3
-    [-1.0, -1.0, -1.0], // 0
+    BASE_CUBE_VERTICES[0],
+    BASE_CUBE_VERTICES[1],
+    BASE_CUBE_VERTICES[2],
+    BASE_CUBE_VERTICES[2],
+    BASE_CUBE_VERTICES[3],
+    BASE_CUBE_VERTICES[0],
     // Right face (2 triangles: 1,5,6 and 6,2,1)
-    [ 1.0, -1.0, -1.0], // 1
-    [ 1.0, -1.0,  1.0], // 5
-    [ 1.0,  1.0,  1.0], // 6
-    [ 1.0,  1.0,  1.0], // 6
-    [ 1.0,  1.0, -1.0], // 2
-    [ 1.0, -1.0, -1.0], // 1
+    BASE_CUBE_VERTICES[1],
+    BASE_CUBE_VERTICES[5],
+    BASE_CUBE_VERTICES[6],
+    BASE_CUBE_VERTICES[6],
+    BASE_CUBE_VERTICES[2],
+    BASE_CUBE_VERTICES[1],
     // Back face (2 triangles: 5,4,7 and 7,6,5)
-    [ 1.0, -1.0,  1.0], // 5
-    [-1.0, -1.0,  1.0], // 4
-    [-1.0,  1.0,  1.0], // 7
-    [-1.0,  1.0,  1.0], // 7
-    [ 1.0,  1.0,  1.0], // 6
-    [ 1.0, -1.0,  1.0], // 5
+    BASE_CUBE_VERTICES[5],
+    BASE_CUBE_VERTICES[4],
+    BASE_CUBE_VERTICES[7],
+    BASE_CUBE_VERTICES[7],
+    BASE_CUBE_VERTICES[6],
+    BASE_CUBE_VERTICES[5],
     // Left face (2 triangles: 4,0,3 and 3,7,4)
-    [-1.0, -1.0,  1.0], // 4
-    [-1.0, -1.0, -1.0], // 0
-    [-1.0,  1.0, -1.0], // 3
-    [-1.0,  1.0, -1.0], // 3
-    [-1.0,  1.0,  1.0], // 7
-    [-1.0, -1.0,  1.0], // 4
+    BASE_CUBE_VERTICES[4],
+    BASE_CUBE_VERTICES[0],
+    BASE_CUBE_VERTICES[3],
+    BASE_CUBE_VERTICES[3],
+    BASE_CUBE_VERTICES[7],
+    BASE_CUBE_VERTICES[4],
     // Top face (2 triangles: 3,2,6 and 6,7,3)
-    [-1.0,  1.0, -1.0], // 3
-    [ 1.0,  1.0, -1.0], // 2
-    [ 1.0,  1.0,  1.0], // 6
-    [ 1.0,  1.0,  1.0], // 6
-    [-1.0,  1.0,  1.0], // 7
-    [-1.0,  1.0, -1.0], // 3
+    BASE_CUBE_VERTICES[3],
+    BASE_CUBE_VERTICES[2],
+    BASE_CUBE_VERTICES[6],
+    BASE_CUBE_VERTICES[6],
+    BASE_CUBE_VERTICES[7],
+    BASE_CUBE_VERTICES[3],
     // Bottom face (2 triangles: 4,5,1 and 1,0,4)
-    [-1.0, -1.0,  1.0], // 4
-    [ 1.0, -1.0,  1.0], // 5
-    [ 1.0, -1.0, -1.0], // 1
-    [ 1.0, -1.0, -1.0], // 1
-    [-1.0, -1.0, -1.0], // 0
-    [-1.0, -1.0,  1.0], // 4
+    BASE_CUBE_VERTICES[4],
+    BASE_CUBE_VERTICES[5],
+    BASE_CUBE_VERTICES[1],
+    BASE_CUBE_VERTICES[1],
+    BASE_CUBE_VERTICES[0],
+    BASE_CUBE_VERTICES[4],
 ];
 
 /// Used to manage winding issues that occur when rotating in 4D. Copied for each 4d face, and
 /// each face can swap indices if there's a winding issue.
 #[rustfmt::skip]
-pub(crate) const BASE_INDICES: [u16; 36] = [
+pub(crate) const VERTEX_NORMAL_INDICES: [u16; 36] = [
     0, 1, 2, 3, 4, 5,       // face 0
     6, 7, 8, 9, 10, 11,     // face 1
     12, 13, 14, 15, 16, 17, // face 2

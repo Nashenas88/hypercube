@@ -11,7 +11,7 @@ use wgpu::util::DeviceExt;
 
 use crate::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
-use crate::cube::{BASE_INDICES, CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube};
+use crate::cube::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube, VERTEX_NORMAL_INDICES};
 use crate::shader_widget::UiControls;
 
 /// GPU renderer for the hypercube visualization.
@@ -391,7 +391,7 @@ impl Renderer {
         // Create initial highlighting uniform (no sticker highlighted)
         let highlighting_uniform = HighlightingUniform {
             hovered_sticker_index: u32::MAX, // No sticker highlighted
-            highlight_intensity: 0.3, // 30% intensity
+            highlight_intensity: 0.3,        // 30% intensity
             _padding1: [0.0; 2],
             highlight_color: [1.0, 1.0, 0.0], // Yellow highlight
             _padding2: 0.0,
@@ -425,10 +425,10 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let indices = BASE_INDICES
+        let indices = VERTEX_NORMAL_INDICES
             .into_iter()
             .cycle()
-            .take(BASE_INDICES.len() * 8)
+            .take(VERTEX_NORMAL_INDICES.len() * 8)
             .collect::<Vec<_>>();
         let face_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Face Index Buffer"),
@@ -1158,7 +1158,11 @@ impl Renderer {
     /// # Arguments
     /// * `queue` - GPU command queue for buffer updates
     /// * `hovered_sticker_index` - Index of the sticker being hovered (None if no hover)
-    pub(crate) fn update_highlighting(&mut self, queue: &Queue, hovered_sticker_index: Option<usize>) {
+    pub(crate) fn update_highlighting(
+        &mut self,
+        queue: &Queue,
+        hovered_sticker_index: Option<usize>,
+    ) {
         self.highlighting_uniform.hovered_sticker_index = hovered_sticker_index
             .map(|index| index as u32)
             .unwrap_or(u32::MAX);
@@ -1230,7 +1234,7 @@ impl Renderer {
 
         // Draw all cubes using instanced rendering (36 vertices per cube, num_stickers instances)
         render_pass.draw_indexed(
-            0..BASE_INDICES.len() as u32 * 8,
+            0..VERTEX_NORMAL_INDICES.len() as u32 * 8,
             0,
             0..self.num_stickers as u32,
         );
