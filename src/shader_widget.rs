@@ -14,7 +14,7 @@ use crate::cube::{
     VERTEX_NORMAL_INDICES,
 };
 use crate::math::{VIEWER_DISTANCE, process_4d_rotation, project_cube_point};
-use crate::ray_casting::{calculate_mouse_ray, find_intersected_sticker};
+use crate::ray_casting::{Ray, calculate_mouse_ray, find_intersected_sticker};
 use crate::renderer::Renderer;
 use crate::{Message, RenderMode};
 
@@ -37,6 +37,7 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) cached_indices: Vec<u16>,
     pub(crate) cached_normals: Vec<Vector3<f32>>,
     pub(crate) hovered_sticker: Option<usize>,
+    pub(crate) click_ray: Option<Ray>,
 }
 
 impl shader::Primitive for HypercubePrimitive {
@@ -74,6 +75,11 @@ impl shader::Primitive for HypercubePrimitive {
         renderer.update_indices(queue, &self.cached_indices);
         renderer.update_highlighting(queue, self.hovered_sticker);
         renderer.set_render_mode(self.ui_controls.render_mode);
+
+        // Update line transform if we have a click ray
+        if let Some(ray) = self.click_ray.as_ref() {
+            renderer.update_line_transform(queue, ray);
+        }
     }
 
     fn render(
@@ -85,6 +91,11 @@ impl shader::Primitive for HypercubePrimitive {
     ) {
         let renderer = storage.get::<Renderer>().unwrap();
         renderer.render(encoder, target);
+
+        // Render line if we have a click ray
+        if self.click_ray.is_some() {
+            renderer.render_line(encoder, target);
+        }
     }
 }
 
@@ -101,6 +112,7 @@ pub(crate) struct HypercubeShaderState {
     cached_indices: Vec<u16>,
     cached_normals: Vec<Vector3<f32>>,
     hovered_sticker: Option<usize>,
+    click_ray: Option<Ray>,
 }
 
 /// The shader program that handles 4D hypercube rendering
@@ -187,6 +199,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             cached_indices: state.cached_indices.clone(),
             cached_normals: state.cached_normals.clone(),
             hovered_sticker: state.hovered_sticker,
+            click_ray: state.click_ray.clone(),
         }
     }
 }
@@ -352,10 +365,19 @@ impl HypercubeShaderProgram {
                 return event::Status::Captured;
             }
             mouse::Event::ButtonPressed(button) => {
-                if cursor.position_in(bounds).is_some() && button == mouse::Button::Right {
-                    state.mouse_pressed = true;
-                    state.camera_controller.process_mouse_press(button);
-                    return event::Status::Captured;
+                if let Some(position) = cursor.position_in(bounds) {
+                    if button == mouse::Button::Left {
+                        // Generate ray from camera through mouse position
+                        let mouse_ray =
+                            calculate_mouse_ray(position, bounds, &state.camera, &state.projection);
+
+                        state.click_ray = Some(mouse_ray);
+                        return event::Status::Captured;
+                    } else if button == mouse::Button::Right {
+                        state.mouse_pressed = true;
+                        state.camera_controller.process_mouse_press(button);
+                        return event::Status::Captured;
+                    }
                 }
             }
             mouse::Event::ButtonReleased(button) => {
@@ -453,6 +475,7 @@ impl Default for HypercubeShaderState {
             cached_indices,
             cached_normals,
             hovered_sticker: None,
+            click_ray: None,
         }
     }
 }
