@@ -13,6 +13,13 @@ const MOUSE_SENSITIVITY: f32 = 0.5;
 /// 4D viewer distance for perspective projection
 pub(crate) const VIEWER_DISTANCE: f32 = 3.0;
 
+/// The maximum size of a cube dimension that the sticker can occupy
+pub(crate) const BASE_STICKER_SIZE: f32 = 1.0 / 3.0;
+
+/// Half-width of the 3x3x3 sticker grid positioning pattern
+/// Stickers are positioned at coordinates {-2/3, 0, +2/3} on free axes
+pub(crate) const GRID_EXTENT: f32 = 2.0 / 3.0;
+
 /// Creates a 4D rotation matrix around the XW plane.
 ///
 /// This rotation affects the X and W coordinates while leaving Y and Z unchanged.
@@ -159,7 +166,8 @@ pub(crate) fn transform_sticker_vertices_to_3d(
     // Transform each cube vertex exactly like the shader does
     let mut world_vertices = Vec::with_capacity(36);
     for vertex in &BASE_CUBE_VERTICES {
-        let local_vertex = Vector3::new(vertex[0], vertex[1], vertex[2]) / 3.0 * sticker_scale;
+        let local_vertex =
+            Vector3::new(vertex[0], vertex[1], vertex[2]) * BASE_STICKER_SIZE * sticker_scale;
         world_vertices.push(project_cube_point(
             local_vertex,
             sticker_center_4d,

@@ -11,7 +11,8 @@ use crate::AABBMode;
 use crate::camera::{Camera, Projection};
 use crate::cube::NORMAL_TO_BASE_INDICES;
 use crate::math::{
-    calc_sticker_center, is_face_visible, project_cube_point, transform_sticker_vertices_to_3d,
+    BASE_STICKER_SIZE, GRID_EXTENT, calc_sticker_center, is_face_visible, project_cube_point,
+    transform_sticker_vertices_to_3d,
 };
 use crate::renderer::DebugInstanceWithDistance;
 
@@ -248,12 +249,10 @@ fn calculate_face_aabb(
 
     // The face extends across the full 3x3x3 sticker grid plus sticker size
     // Sticker grid positions: -2/3, 0, +2/3 (range of 4/3)
-    // BASE_CUBE_VERTICES are scaled by 1/3 in renderer.rs:518, then by sticker_scale in shaders
+    // BASE_CUBE_VERTICES are scaled by BASE_STICKER_SIZE in renderer.rs, then by sticker_scale in shaders
     // Plus add the grid extent to cover all stickers on the face
-    let base_cube_size = 1.0 / 3.0; // Match renderer.rs scaling
-    let actual_sticker_size = base_cube_size * sticker_scale; // Apply UI sticker scale
-    let grid_extent = 2.0 / 3.0; // Half-width of 3x3x3 sticker grid  
-    let face_bound = actual_sticker_size + grid_extent; // Total face extent
+    let actual_sticker_size = BASE_STICKER_SIZE * sticker_scale; // Apply UI sticker scale
+    let face_bound = actual_sticker_size + GRID_EXTENT; // Total face extent
 
     for &base_vertex in &BASE_CUBE_VERTICES {
         // Use project_cube_point exactly like shader_widget does, but with face bounds

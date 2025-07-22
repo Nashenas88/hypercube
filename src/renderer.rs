@@ -12,7 +12,7 @@ use wgpu::util::DeviceExt;
 use crate::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
 use crate::cube::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube, VERTEX_NORMAL_INDICES};
-use crate::math::VIEWER_DISTANCE;
+use crate::math::{BASE_STICKER_SIZE, VIEWER_DISTANCE};
 use crate::shader_widget::UiControls;
 
 /// GPU renderer for the hypercube visualization.
@@ -497,7 +497,7 @@ impl Renderer {
         vertices
             .iter_mut()
             // TODO divide by puzzle size
-            .for_each(|v| v.iter_mut().for_each(|i| *i /= 3.0));
+            .for_each(|v| v.iter_mut().for_each(|i| *i *= BASE_STICKER_SIZE));
         // Create vertex buffer for cube geometry
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),

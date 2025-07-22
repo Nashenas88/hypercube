@@ -5,6 +5,8 @@
 
 use nalgebra::Vector4;
 
+use crate::math::GRID_EXTENT;
+
 /// Face centers for the 8 faces of the tesseract
 pub(crate) const FACE_CENTERS: [Vector4<f32>; 8] = [
     Vector4::new(0.0, 0.0, 0.0, -1.0), // Face 0: W = -1
@@ -82,9 +84,9 @@ impl Face {
                 for k in 0..3 {
                     // Convert grid indices to sticker coordinates: -2/3, 0, +2/3
                     let grid_coords = [
-                        (i as f32 - 1.0) * 2.0 / 3.0,
-                        (j as f32 - 1.0) * 2.0 / 3.0,
-                        (k as f32 - 1.0) * 2.0 / 3.0,
+                        (i as f32 - 1.0) * GRID_EXTENT,
+                        (j as f32 - 1.0) * GRID_EXTENT,
+                        (k as f32 - 1.0) * GRID_EXTENT,
                     ];
 
                     // Apply offsets to the free dimensions only
