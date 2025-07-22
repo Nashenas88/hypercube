@@ -8,9 +8,10 @@ use iced::{Point, Rectangle};
 use nalgebra::{Matrix4, Point3, Vector3, Vector4};
 
 use crate::camera::{Camera, Projection};
-use crate::cube::{FACE_CENTERS, NORMAL_TO_BASE_INDICES};
+use crate::cube::NORMAL_TO_BASE_INDICES;
 use crate::math::{
-    calc_sticker_center, is_face_visible, project_4d_to_3d, transform_sticker_vertices_to_3d,
+    calc_sticker_center, is_face_visible, project_4d_to_3d, project_cube_point,
+    transform_sticker_vertices_to_3d,
 };
 use crate::renderer::DebugInstanceWithDistance;
 
@@ -249,19 +250,65 @@ fn ray_triangle_intersection(
 fn calculate_face_aabb(
     face_id: usize,
     rotation_4d: &Matrix4<f32>,
+    sticker_scale: f32,
     face_spacing: f32,
     viewer_distance: f32,
 ) -> AABB {
-    // Get face center in 4D
+    use crate::cube::{BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS};
+
+    // Get face center and orientation info
     let face_center_4d = FACE_CENTERS[face_id];
     let scaled_face_center = face_center_4d * face_spacing;
+    let fixed_dim = FIXED_DIMS[face_id];
 
-    // Use shared transformation logic from math.rs
-    let face_center_3d = project_4d_to_3d(scaled_face_center, rotation_4d, viewer_distance);
+    // Transform the 8 corner vertices of BASE_CUBE_VERTICES to match this face
+    // We need to find the bounds that encompass all possible stickers on this face
+    let mut transformed_corners_3d = Vec::with_capacity(8);
 
-    let face_size = 3.0;
+    // The face extends across the full 3x3x3 sticker grid plus sticker size
+    // Sticker grid positions: -2/3, 0, +2/3 (range of 4/3)
+    // BASE_CUBE_VERTICES are scaled by 1/3 in renderer.rs:518, then by sticker_scale in shaders
+    // Plus add the grid extent to cover all stickers on the face
+    let base_cube_size = 1.0 / 3.0; // Match renderer.rs scaling
+    let actual_sticker_size = base_cube_size * sticker_scale; // Apply UI sticker scale
+    let grid_extent = 2.0 / 3.0;  // Half-width of 3x3x3 sticker grid  
+    let face_bound = actual_sticker_size + grid_extent; // Total face extent
 
-    AABB::from_center_size(face_center_3d, face_size)
+    for &base_vertex in &BASE_CUBE_VERTICES {
+        // Use project_cube_point exactly like shader_widget does, but with face bounds
+        let local_vertex =
+            Vector3::new(base_vertex[0], base_vertex[1], base_vertex[2]) * face_bound;
+        let corner_3d = project_cube_point(
+            local_vertex,
+            scaled_face_center,
+            fixed_dim,
+            rotation_4d,
+            viewer_distance,
+        );
+        transformed_corners_3d.push(corner_3d);
+    }
+
+    // Find min and max bounds from all transformed corners
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut min_z = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+
+    for corner in &transformed_corners_3d {
+        min_x = min_x.min(corner.x);
+        min_y = min_y.min(corner.y);
+        min_z = min_z.min(corner.z);
+        max_x = max_x.max(corner.x);
+        max_y = max_y.max(corner.y);
+        max_z = max_z.max(corner.z);
+    }
+
+    AABB {
+        min: Point3::new(min_x, min_y, min_z),
+        max: Point3::new(max_x, max_y, max_z),
+    }
 }
 
 /// Get debug color for each face (8 distinct colors for visualization)
@@ -301,7 +348,7 @@ pub(crate) fn find_intersected_sticker(
         if is_face_visible(face_id, rotation_4d, viewer_distance) {
             // Check if ray intersects face-level AABB
             let face_aabb =
-                calculate_face_aabb(face_id, rotation_4d, face_spacing, viewer_distance);
+                calculate_face_aabb(face_id, rotation_4d, sticker_scale, face_spacing, viewer_distance);
             if ray_aabb_intersection(ray, &face_aabb).is_some() {
                 log::info!("Ray hit face {face_id}");
                 intersectable_faces.push(face_id);

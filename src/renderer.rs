@@ -15,6 +15,7 @@ use crate::cube::{
     CUBE_VERTICES, CYLINDER_INDICES, CYLINDER_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube,
     VERTEX_NORMAL_INDICES,
 };
+use crate::math::VIEWER_DISTANCE;
 use crate::ray_casting::Ray;
 use crate::shader_widget::UiControls;
 
@@ -201,9 +202,9 @@ impl DebugInstanceWithDistance {
             (min[2] + max[2]) * 0.5,
         ];
         let size = [
-            (max[0] - min[0]) * 0.5,
-            (max[1] - min[1]) * 0.5,
-            (max[2] - min[2]) * 0.5,
+            (max[0] - min[0]) * 0.5 * 3.0,
+            (max[1] - min[1]) * 0.5 * 3.0,
+            (max[2] - min[2]) * 0.5 * 3.0,
         ];
 
         // Create transform matrix: scale then translate
@@ -823,7 +824,7 @@ impl Renderer {
         // Create transform uniform buffer with initial slider values
         let transform_data = Transform4D {
             rotation_matrix: nalgebra::Matrix4::identity().into(),
-            viewer_distance: 3.0,
+            viewer_distance: VIEWER_DISTANCE,
             sticker_scale: ui_controls.sticker_scale,
             face_spacing: ui_controls.face_scale,
             _padding: 0.0,
@@ -1189,7 +1190,7 @@ impl Renderer {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -1466,7 +1467,7 @@ impl Renderer {
         // Update transform uniform
         let transform_data = Transform4D {
             rotation_matrix: (*rotation_4d).into(),
-            viewer_distance: 3.0,
+            viewer_distance: VIEWER_DISTANCE,
             sticker_scale,
             face_spacing: face_scale,
             _padding: 0.0,
