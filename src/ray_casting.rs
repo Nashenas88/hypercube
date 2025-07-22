@@ -8,9 +8,9 @@ use iced::{Point, Rectangle};
 use nalgebra::{Matrix4, Point3, Vector3, Vector4};
 
 use crate::camera::{Camera, Projection};
-use crate::cube::FACE_CENTERS;
+use crate::cube::{FACE_CENTERS, NORMAL_TO_BASE_INDICES};
 use crate::math::{
-    is_face_visible, project_4d_to_3d, transform_sticker_to_3d, transform_sticker_vertices_to_3d,
+    calc_sticker_center, is_face_visible, project_4d_to_3d, transform_sticker_vertices_to_3d,
 };
 
 /// 3D ray for intersection testing
@@ -157,11 +157,10 @@ pub(crate) fn ray_aabb_intersection(ray: &Ray, aabb: &AABB) -> Option<f32> {
 /// Returns Some(distance) if ray intersects any triangle of the sticker
 fn ray_sticker_intersection(
     ray: &Ray,
-    sticker_position_4d: Vector4<f32>,
+    sticker_center_4d: Vector4<f32>,
     face_id: usize,
     rotation_4d: &Matrix4<f32>,
     sticker_scale: f32,
-    face_spacing: f32,
     viewer_distance: f32,
 ) -> Option<f32> {
     let mut closest_distance = f32::INFINITY;
@@ -169,19 +168,21 @@ fn ray_sticker_intersection(
 
     // Use shared transformation logic from math.rs
     let world_vertices = transform_sticker_vertices_to_3d(
-        sticker_position_4d,
+        sticker_center_4d,
         face_id,
         rotation_4d,
         sticker_scale,
-        face_spacing,
         viewer_distance,
     );
 
     // Test ray against each triangle (36 vertices = 12 triangles)
-    for triangle_vertices in world_vertices.chunks(3) {
-        let v0 = triangle_vertices[0];
-        let v1 = triangle_vertices[1];
-        let v2 = triangle_vertices[2];
+    for triangle_vertices in NORMAL_TO_BASE_INDICES.chunks(3) {
+        let v0 = world_vertices[triangle_vertices[0]];
+        let v0 = Point3::new(v0[0], v0[1], v0[2]);
+        let v1 = world_vertices[triangle_vertices[1]];
+        let v1 = Point3::new(v1[0], v1[1], v1[2]);
+        let v2 = world_vertices[triangle_vertices[2]];
+        let v2 = Point3::new(v2[0], v2[1], v2[2]);
 
         if let Some(distance) = ray_triangle_intersection(ray, v0, v1, v2) {
             if distance < closest_distance {
@@ -304,13 +305,8 @@ pub(crate) fn find_intersected_sticker(
         }
 
         // Transform sticker to 3D world space for AABB check
-        let sticker_center_3d = transform_sticker_to_3d(
-            sticker_position_4d,
-            face_id,
-            rotation_4d,
-            face_spacing,
-            viewer_distance,
-        );
+        let sticker_center_4d = calc_sticker_center(sticker_position_4d, face_id, face_spacing);
+        let sticker_center_3d = project_4d_to_3d(sticker_center_4d, rotation_4d, viewer_distance);
 
         // First check: AABB intersection (fast rejection)
         let sticker_aabb = AABB::from_center_size(sticker_center_3d, sticker_scale);
@@ -318,11 +314,10 @@ pub(crate) fn find_intersected_sticker(
             // Second check: Actual sticker geometry intersection (accurate)
             if let Some(distance) = ray_sticker_intersection(
                 ray,
-                sticker_position_4d,
+                sticker_center_4d,
                 face_id,
                 rotation_4d,
                 sticker_scale,
-                face_spacing,
                 viewer_distance,
             ) {
                 if distance < closest_distance {

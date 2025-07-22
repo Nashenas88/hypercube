@@ -5,7 +5,7 @@
 
 use nalgebra::{Matrix4, Point3, Vector3, Vector4};
 
-use crate::cube::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS};
+use crate::cube::{BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS};
 
 /// Mouse sensitivity for 4D rotation controls
 const MOUSE_SENSITIVITY: f32 = 0.5;
@@ -118,22 +118,18 @@ pub(crate) fn project_4d_to_3d(
 ///
 /// # Returns
 /// 3D world position of the transformed sticker
-pub(crate) fn transform_sticker_to_3d(
+pub(crate) fn calc_sticker_center(
     sticker_position_4d: Vector4<f32>,
     face_id: usize,
-    rotation_4d: &Matrix4<f32>,
     face_spacing: f32,
-    viewer_distance: f32,
-) -> Point3<f32> {
+) -> Vector4<f32> {
     // Get face information
     let face_center_4d = FACE_CENTERS[face_id];
 
     // Calculate sticker center in 4D (matching shader logic)
     let sticker_offset_4d = sticker_position_4d - face_center_4d;
     let scaled_face_center = face_center_4d * face_spacing;
-    let sticker_center_4d = scaled_face_center + sticker_offset_4d;
-
-    project_4d_to_3d(sticker_center_4d, rotation_4d, viewer_distance)
+    scaled_face_center + sticker_offset_4d
 }
 
 /// Transform all vertices of a sticker cube to 3D space.
@@ -152,46 +148,54 @@ pub(crate) fn transform_sticker_to_3d(
 /// # Returns
 /// Vector of 36 transformed 3D vertices (one complete cube)
 pub(crate) fn transform_sticker_vertices_to_3d(
-    sticker_position_4d: Vector4<f32>,
+    sticker_center_4d: Vector4<f32>,
     face_id: usize,
     rotation_4d: &Matrix4<f32>,
     sticker_scale: f32,
-    face_spacing: f32,
     viewer_distance: f32,
 ) -> Vec<Point3<f32>> {
-    let face_center_4d = FACE_CENTERS[face_id];
     let fixed_dim = FIXED_DIMS[face_id];
-
-    // Calculate sticker center in 4D (matching shader logic exactly)
-    let sticker_offset_4d = sticker_position_4d - face_center_4d;
-    let scaled_face_center = face_center_4d * face_spacing;
-    let sticker_center_4d = scaled_face_center + sticker_offset_4d;
 
     // Transform each cube vertex exactly like the shader does
     let mut world_vertices = Vec::with_capacity(36);
-    for vertex in &CUBE_VERTICES {
+    for vertex in &BASE_CUBE_VERTICES {
         let local_vertex = Vector3::new(vertex[0], vertex[1], vertex[2]) * sticker_scale;
-
-        // Generate vertex in 4D space around sticker center (matching shader logic)
-        let mut vertex_4d = sticker_center_4d;
-        let mut offset_idx = 0;
-
-        for axis in 0..4 {
-            if axis != fixed_dim {
-                match offset_idx {
-                    0 => vertex_4d[axis] += local_vertex.x,
-                    1 => vertex_4d[axis] += local_vertex.y,
-                    2 => vertex_4d[axis] += local_vertex.z,
-                    _ => {}
-                }
-                offset_idx += 1;
-            }
-        }
-
-        world_vertices.push(project_4d_to_3d(vertex_4d, rotation_4d, viewer_distance));
+        world_vertices.push(project_cube_point(
+            local_vertex,
+            sticker_center_4d,
+            fixed_dim,
+            rotation_4d,
+            viewer_distance,
+        ));
     }
 
     world_vertices
+}
+
+pub(crate) fn project_cube_point(
+    local_vertex: Vector3<f32>,
+    center_vertex: Vector4<f32>,
+    fixed_dim: usize,
+    rotation_4d: &Matrix4<f32>,
+    viewer_distance: f32,
+) -> Point3<f32> {
+    // Generate vertex in 4D space around sticker center (matching shader logic)
+    let mut vertex_4d = center_vertex;
+    let mut offset_idx = 0;
+
+    for axis in 0..4 {
+        if axis != fixed_dim {
+            match offset_idx {
+                0 => vertex_4d[axis] += local_vertex.x,
+                1 => vertex_4d[axis] += local_vertex.y,
+                2 => vertex_4d[axis] += local_vertex.z,
+                _ => {}
+            }
+            offset_idx += 1;
+        }
+    }
+
+    project_4d_to_3d(vertex_4d, rotation_4d, viewer_distance)
 }
 
 /// Check if a 4D face is visible from the viewer position.
