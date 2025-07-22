@@ -63,8 +63,8 @@ pub(crate) fn process_4d_rotation(
     delta_x: f32,
     delta_y: f32,
 ) -> Matrix4<f32> {
-    let angle_x = delta_x * MOUSE_SENSITIVITY * 0.01;
-    let angle_y = delta_y * MOUSE_SENSITIVITY * 0.01;
+    let angle_x = -delta_x * MOUSE_SENSITIVITY * 0.01;
+    let angle_y = -delta_y * MOUSE_SENSITIVITY * 0.01;
 
     let rotation_xw = create_4d_rotation_xw(angle_x);
     let rotation_yw = create_4d_rotation_yw(angle_y);
