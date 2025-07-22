@@ -194,7 +194,13 @@ pub(crate) struct DebugInstanceWithDistance {
 
 impl DebugInstanceWithDistance {
     /// Create a new debug instance for an AABB
-    pub fn new(min: [f32; 3], max: [f32; 3], color: [f32; 4], camera_pos: [f32; 3]) -> Self {
+    pub fn new(
+        min: [f32; 3],
+        max: [f32; 3],
+        color: [f32; 4],
+        camera_pos: [f32; 3],
+        scale: f32,
+    ) -> Self {
         // Calculate center and size
         let center = [
             (min[0] + max[0]) * 0.5,
@@ -202,9 +208,9 @@ impl DebugInstanceWithDistance {
             (min[2] + max[2]) * 0.5,
         ];
         let size = [
-            (max[0] - min[0]) * 0.5 * 3.0,
-            (max[1] - min[1]) * 0.5 * 3.0,
-            (max[2] - min[2]) * 0.5 * 3.0,
+            (max[0] - min[0]) * 0.5 * scale,
+            (max[1] - min[1]) * 0.5 * scale,
+            (max[2] - min[2]) * 0.5 * scale,
         ];
 
         // Create transform matrix: scale then translate
@@ -504,7 +510,7 @@ impl Renderer {
             transform: [[0.0; 4]; 4],    // Zero matrix (won't be visible)
             color: [0.0, 0.0, 0.0, 0.0], // Transparent
         };
-        let debug_instances = vec![dummy_instance; 25]; // 25 dummy elements
+        let debug_instances = vec![dummy_instance; 50]; // 30 dummy elements
         let debug_instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Debug Instance Buffer"),
             contents: bytemuck::cast_slice(&debug_instances),

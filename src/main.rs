@@ -23,6 +23,13 @@ pub(crate) enum RenderMode {
     Depth,
 }
 
+/// AABB visualization modes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AABBMode {
+    Face,
+    Sticker,
+}
+
 impl std::fmt::Display for RenderMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -37,12 +44,26 @@ impl RenderMode {
     const ALL: [RenderMode; 3] = [RenderMode::Standard, RenderMode::Normals, RenderMode::Depth];
 }
 
+impl std::fmt::Display for AABBMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AABBMode::Face => write!(f, "Face AABB"),
+            AABBMode::Sticker => write!(f, "Sticker AABB"),
+        }
+    }
+}
+
+impl AABBMode {
+    const ALL: [AABBMode; 2] = [AABBMode::Face, AABBMode::Sticker];
+}
+
 /// Main application state - handles UI controls only
 #[derive(Debug)]
 pub(crate) struct HypercubeApp {
     sticker_scale: f32,
     face_scale: f32,
     render_mode: RenderMode,
+    aabb_mode: AABBMode,
 }
 
 /// Messages that the application can receive
@@ -51,6 +72,7 @@ pub(crate) enum Message {
     StickerScale(f32),
     FaceScale(f32),
     RenderMode(RenderMode),
+    AABBMode(AABBMode),
 }
 
 impl HypercubeApp {
@@ -60,6 +82,7 @@ impl HypercubeApp {
             sticker_scale: 0.5, // Default from existing code
             face_scale: 2.0,    // New parameter for future use
             render_mode: RenderMode::Standard,
+            aabb_mode: AABBMode::Face,
         }
     }
 
@@ -80,6 +103,9 @@ impl HypercubeApp {
             Message::RenderMode(mode) => {
                 self.render_mode = mode;
             }
+            Message::AABBMode(mode) => {
+                self.aabb_mode = mode;
+            }
         }
 
         Task::none()
@@ -99,6 +125,19 @@ impl HypercubeApp {
                             &RenderMode::ALL[..],
                             Some(self.render_mode),
                             Message::RenderMode,
+                        )
+                        .width(250),
+                    ),
+            )
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(iced::widget::text("AABB Mode"))
+                    .push(
+                        PickList::new(
+                            &AABBMode::ALL[..],
+                            Some(self.aabb_mode),
+                            Message::AABBMode,
                         )
                         .width(250),
                     ),
@@ -130,6 +169,7 @@ impl HypercubeApp {
             1.0 - self.sticker_scale,
             self.face_scale,
             self.render_mode,
+            self.aabb_mode,
         ))
         .width(Length::Fill)
         .height(Length::Fill);

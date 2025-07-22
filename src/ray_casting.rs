@@ -10,8 +10,7 @@ use nalgebra::{Matrix4, Point3, Vector3, Vector4};
 use crate::camera::{Camera, Projection};
 use crate::cube::NORMAL_TO_BASE_INDICES;
 use crate::math::{
-    calc_sticker_center, is_face_visible, project_4d_to_3d, project_cube_point,
-    transform_sticker_vertices_to_3d,
+    calc_sticker_center, is_face_visible, project_cube_point, transform_sticker_vertices_to_3d,
 };
 use crate::renderer::DebugInstanceWithDistance;
 
@@ -34,25 +33,6 @@ pub(crate) struct AABB {
     pub(crate) min: Point3<f32>,
     /// Maximum corner of the 3D bounding box
     pub(crate) max: Point3<f32>,
-}
-
-impl AABB {
-    /// Create a 3D AABB centered at a point with given size
-    pub(crate) fn from_center_size(center: Point3<f32>, size: f32) -> Self {
-        let half_size = size * 0.5;
-        Self {
-            min: Point3::new(
-                center.x - half_size,
-                center.y - half_size,
-                center.z - half_size,
-            ),
-            max: Point3::new(
-                center.x + half_size,
-                center.y + half_size,
-                center.z + half_size,
-            ),
-        }
-    }
 }
 
 /// Calculate mouse ray from screen coordinates through the 3D scene
@@ -109,7 +89,7 @@ pub(crate) fn calculate_mouse_ray(
 ///
 /// Returns Some(distance) if the ray intersects the box, None otherwise.
 /// Uses the standard 3D slab method for ray-AABB intersection.
-pub(crate) fn ray_aabb_intersection(ray: &Ray, aabb: &AABB) -> Option<f32> {
+pub(crate) fn ray_intersects_aabb(ray: &Ray, aabb: &AABB) -> bool {
     // Calculate intersection distances with each pair of parallel planes
     // X-axis slab: two planes at aabb.min.x and aabb.max.x
     let t1 = (aabb.min.x - ray.origin.x) * ray.inverse_direction.x; // Distance to min X plane
@@ -138,39 +118,14 @@ pub(crate) fn ray_aabb_intersection(ray: &Ray, aabb: &AABB) -> Option<f32> {
     // Check for intersection conditions:
     // 1. tmax < 0: The box is entirely behind the ray (no intersection)
     // 2. tmin > tmax: The ray misses the box (exits before entering)
-    if tmax < 0.0 || tmin > tmax {
-        None
-    } else {
-        // Ray intersects the 3D box!
-        // Use the closest valid intersection point:
-        // - If tmin >= 0: Ray starts outside box, use entry point (tmin)
-        // - If tmin < 0: Ray starts inside box, use exit point (tmax)
-        let distance = if tmin >= 0.0 { tmin } else { tmax };
-        Some(distance)
-    }
+    !(tmax < 0.0 || tmin > tmax)
 }
 
 /// Test ray intersection with actual sticker geometry using transformed vertices
 /// Returns Some(distance) if ray intersects any triangle of the sticker
-fn ray_sticker_intersection(
-    ray: &Ray,
-    sticker_center_4d: Vector4<f32>,
-    face_id: usize,
-    rotation_4d: &Matrix4<f32>,
-    sticker_scale: f32,
-    viewer_distance: f32,
-) -> Option<f32> {
+fn ray_sticker_intersection(ray: &Ray, world_vertices: &[Point3<f32>]) -> Option<f32> {
     let mut closest_distance = f32::INFINITY;
     let mut hit = false;
-
-    // Use shared transformation logic from math.rs
-    let world_vertices = transform_sticker_vertices_to_3d(
-        sticker_center_4d,
-        face_id,
-        rotation_4d,
-        sticker_scale,
-        viewer_distance,
-    );
 
     // Test ray against each triangle (36 vertices = 12 triangles)
     for triangle_vertices in NORMAL_TO_BASE_INDICES.chunks(3) {
@@ -246,6 +201,31 @@ fn ray_triangle_intersection(
     }
 }
 
+/// Calculate sticker-level AABB using actual transformed vertices
+fn calculate_sticker_aabb(world_vertices: &[Point3<f32>]) -> AABB {
+    // Find min and max bounds from all transformed vertices
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut min_z = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+
+    for vertex in world_vertices {
+        min_x = min_x.min(vertex[0]);
+        min_y = min_y.min(vertex[1]);
+        min_z = min_z.min(vertex[2]);
+        max_x = max_x.max(vertex[0]);
+        max_y = max_y.max(vertex[1]);
+        max_z = max_z.max(vertex[2]);
+    }
+
+    AABB {
+        min: Point3::new(min_x, min_y, min_z),
+        max: Point3::new(max_x, max_y, max_z),
+    }
+}
+
 /// Calculate face-level AABB that encompasses all stickers on a face
 fn calculate_face_aabb(
     face_id: usize,
@@ -271,7 +251,7 @@ fn calculate_face_aabb(
     // Plus add the grid extent to cover all stickers on the face
     let base_cube_size = 1.0 / 3.0; // Match renderer.rs scaling
     let actual_sticker_size = base_cube_size * sticker_scale; // Apply UI sticker scale
-    let grid_extent = 2.0 / 3.0;  // Half-width of 3x3x3 sticker grid  
+    let grid_extent = 2.0 / 3.0; // Half-width of 3x3x3 sticker grid  
     let face_bound = actual_sticker_size + grid_extent; // Total face extent
 
     for &base_vertex in &BASE_CUBE_VERTICES {
@@ -327,7 +307,7 @@ fn get_face_debug_color(face_id: usize) -> [f32; 4] {
 }
 
 /// Find the sticker that the 3D mouse ray intersects
-/// Returns the sticker index and debug AABBs for intersected faces
+/// Returns the sticker index and debug AABBs for intersected faces/stickers
 pub(crate) fn find_intersected_sticker(
     ray: &Ray,
     sticker_positions: &[Vector4<f32>],
@@ -337,6 +317,7 @@ pub(crate) fn find_intersected_sticker(
     face_spacing: f32,
     viewer_distance: f32,
     camera: &Camera,
+    show_sticker_aabb: bool,
 ) -> (Option<usize>, Vec<DebugInstanceWithDistance>) {
     let camera_pos = [camera.eye.x, camera.eye.y, camera.eye.z];
 
@@ -347,18 +328,26 @@ pub(crate) fn find_intersected_sticker(
     for face_id in 0..8 {
         if is_face_visible(face_id, rotation_4d, viewer_distance) {
             // Check if ray intersects face-level AABB
-            let face_aabb =
-                calculate_face_aabb(face_id, rotation_4d, sticker_scale, face_spacing, viewer_distance);
-            if ray_aabb_intersection(ray, &face_aabb).is_some() {
+            let face_aabb = calculate_face_aabb(
+                face_id,
+                rotation_4d,
+                sticker_scale,
+                face_spacing,
+                viewer_distance,
+            );
+            if ray_intersects_aabb(ray, &face_aabb) {
                 log::info!("Ray hit face {face_id}");
                 intersectable_faces.push(face_id);
 
-                // Create debug instance for this intersected face AABB
-                let color = get_face_debug_color(face_id);
-                let min: [f32; 3] = face_aabb.min.coords.as_slice().try_into().unwrap();
-                let max: [f32; 3] = face_aabb.max.coords.as_slice().try_into().unwrap();
-                let debug_instance = DebugInstanceWithDistance::new(min, max, color, camera_pos);
-                debug_instances.push(debug_instance);
+                // Create debug instance for face AABB only if not showing sticker AABBs
+                if !show_sticker_aabb {
+                    let color = get_face_debug_color(face_id);
+                    let min: [f32; 3] = face_aabb.min.coords.as_slice().try_into().unwrap();
+                    let max: [f32; 3] = face_aabb.max.coords.as_slice().try_into().unwrap();
+                    let debug_instance =
+                        DebugInstanceWithDistance::new(min, max, color, camera_pos, 3.0);
+                    debug_instances.push(debug_instance);
+                }
             }
         }
     }
@@ -375,22 +364,33 @@ pub(crate) fn find_intersected_sticker(
             continue;
         }
 
-        // Transform sticker to 3D world space for AABB check
+        // Transform sticker to 4D world space for AABB calculation
         let sticker_center_4d = calc_sticker_center(sticker_position_4d, face_id, face_spacing);
-        let sticker_center_3d = project_4d_to_3d(sticker_center_4d, rotation_4d, viewer_distance);
 
-        // First check: AABB intersection (fast rejection)
-        let sticker_aabb = AABB::from_center_size(sticker_center_3d, sticker_scale);
-        if let Some(_aabb_distance) = ray_aabb_intersection(ray, &sticker_aabb) {
+        // Use shared transformation logic from math.rs
+        let world_vertices = transform_sticker_vertices_to_3d(
+            sticker_center_4d,
+            face_id,
+            rotation_4d,
+            sticker_scale,
+            viewer_distance,
+        );
+
+        // First check: AABB intersection using properly scaled vertices
+        let sticker_aabb = calculate_sticker_aabb(&world_vertices);
+        if ray_intersects_aabb(ray, &sticker_aabb) {
+            // If showing sticker AABBs, create debug instance for this intersected sticker
+            if show_sticker_aabb {
+                let color = [1.0, 1.0, 0.0, 0.4]; // Yellow with transparency for highlighted sticker
+                let min: [f32; 3] = sticker_aabb.min.coords.as_slice().try_into().unwrap();
+                let max: [f32; 3] = sticker_aabb.max.coords.as_slice().try_into().unwrap();
+                let debug_instance =
+                    DebugInstanceWithDistance::new(min, max, color, camera_pos, 3.0);
+                debug_instances.push(debug_instance);
+            }
+
             // Second check: Actual sticker geometry intersection (accurate)
-            if let Some(distance) = ray_sticker_intersection(
-                ray,
-                sticker_center_4d,
-                face_id,
-                rotation_4d,
-                sticker_scale,
-                viewer_distance,
-            ) {
+            if let Some(distance) = ray_sticker_intersection(ray, &world_vertices) {
                 if distance < closest_distance {
                     closest_distance = distance;
                     closest_sticker = Some(sticker_index);

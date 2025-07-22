@@ -15,8 +15,8 @@ use crate::cube::{
 };
 use crate::math::{VIEWER_DISTANCE, process_4d_rotation, project_cube_point};
 use crate::ray_casting::{Ray, calculate_mouse_ray, find_intersected_sticker};
-use crate::renderer::{Renderer, DebugInstanceWithDistance};
-use crate::{Message, RenderMode};
+use crate::renderer::{DebugInstanceWithDistance, Renderer};
+use crate::{AABBMode, Message, RenderMode};
 
 /// Parameters controlled from the ui.
 #[derive(Debug, Clone, Copy)]
@@ -126,15 +126,22 @@ pub(crate) struct HypercubeShaderProgram {
     sticker_scale: f32,
     face_scale: f32,
     render_mode: RenderMode,
+    aabb_mode: AABBMode,
 }
 
 impl HypercubeShaderProgram {
     /// Create a new shader program with the given parameters
-    pub(crate) fn new(sticker_scale: f32, face_scale: f32, render_mode: RenderMode) -> Self {
+    pub(crate) fn new(
+        sticker_scale: f32,
+        face_scale: f32,
+        render_mode: RenderMode,
+        aabb_mode: AABBMode,
+    ) -> Self {
         Self {
             sticker_scale,
             face_scale,
             render_mode,
+            aabb_mode,
         }
     }
 }
@@ -362,10 +369,11 @@ impl HypercubeShaderProgram {
                         &sticker_positions,
                         &face_ids,
                         &state.rotation_4d,
-                        1.0 - self.sticker_scale, // Invert because UI slider is inverted
+                        self.sticker_scale,
                         self.face_scale,
                         VIEWER_DISTANCE,
                         &state.camera,
+                        self.aabb_mode == AABBMode::Sticker,
                     );
                     state.hovered_sticker = hovered_sticker;
                     state.debug_instances = debug_instances;

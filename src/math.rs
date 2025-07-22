@@ -159,7 +159,7 @@ pub(crate) fn transform_sticker_vertices_to_3d(
     // Transform each cube vertex exactly like the shader does
     let mut world_vertices = Vec::with_capacity(36);
     for vertex in &BASE_CUBE_VERTICES {
-        let local_vertex = Vector3::new(vertex[0], vertex[1], vertex[2]) * sticker_scale;
+        let local_vertex = Vector3::new(vertex[0], vertex[1], vertex[2]) / 3.0 * sticker_scale;
         world_vertices.push(project_cube_point(
             local_vertex,
             sticker_center_4d,
