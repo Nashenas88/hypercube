@@ -12,11 +12,10 @@ use wgpu::util::DeviceExt;
 use crate::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
 use crate::cube::{
-    CUBE_VERTICES, CYLINDER_INDICES, CYLINDER_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube,
+    CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube,
     VERTEX_NORMAL_INDICES,
 };
 use crate::math::VIEWER_DISTANCE;
-use crate::ray_casting::Ray;
 use crate::shader_widget::UiControls;
 
 /// GPU renderer for the hypercube visualization.
@@ -79,18 +78,6 @@ pub(crate) struct Renderer {
     transform_buffer: wgpu::Buffer,
     /// Skybox bind group
     skybox_bind_group: wgpu::BindGroup,
-    /// Line rendering pipeline
-    line_pipeline: wgpu::RenderPipeline,
-    /// Line vertex buffer (cylinder geometry)
-    line_vertex_buffer: wgpu::Buffer,
-    /// Line index buffer
-    line_index_buffer: wgpu::Buffer,
-    /// Line transform uniform buffer
-    line_transform_buffer: wgpu::Buffer,
-    /// Line bind group
-    line_bind_group: wgpu::BindGroup,
-    /// Number of line indices
-    line_index_count: u32,
 }
 
 /// Instance data for vertex shader - represents a sticker in 4D space
@@ -233,13 +220,6 @@ impl DebugInstanceWithDistance {
     }
 }
 
-/// Line transform uniform for positioning cylindrical lines
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct LineTransformUniform {
-    /// 4x4 transformation matrix for line positioning
-    model_matrix: [[f32; 4]; 4],
-}
 
 /// Loads a cross-format cubemap and creates a GPU texture.
 ///
@@ -540,18 +520,6 @@ impl Renderer {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Create cylinder geometry for line rendering
-        let line_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Line Vertex Buffer"),
-            contents: bytemuck::cast_slice(&CYLINDER_VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let line_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Line Index Buffer"),
-            contents: bytemuck::cast_slice(&CYLINDER_INDICES),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let line_index_count = CYLINDER_INDICES.len() as u32;
 
         // Create skybox bind group layout
         let skybox_bind_group_layout =
@@ -799,33 +767,6 @@ impl Renderer {
                 label: Some("Debug AABB Bind Group Layout"),
             });
 
-        // Line shader bind group layout (camera, line_transform)
-        let line_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-                label: Some("Line Bind Group Layout"),
-            });
 
         // Create transform uniform buffer with initial slider values
         let transform_data = Transform4D {
@@ -841,20 +782,6 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Create line transform buffer (identity matrix initially)
-        let line_transform_data = LineTransformUniform {
-            model_matrix: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-        };
-        let line_transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Line Transform Buffer"),
-            contents: bytemuck::cast_slice(&[line_transform_data]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
 
         let main_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &main_bind_group_layout,
@@ -941,20 +868,6 @@ impl Renderer {
             label: Some("Debug Bind Group"),
         });
 
-        let line_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &line_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: line_transform_buffer.as_entire_binding(),
-                },
-            ],
-            label: Some("Line Bind Group"),
-        });
 
         // Create debug AABB bind group
         let debug_aabb_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1011,11 +924,6 @@ impl Renderer {
                 push_constant_ranges: &[],
             });
 
-        let line_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Line Pipeline Layout"),
-            bind_group_layouts: &[&line_bind_group_layout],
-            push_constant_ranges: &[],
-        });
 
         let sky_vertices: &[[f32; 2]] = &[
             [-1.0, -1.0], // bottom-left
@@ -1267,67 +1175,6 @@ impl Renderer {
             multiview: None,
         });
 
-        // Create line shader and pipeline
-        let line_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Line Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/line_shader.wgsl").into()),
-        });
-
-        let line_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Line Pipeline"),
-            layout: Some(&line_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &line_shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x3, // position
-                        },
-                        wgpu::VertexAttribute {
-                            offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x3, // normal
-                        },
-                    ],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &line_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        });
 
         // Load skybox cubemap texture
         let (_skybox_texture, skybox_view, skybox_sampler) =
@@ -1382,12 +1229,6 @@ impl Renderer {
             depth_view,
             transform_buffer,
             skybox_bind_group,
-            line_pipeline,
-            line_vertex_buffer,
-            line_index_buffer,
-            line_transform_buffer,
-            line_bind_group,
-            line_index_count,
         }
     }
 
@@ -1552,47 +1393,6 @@ impl Renderer {
         );
     }
 
-    /// Updates the line transform matrix for ray visualization
-    pub(crate) fn update_line_transform(&mut self, queue: &Queue, ray: &Ray) {
-        use nalgebra::{Matrix4, Vector3};
-
-        // Calculate transformation matrix to position cylinder between start and end points
-
-        // Create orthonormal basis for cylinder coordinate system
-        let up = Vector3::new(0.0, 1.0, 0.0);
-        let right = if ray.direction.cross(&up).norm() > 1e-6 {
-            ray.direction.cross(&up).normalize()
-        } else {
-            Vector3::new(1.0, 0.0, 0.0) // Use alternative if line is vertical
-        };
-        let forward = right.cross(&ray.direction).normalize() * -1.0;
-
-        // Create transformation matrix: scale, rotate, translate
-        let scale = Matrix4::new_nonuniform_scaling(&Vector3::new(0.01, 0.01, 40.0));
-        let rotation = Matrix4::from_columns(&[
-            right.to_homogeneous(),
-            forward.to_homogeneous(),
-            ray.direction.to_homogeneous(),
-            nalgebra::Point3::new(0.0, 0.0, 0.0).to_homogeneous(),
-        ]);
-        let translation = Matrix4::new_translation(&ray.origin.coords);
-
-        let transform_matrix = translation * rotation * scale;
-
-        log::debug!(
-            "Line transform: ray={ray:?}, translation={translation:?}, transform={transform_matrix:?}",
-        );
-
-        let line_transform_data = LineTransformUniform {
-            model_matrix: transform_matrix.into(),
-        };
-
-        queue.write_buffer(
-            &self.line_transform_buffer,
-            0,
-            bytemuck::cast_slice(&[line_transform_data]),
-        );
-    }
 
     /// Renders a single frame of the hypercube visualization.
     ///
@@ -1716,44 +1516,4 @@ impl Renderer {
         render_pass.draw(0..36, 0..debug_instance_count);
     }
 
-    /// Renders the mouse ray visualization if one exists
-    pub(crate) fn render_line(&self, encoder: &mut CommandEncoder, target: &TextureView) {
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Line Render Pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load, // Don't clear, render on top
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load, // Don't clear depth
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-
-        render_pass.set_viewport(
-            self.bounds.x,
-            self.bounds.y,
-            self.bounds.width,
-            self.bounds.height,
-            0.0,
-            1.0,
-        );
-
-        // Render the line cylinder
-        render_pass.set_pipeline(&self.line_pipeline);
-        render_pass.set_bind_group(0, &self.line_bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.line_vertex_buffer.slice(..));
-        render_pass.set_index_buffer(self.line_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-        render_pass.draw_indexed(0..self.line_index_count, 0, 0..1);
-    }
 }

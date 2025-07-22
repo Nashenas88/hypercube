@@ -247,44 +247,6 @@ pub(crate) const VERTEX_NORMAL_INDICES: [u16; 36] = [
     30, 31, 32, 33, 34, 35, // face 5
 ];
 
-/// Cylinder vertices for line rendering (8 sides, unit length along Z-axis)
-/// Format: [x, y, z, nx, ny, nz] where n* are normals
-#[rustfmt::skip]
-pub(crate) const CYLINDER_VERTICES: [[f32; 6]; 16] = [
-    // Bottom ring (z = 0)
-    [ 1.0,  0.0, 0.0,  1.0,  0.0, 0.0], // 0
-    [ 0.707,  0.707, 0.0,  0.707,  0.707, 0.0], // 1
-    [ 0.0,  1.0, 0.0,  0.0,  1.0, 0.0], // 2
-    [-0.707,  0.707, 0.0, -0.707,  0.707, 0.0], // 3
-    [-1.0,  0.0, 0.0, -1.0,  0.0, 0.0], // 4
-    [-0.707, -0.707, 0.0, -0.707, -0.707, 0.0], // 5
-    [ 0.0, -1.0, 0.0,  0.0, -1.0, 0.0], // 6
-    [ 0.707, -0.707, 0.0,  0.707, -0.707, 0.0], // 7
-    // Top ring (z = 1)
-    [ 1.0,  0.0, 1.0,  1.0,  0.0, 0.0], // 8
-    [ 0.707,  0.707, 1.0,  0.707,  0.707, 0.0], // 9
-    [ 0.0,  1.0, 1.0,  0.0,  1.0, 0.0], // 10
-    [-0.707,  0.707, 1.0, -0.707,  0.707, 0.0], // 11
-    [-1.0,  0.0, 1.0, -1.0,  0.0, 0.0], // 12
-    [-0.707, -0.707, 1.0, -0.707, -0.707, 0.0], // 13
-    [ 0.0, -1.0, 1.0,  0.0, -1.0, 0.0], // 14
-    [ 0.707, -0.707, 1.0,  0.707, -0.707, 0.0], // 15
-];
-
-/// Cylinder indices for triangle faces (8 sides × 2 triangles each = 48 indices)
-#[rustfmt::skip]
-pub(crate) const CYLINDER_INDICES: [u16; 48] = [
-    // Side faces (8 quads, each made of 2 triangles)
-    0, 8, 1,   1, 8, 9,   // Side 0
-    1, 9, 2,   2, 9, 10,  // Side 1
-    2, 10, 3,  3, 10, 11, // Side 2
-    3, 11, 4,  4, 11, 12, // Side 3
-    4, 12, 5,  5, 12, 13, // Side 4
-    5, 13, 6,  6, 13, 14, // Side 5
-    6, 14, 7,  7, 14, 15, // Side 6
-    7, 15, 0,  0, 15, 8,  // Side 7
-];
-
 pub(crate) const NORMAL_TO_BASE_INDICES: [usize; 36] = [
     0, 1, 2, 2, 3, 0, // Front face (2 triangles: 0,1,2 and 2,3,0)
     1, 5, 6, 6, 2, 1, // Right face (2 triangles: 1,5,6 and 6,2,1)
