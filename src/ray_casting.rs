@@ -24,6 +24,7 @@ pub(crate) struct Ray {
 
 /// Axis-aligned bounding box in 3D space
 #[derive(Debug, Clone)]
+#[allow(clippy::upper_case_acronyms)]
 pub(crate) struct AABB {
     /// Minimum corner of the 3D bounding box
     pub(crate) min: Point3<f32>,
@@ -223,7 +224,7 @@ fn ray_triangle_intersection(
 
     // Calculate u parameter and test bounds
     let u = f * s.dot(&h);
-    if u < 0.0 || u > 1.0 {
+    if !(0.0..=1.0).contains(&u) {
         return None; // Intersection point is outside triangle
     }
 

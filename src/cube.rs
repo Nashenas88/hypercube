@@ -246,3 +246,12 @@ pub(crate) const VERTEX_NORMAL_INDICES: [u16; 36] = [
     24, 25, 26, 27, 28, 29, // face 4
     30, 31, 32, 33, 34, 35, // face 5
 ];
+
+pub(crate) const NORMAL_TO_BASE_INDICES: [usize; 36] = [
+    0, 1, 2, 2, 3, 0, // Front face (2 triangles: 0,1,2 and 2,3,0)
+    1, 5, 6, 6, 2, 1, // Right face (2 triangles: 1,5,6 and 6,2,1)
+    5, 4, 7, 7, 6, 5, // Back face (2 triangles: 5,4,7 and 7,6,5)
+    4, 0, 3, 3, 7, 4, // Left face (2 triangles: 4,0,3 and 3,7,4)
+    3, 2, 6, 6, 7, 3, // Top face (2 triangles: 3,2,6 and 6,7,3)
+    4, 5, 1, 1, 0, 4, // Bottom face (2 triangles: 4,5,1 and 1,0,4)
+];
