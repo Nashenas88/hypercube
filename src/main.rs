@@ -134,12 +134,8 @@ impl HypercubeApp {
                     .spacing(5)
                     .push(iced::widget::text("AABB Mode"))
                     .push(
-                        PickList::new(
-                            &AABBMode::ALL[..],
-                            Some(self.aabb_mode),
-                            Message::AABBMode,
-                        )
-                        .width(250),
+                        PickList::new(&AABBMode::ALL[..], Some(self.aabb_mode), Message::AABBMode)
+                            .width(250),
                     ),
             )
             .push(

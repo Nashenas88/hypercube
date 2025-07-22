@@ -11,10 +11,7 @@ use wgpu::util::DeviceExt;
 
 use crate::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
-use crate::cube::{
-    CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube,
-    VERTEX_NORMAL_INDICES,
-};
+use crate::cube::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube, VERTEX_NORMAL_INDICES};
 use crate::math::VIEWER_DISTANCE;
 use crate::shader_widget::UiControls;
 
@@ -219,7 +216,6 @@ impl DebugInstanceWithDistance {
         Self { gpu_data, distance }
     }
 }
-
 
 /// Loads a cross-format cubemap and creates a GPU texture.
 ///
@@ -520,7 +516,6 @@ impl Renderer {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         });
 
-
         // Create skybox bind group layout
         let skybox_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -767,7 +762,6 @@ impl Renderer {
                 label: Some("Debug AABB Bind Group Layout"),
             });
 
-
         // Create transform uniform buffer with initial slider values
         let transform_data = Transform4D {
             rotation_matrix: nalgebra::Matrix4::identity().into(),
@@ -781,7 +775,6 @@ impl Renderer {
             contents: bytemuck::cast_slice(&[transform_data]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-
 
         let main_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &main_bind_group_layout,
@@ -868,7 +861,6 @@ impl Renderer {
             label: Some("Debug Bind Group"),
         });
 
-
         // Create debug AABB bind group
         let debug_aabb_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &debug_aabb_bind_group_layout,
@@ -923,7 +915,6 @@ impl Renderer {
                 bind_group_layouts: &[&debug_aabb_bind_group_layout],
                 push_constant_ranges: &[],
             });
-
 
         let sky_vertices: &[[f32; 2]] = &[
             [-1.0, -1.0], // bottom-left
@@ -1175,7 +1166,6 @@ impl Renderer {
             multiview: None,
         });
 
-
         // Load skybox cubemap texture
         let (_skybox_texture, skybox_view, skybox_sampler) =
             load_cross_cubemap(device, queue, "src/resources/Cubemap_Sky_02-512x512.png")
@@ -1393,7 +1383,6 @@ impl Renderer {
         );
     }
 
-
     /// Renders a single frame of the hypercube visualization.
     ///
     /// Updates camera uniforms, acquires surface texture, and draws all instances
@@ -1515,5 +1504,4 @@ impl Renderer {
         // Draw debug instances (36 vertices per cube, debug_instance_count instances)
         render_pass.draw(0..36, 0..debug_instance_count);
     }
-
 }
