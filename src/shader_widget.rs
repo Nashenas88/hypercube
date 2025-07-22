@@ -95,11 +95,11 @@ impl shader::Primitive for HypercubePrimitive {
 
 /// Internal state managed by the shader widget
 pub(crate) struct HypercubeShaderState {
-    hypercube: Hypercube,
-    camera: Camera,
+    pub(crate) hypercube: Hypercube,
+    pub(crate) camera: Camera,
     camera_controller: CameraController,
     projection: Projection,
-    rotation_4d: nalgebra::Matrix4<f32>,
+    pub(crate) rotation_4d: nalgebra::Matrix4<f32>,
     mouse_pressed: bool,
     last_mouse_pos: Option<Point>,
     shift_pressed: bool,
@@ -206,22 +206,6 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 }
 
 impl HypercubeShaderProgram {
-    /// Generate sticker data for ray casting
-    /// Returns (sticker_positions, face_ids) where each sticker has a 4D position and face ID
-    fn generate_sticker_data(hypercube: &Hypercube) -> (Vec<nalgebra::Vector4<f32>>, Vec<usize>) {
-        let mut sticker_positions = Vec::new();
-        let mut face_ids = Vec::new();
-
-        for (face_id, face) in hypercube.faces.iter().enumerate() {
-            for sticker in &face.stickers {
-                sticker_positions.push(sticker.position);
-                face_ids.push(face_id);
-            }
-        }
-
-        (sticker_positions, face_ids)
-    }
-
     /// Calculate normals for all cube faces after 4D transformation and 3D projection
     fn calculate_normals_and_indices(
         rotation_4d: &nalgebra::Matrix4<f32>,
@@ -347,19 +331,12 @@ impl HypercubeShaderProgram {
                     let mouse_ray =
                         calculate_mouse_ray(position, bounds, &state.camera, &state.projection);
 
-                    // Generate sticker data for ray casting
-                    let (sticker_positions, face_ids) =
-                        Self::generate_sticker_data(&state.hypercube);
-
                     let (hovered_sticker, debug_instances) = find_intersected_sticker(
                         &mouse_ray,
-                        &sticker_positions,
-                        &face_ids,
-                        &state.rotation_4d,
+                        &state,
                         self.sticker_scale,
                         self.face_scale,
                         VIEWER_DISTANCE,
-                        &state.camera,
                         self.aabb_mode,
                     );
                     state.hovered_sticker = hovered_sticker;
