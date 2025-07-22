@@ -3,7 +3,7 @@
 //! An interactive 4D Rubik's cube that can be rotated in 4D space and viewed
 //! through 3D projection. Uses iced for UI and wgpu for GPU rendering.
 
-use iced::widget::{Column, PickList, Row, Shader, Slider};
+use iced::widget::{Checkbox, Column, PickList, Row, Shader, Slider};
 use iced::{Element, Length, Settings, Task};
 
 mod camera;
@@ -26,6 +26,7 @@ pub(crate) enum RenderMode {
 /// AABB visualization modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AABBMode {
+    None,
     Face,
     Sticker,
 }
@@ -47,6 +48,7 @@ impl RenderMode {
 impl std::fmt::Display for AABBMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AABBMode::None => write!(f, "AABB Rendering Disabled"),
             AABBMode::Face => write!(f, "Face AABB"),
             AABBMode::Sticker => write!(f, "Sticker AABB"),
         }
@@ -54,7 +56,7 @@ impl std::fmt::Display for AABBMode {
 }
 
 impl AABBMode {
-    const ALL: [AABBMode; 2] = [AABBMode::Face, AABBMode::Sticker];
+    const ALL: [AABBMode; 3] = [AABBMode::None, AABBMode::Face, AABBMode::Sticker];
 }
 
 /// Main application state - handles UI controls only
@@ -64,6 +66,7 @@ pub(crate) struct HypercubeApp {
     face_scale: f32,
     render_mode: RenderMode,
     aabb_mode: AABBMode,
+    debug_mode: bool,
 }
 
 /// Messages that the application can receive
@@ -73,6 +76,7 @@ pub(crate) enum Message {
     FaceScale(f32),
     RenderMode(RenderMode),
     AABBMode(AABBMode),
+    DebugMode(bool),
 }
 
 impl HypercubeApp {
@@ -82,7 +86,8 @@ impl HypercubeApp {
             sticker_scale: 0.5, // Default from existing code
             face_scale: 2.0,    // New parameter for future use
             render_mode: RenderMode::Standard,
-            aabb_mode: AABBMode::Face,
+            aabb_mode: AABBMode::None,
+            debug_mode: false,
         }
     }
 
@@ -106,6 +111,9 @@ impl HypercubeApp {
             Message::AABBMode(mode) => {
                 self.aabb_mode = mode;
             }
+            Message::DebugMode(enabled) => {
+                self.debug_mode = enabled;
+            }
         }
 
         Task::none()
@@ -114,30 +122,41 @@ impl HypercubeApp {
     /// Create the view for the application
     pub(crate) fn view(&self) -> Element<Message> {
         // Left pane with controls
-        let controls = Column::new()
+        let mut controls = Column::new()
             .spacing(20)
-            .push(
-                Column::new()
-                    .spacing(5)
-                    .push(iced::widget::text("Render Mode"))
-                    .push(
-                        PickList::new(
-                            &RenderMode::ALL[..],
-                            Some(self.render_mode),
-                            Message::RenderMode,
-                        )
-                        .width(250),
-                    ),
-            )
-            .push(
-                Column::new()
-                    .spacing(5)
-                    .push(iced::widget::text("AABB Mode"))
-                    .push(
-                        PickList::new(&AABBMode::ALL[..], Some(self.aabb_mode), Message::AABBMode)
+            .push(Checkbox::new("Debug Mode", self.debug_mode).on_toggle(Message::DebugMode));
+
+        if self.debug_mode {
+            controls = controls
+                .push(
+                    Column::new()
+                        .spacing(5)
+                        .push(iced::widget::text("Render Mode"))
+                        .push(
+                            PickList::new(
+                                &RenderMode::ALL[..],
+                                Some(self.render_mode),
+                                Message::RenderMode,
+                            )
                             .width(250),
-                    ),
-            )
+                        ),
+                )
+                .push(
+                    Column::new()
+                        .spacing(5)
+                        .push(iced::widget::text("AABB Mode"))
+                        .push(
+                            PickList::new(
+                                &AABBMode::ALL[..],
+                                Some(self.aabb_mode),
+                                Message::AABBMode,
+                            )
+                            .width(250),
+                        ),
+                );
+        }
+
+        controls = controls
             .push(
                 Column::new()
                     .spacing(5)

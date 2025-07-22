@@ -360,7 +360,7 @@ impl HypercubeShaderProgram {
                         self.face_scale,
                         VIEWER_DISTANCE,
                         &state.camera,
-                        self.aabb_mode == AABBMode::Sticker,
+                        self.aabb_mode,
                     );
                     state.hovered_sticker = hovered_sticker;
                     state.debug_instances = debug_instances;

@@ -7,6 +7,7 @@
 use iced::{Point, Rectangle};
 use nalgebra::{Matrix4, Point3, Vector3, Vector4};
 
+use crate::AABBMode;
 use crate::camera::{Camera, Projection};
 use crate::cube::NORMAL_TO_BASE_INDICES;
 use crate::math::{
@@ -317,7 +318,7 @@ pub(crate) fn find_intersected_sticker(
     face_spacing: f32,
     viewer_distance: f32,
     camera: &Camera,
-    show_sticker_aabb: bool,
+    aabb_mode: AABBMode,
 ) -> (Option<usize>, Vec<DebugInstanceWithDistance>) {
     let camera_pos = [camera.eye.x, camera.eye.y, camera.eye.z];
 
@@ -339,8 +340,8 @@ pub(crate) fn find_intersected_sticker(
                 log::info!("Ray hit face {face_id}");
                 intersectable_faces.push(face_id);
 
-                // Create debug instance for face AABB only if not showing sticker AABBs
-                if !show_sticker_aabb {
+                // Create debug instance for face AABB only if enabled
+                if let AABBMode::Face = aabb_mode {
                     let color = get_face_debug_color(face_id);
                     let min: [f32; 3] = face_aabb.min.coords.as_slice().try_into().unwrap();
                     let max: [f32; 3] = face_aabb.max.coords.as_slice().try_into().unwrap();
@@ -380,7 +381,7 @@ pub(crate) fn find_intersected_sticker(
         let sticker_aabb = calculate_sticker_aabb(&world_vertices);
         if ray_intersects_aabb(ray, &sticker_aabb) {
             // If showing sticker AABBs, create debug instance for this intersected sticker
-            if show_sticker_aabb {
+            if let AABBMode::Sticker = aabb_mode {
                 let color = [1.0, 1.0, 0.0, 0.4]; // Yellow with transparency for highlighted sticker
                 let min: [f32; 3] = sticker_aabb.min.coords.as_slice().try_into().unwrap();
                 let max: [f32; 3] = sticker_aabb.max.coords.as_slice().try_into().unwrap();
