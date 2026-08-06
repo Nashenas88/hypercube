@@ -284,7 +284,7 @@ impl HypercubeShaderProgram {
                     normals.push(normal);
                 }
 
-                indices.extend(triangle_indices.into_iter());
+                indices.extend(triangle_indices);
             }
         }
 

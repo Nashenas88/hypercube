@@ -139,11 +139,11 @@ fn ray_sticker_intersection(ray: &Ray, world_vertices: &[Point3<f32>]) -> Option
         let v2 = world_vertices[triangle_vertices[2]];
         let v2 = Point3::new(v2[0], v2[1], v2[2]);
 
-        if let Some(distance) = ray_triangle_intersection(ray, v0, v1, v2) {
-            if distance < closest_distance {
-                closest_distance = distance;
-                hit = true;
-            }
+        if let Some(distance) = ray_triangle_intersection(ray, v0, v1, v2)
+            && distance < closest_distance
+        {
+            closest_distance = distance;
+            hit = true;
         }
     }
 
@@ -419,16 +419,16 @@ pub(crate) fn find_intersected_sticker(
             }
 
             // Second check: Actual sticker geometry intersection (accurate)
-            if let Some(distance) = ray_sticker_intersection(ray, &world_vertices) {
-                if distance < closest_distance {
-                    closest_distance = distance;
-                    closest_sticker = if sticker.global_index % 27 == 13 {
-                        // Don't highlight the center piece. No actions can be performed on it.
-                        None
-                    } else {
-                        Some(sticker.global_index)
-                    };
-                }
+            if let Some(distance) = ray_sticker_intersection(ray, &world_vertices)
+                && distance < closest_distance
+            {
+                closest_distance = distance;
+                closest_sticker = if sticker.global_index % 27 == 13 {
+                    // Don't highlight the center piece. No actions can be performed on it.
+                    None
+                } else {
+                    Some(sticker.global_index)
+                };
             }
         }
     }
