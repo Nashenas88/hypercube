@@ -5,7 +5,7 @@
 
 use core::f32;
 
-use iced::widget::shader::wgpu::{self, CommandEncoder, Device, Queue, TextureFormat, TextureView};
+use iced::wgpu::{self, CommandEncoder, Device, Queue, TextureFormat, TextureView};
 use iced::{Rectangle, Size};
 use wgpu::util::DeviceExt;
 
@@ -296,7 +296,7 @@ fn load_cross_cubemap(
         }
 
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &cubemap_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
@@ -307,7 +307,7 @@ fn load_cross_cubemap(
                 aspect: wgpu::TextureAspect::All,
             },
             &face_data,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(face_size * 4),
                 rows_per_image: Some(face_size),
@@ -330,6 +330,8 @@ fn load_cross_cubemap(
         mip_level_count: None,
         base_array_layer: 0,
         array_layer_count: Some(6),
+        // new field. validate
+        usage: None,
     });
 
     // Create sampler
@@ -939,23 +941,32 @@ impl Renderer {
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Sky"),
             layout: Some(&sky_pipeline_layout),
+            cache: None,
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_sky",
+                entry_point: Some("vs_sky"),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x2],
                 }],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                }
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_sky",
+                entry_point: Some("fs_sky"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                }
             }),
             primitive: wgpu::PrimitiveState {
                 front_face: wgpu::FrontFace::Ccw,
@@ -975,23 +986,32 @@ impl Renderer {
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
+            cache: None,
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3],
                 }],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                }
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                }
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1022,23 +1042,32 @@ impl Renderer {
         let normal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Normal Pipeline"),
             layout: Some(&normal_pipeline_layout),
+            cache: None,
             vertex: wgpu::VertexState {
                 module: &normal_shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3],
                 }],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                }
             },
             fragment: Some(wgpu::FragmentState {
                 module: &normal_shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                }
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1073,23 +1102,32 @@ impl Renderer {
         let depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Depth Pipeline"),
             layout: Some(&debug_pipeline_layout),
+            cache: None,
             vertex: wgpu::VertexState {
                 module: &depth_shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3],
                 }],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                }
             },
             fragment: Some(wgpu::FragmentState {
                 module: &depth_shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                }
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1124,23 +1162,32 @@ impl Renderer {
         let debug_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Debug AABB Pipeline"),
             layout: Some(&debug_aabb_pipeline_layout),
+            cache: None,
             vertex: wgpu::VertexState {
                 module: &debug_aabb_shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3],
                 }],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                }
             },
             fragment: Some(wgpu::FragmentState {
                 module: &debug_aabb_shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING), // Enable transparency
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                }
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1401,6 +1448,8 @@ impl Renderer {
                     load: wgpu::LoadOp::Load, // Don't clear, we already cleared selectively
                     store: wgpu::StoreOp::Store,
                 },
+                // TODO new field. validate
+                depth_slice: None,
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.depth_view,
@@ -1474,6 +1523,8 @@ impl Renderer {
                     load: wgpu::LoadOp::Load, // Don't clear - render on top of existing content
                     store: wgpu::StoreOp::Store,
                 },
+                // TODO new field. validate
+                depth_slice: None,
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.depth_view,

@@ -96,6 +96,10 @@ impl HypercubeApp {
         "4D Hypercube"
     }
 
+    pub(crate) fn boot(&mut self) -> (Self, Task<Message>) {
+        (HypercubeApp::new(), Task::none())
+    }
+
     /// Update the application state
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
@@ -124,7 +128,7 @@ impl HypercubeApp {
         // Left pane with controls
         let mut controls = Column::new()
             .spacing(20)
-            .push(Checkbox::new("Debug Mode", self.debug_mode).on_toggle(Message::DebugMode));
+            .push(Checkbox::new(self.debug_mode).on_toggle(Message::DebugMode));
 
         if self.debug_mode {
             controls = controls
@@ -207,11 +211,10 @@ impl HypercubeApp {
 fn main() -> iced::Result {
     env_logger::builder().format_timestamp(None).init();
 
-    let app = HypercubeApp::new();
-    iced::application(app.title(), HypercubeApp::update, HypercubeApp::view)
+    iced::application(HypercubeApp::boot, HypercubeApp::update, HypercubeApp::view)
         .settings(Settings {
             antialiasing: true,
             ..Settings::default()
         })
-        .run_with(move || (app, Task::none()))
+        .run()
 }

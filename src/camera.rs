@@ -92,14 +92,14 @@ impl CameraController {
     /// # Arguments
     /// * `button` - The mouse button that was pressed/released
     /// * `state` - Whether the button was pressed or released
-    pub(crate) fn process_mouse_press(&mut self, button: mouse::Button) {
-        if button == mouse::Button::Right {
+    pub(crate) fn process_mouse_press(&mut self, button: &mouse::Button) {
+        if *button == mouse::Button::Right {
             self.last_mouse_pos = None;
         }
     }
 
-    pub(crate) fn process_mouse_release(&mut self, button: mouse::Button) {
-        if button == mouse::Button::Right {
+    pub(crate) fn process_mouse_release(&mut self, button: &mouse::Button) {
+        if *button == mouse::Button::Right {
             self.last_mouse_pos = None;
         }
     }

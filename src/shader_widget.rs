@@ -4,8 +4,9 @@
 //! logic, camera controls, and 4D transformations. It follows Option C architecture
 //! where the shader widget manages its own state independently.
 
-use iced::widget::shader::{self, wgpu};
-use iced::{Point, Rectangle, event, mouse};
+use iced::widget::{Action, shader};
+use iced::wgpu;
+use iced::{Event, Point, Rectangle, event, mouse};
 use nalgebra::{Matrix4, Vector3};
 
 use crate::camera::{Camera, CameraController, Projection};
@@ -41,12 +42,13 @@ pub(crate) struct HypercubePrimitive {
 }
 
 impl shader::Primitive for HypercubePrimitive {
+    type Pipeline = !;
+
     fn prepare(
         &self,
+        pipeline: &mut Self::Pipeline,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-        storage: &mut shader::Storage,
         bounds: &Rectangle,
         viewport: &shader::Viewport,
     ) {
@@ -80,8 +82,8 @@ impl shader::Primitive for HypercubePrimitive {
 
     fn render(
         &self,
+        pipeline: &Self::Pipeline,
         encoder: &mut wgpu::CommandEncoder,
-        storage: &shader::Storage,
         target: &wgpu::TextureView,
         _clip_bounds: &Rectangle<u32>,
     ) {
@@ -141,11 +143,10 @@ impl shader::Program<Message> for HypercubeShaderProgram {
     fn update(
         &self,
         state: &mut Self::State,
-        event: shader::Event,
+        event: &Event,
         bounds: Rectangle,
-        cursor: mouse::Cursor,
-        _shell: &mut iced::advanced::Shell<'_, Message>,
-    ) -> (event::Status, Option<Message>) {
+        cursor: mouse::Cursor
+    ) -> Option<Action<Message>> {
         // Update camera each frame
         state.camera_controller.update_camera(&mut state.camera);
 
@@ -158,7 +159,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
         let mut rotation_changed = false;
 
         let status = match event {
-            shader::Event::Mouse(mouse_event) => {
+            Event::Mouse(mouse_event) => {
                 let old_rotation = state.rotation_4d;
                 let result = self.handle_mouse_event(state, mouse_event, bounds, cursor);
                 if state.rotation_4d != old_rotation {
@@ -166,7 +167,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 }
                 result
             }
-            shader::Event::Keyboard(keyboard_event) => {
+            Event::Keyboard(keyboard_event) => {
                 self.handle_keyboard_event(state, keyboard_event)
             }
             _ => event::Status::Ignored,
@@ -295,7 +296,7 @@ impl HypercubeShaderProgram {
     fn handle_mouse_event(
         &self,
         state: &mut HypercubeShaderState,
-        mouse_event: mouse::Event,
+        mouse_event: &mouse::Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> event::Status {
@@ -347,14 +348,14 @@ impl HypercubeShaderProgram {
                 return event::Status::Captured;
             }
             mouse::Event::ButtonPressed(button) => {
-                if cursor.position_in(bounds).is_some() && button == mouse::Button::Right {
+                if cursor.position_in(bounds).is_some() && *button == mouse::Button::Right {
                     state.mouse_pressed = true;
                     state.camera_controller.process_mouse_press(button);
                     return event::Status::Captured;
                 }
             }
             mouse::Event::ButtonReleased(button) => {
-                if button == mouse::Button::Right {
+                if *button == mouse::Button::Right {
                     state.mouse_pressed = false;
                     state.camera_controller.process_mouse_release(button);
                     return event::Status::Captured;
@@ -363,7 +364,7 @@ impl HypercubeShaderProgram {
             mouse::Event::WheelScrolled { delta } => {
                 if cursor.position_in(bounds).is_some() {
                     let scroll_delta = match delta {
-                        mouse::ScrollDelta::Lines { y, .. } => y,
+                        mouse::ScrollDelta::Lines { y, .. } => *y,
                         mouse::ScrollDelta::Pixels { y, .. } => y * 0.01,
                     };
                     state.camera_controller.process_scroll(scroll_delta);
@@ -386,7 +387,7 @@ impl HypercubeShaderProgram {
     fn handle_keyboard_event(
         &self,
         state: &mut HypercubeShaderState,
-        keyboard_event: iced::keyboard::Event,
+        keyboard_event: &iced::keyboard::Event,
     ) -> event::Status {
         use iced::keyboard::Event;
         use iced::keyboard::{Key, key};
