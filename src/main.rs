@@ -92,12 +92,8 @@ impl HypercubeApp {
     }
 
     /// Get the title of the application
-    pub(crate) fn title(&self) -> &'static str {
-        "4D Hypercube"
-    }
-
-    pub(crate) fn boot(&mut self) -> (Self, Task<Message>) {
-        (HypercubeApp::new(), Task::none())
+    pub(crate) fn title(&self) -> String {
+        "4D Hypercube".to_string()
     }
 
     /// Update the application state
@@ -128,7 +124,11 @@ impl HypercubeApp {
         // Left pane with controls
         let mut controls = Column::new()
             .spacing(20)
-            .push(Checkbox::new(self.debug_mode).on_toggle(Message::DebugMode));
+            .push(
+                Checkbox::new(self.debug_mode)
+                    .label("Debug Mode")
+                    .on_toggle(Message::DebugMode),
+            );
 
         if self.debug_mode {
             controls = controls
@@ -211,7 +211,8 @@ impl HypercubeApp {
 fn main() -> iced::Result {
     env_logger::builder().format_timestamp(None).init();
 
-    iced::application(HypercubeApp::boot, HypercubeApp::update, HypercubeApp::view)
+    iced::application(HypercubeApp::new, HypercubeApp::update, HypercubeApp::view)
+        .title(HypercubeApp::title)
         .settings(Settings {
             antialiasing: true,
             ..Settings::default()

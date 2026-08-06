@@ -11,7 +11,7 @@ use nalgebra::{Matrix4, Vector3};
 
 use crate::camera::{Camera, CameraController, Projection};
 use crate::cube::{
-    BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube, NORMAL_TO_BASE_INDICES,
+    BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES,
     VERTEX_NORMAL_INDICES,
 };
 use crate::math::{VIEWER_DISTANCE, process_4d_rotation, project_cube_point};
@@ -30,7 +30,6 @@ pub(crate) struct UiControls {
 /// Custom primitive for rendering our 4D hypercube
 #[derive(Debug, Clone)]
 pub(crate) struct HypercubePrimitive {
-    pub(crate) hypercube: Hypercube,
     pub(crate) camera: Camera,
     pub(crate) projection: Projection,
     pub(crate) rotation_4d: Matrix4<f32>,
@@ -42,7 +41,7 @@ pub(crate) struct HypercubePrimitive {
 }
 
 impl shader::Primitive for HypercubePrimitive {
-    type Pipeline = !;
+    type Pipeline = Renderer;
 
     fn prepare(
         &self,
@@ -52,32 +51,19 @@ impl shader::Primitive for HypercubePrimitive {
         bounds: &Rectangle,
         viewport: &shader::Viewport,
     ) {
-        if !storage.has::<Renderer>() {
-            let renderer = pollster::block_on(Renderer::new(
-                device,
-                queue,
-                format,
-                *bounds,
-                viewport.physical_size(),
-                &self.hypercube,
-                self.ui_controls,
-            ));
-            storage.store(renderer);
-        }
-        let renderer = storage.get_mut::<Renderer>().unwrap();
-        renderer.resize(device, *bounds, viewport.physical_size());
-        renderer.update_instances(
+        pipeline.resize(device, *bounds, viewport.physical_size());
+        pipeline.update_instances(
             queue,
             &self.rotation_4d,
             self.ui_controls.sticker_scale,
             self.ui_controls.face_scale,
         );
-        renderer.update_camera(queue, &self.camera, &self.projection);
-        renderer.update_normals(queue, &self.cached_normals);
-        renderer.update_indices(queue, &self.cached_indices);
-        renderer.update_highlighting(queue, self.hovered_sticker);
-        renderer.update_debug_instances(queue, &self.debug_instances);
-        renderer.set_render_mode(self.ui_controls.render_mode);
+        pipeline.update_camera(queue, &self.camera, &self.projection);
+        pipeline.update_normals(queue, &self.cached_normals);
+        pipeline.update_indices(queue, &self.cached_indices);
+        pipeline.update_highlighting(queue, self.hovered_sticker);
+        pipeline.update_debug_instances(queue, &self.debug_instances);
+        pipeline.set_render_mode(self.ui_controls.render_mode);
     }
 
     fn render(
@@ -87,17 +73,15 @@ impl shader::Primitive for HypercubePrimitive {
         target: &wgpu::TextureView,
         _clip_bounds: &Rectangle<u32>,
     ) {
-        let renderer = storage.get::<Renderer>().unwrap();
-        renderer.render(encoder, target);
+        pipeline.render(encoder, target);
 
         // Render transparent debug AABBs
-        renderer.render_debug_aabb(encoder, target, self.debug_instances.len() as u32);
+        pipeline.render_debug_aabb(encoder, target, self.debug_instances.len() as u32);
     }
 }
 
 /// Internal state managed by the shader widget
 pub(crate) struct HypercubeShaderState {
-    pub(crate) hypercube: Hypercube,
     pub(crate) camera: Camera,
     camera_controller: CameraController,
     projection: Projection,
@@ -179,7 +163,10 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 Self::calculate_normals_and_indices(&state.rotation_4d);
         }
 
-        (status, None)
+        match status {
+            event::Status::Captured => Some(Action::capture()),
+            event::Status::Ignored => None,
+        }
     }
 
     fn draw(
@@ -189,7 +176,6 @@ impl shader::Program<Message> for HypercubeShaderProgram {
         _bounds: Rectangle,
     ) -> Self::Primitive {
         HypercubePrimitive {
-            hypercube: state.hypercube.clone(),
             camera: state.camera.clone(),
             projection: state.projection,
             rotation_4d: state.rotation_4d,
@@ -415,8 +401,6 @@ impl HypercubeShaderProgram {
 
 impl Default for HypercubeShaderState {
     fn default() -> Self {
-        let hypercube = Hypercube::new();
-
         let mut camera = Camera {
             eye: nalgebra::Point3::new(0.0, 0.0, 15.0),
             target: nalgebra::Point3::new(0.0, 0.0, 0.0),
@@ -438,7 +422,6 @@ impl Default for HypercubeShaderState {
             HypercubeShaderProgram::calculate_normals_and_indices(&rotation_4d);
 
         Self {
-            hypercube,
             camera,
             camera_controller,
             projection,

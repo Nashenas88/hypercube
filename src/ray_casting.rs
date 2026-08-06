@@ -320,10 +320,10 @@ struct StickerData {
 
 /// Generate sticker data for ray casting
 /// Returns Vec<StickerData> with original global indices preserved
-fn generate_sticker_data(hypercube: &Hypercube) -> Vec<StickerData> {
+fn generate_sticker_data() -> Vec<StickerData> {
     let mut sticker_data = Vec::new();
 
-    for (face_id, face) in hypercube.faces.iter().enumerate() {
+    for (face_id, face) in Hypercube::new().faces.iter().enumerate() {
         for (sticker_index, sticker) in face.stickers.iter().enumerate() {
             sticker_data.push(StickerData {
                 global_index: face_id * 27 + sticker_index,
@@ -383,7 +383,7 @@ pub(crate) fn find_intersected_sticker(
     let mut closest_sticker = None;
 
     // Generate sticker data for ray casting
-    let sticker_data = generate_sticker_data(&state.hypercube);
+    let sticker_data = generate_sticker_data();
 
     // Only check stickers on faces that the ray could potentially hit
     for sticker in &sticker_data {

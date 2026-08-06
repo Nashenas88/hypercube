@@ -6,6 +6,7 @@
 use core::f32;
 
 use iced::wgpu::{self, CommandEncoder, Device, Queue, TextureFormat, TextureView};
+use iced::widget::shader;
 use iced::{Rectangle, Size};
 use wgpu::util::DeviceExt;
 
@@ -350,10 +351,10 @@ fn load_cross_cubemap(
 }
 
 /// Generates instance data for the vertex shader from hypercube stickers
-pub(crate) fn generate_sticker_instances(hypercube: &Hypercube) -> Vec<StickerInstance> {
+pub(crate) fn generate_sticker_instances() -> Vec<StickerInstance> {
     let mut instances = Vec::new();
 
-    for (face_id, face) in hypercube.faces.iter().enumerate() {
+    for (face_id, face) in Hypercube::new().faces.iter().enumerate() {
         for sticker in &face.stickers {
             instances.push(StickerInstance {
                 position_4d: [
@@ -384,13 +385,12 @@ impl Renderer {
     ///
     /// # Returns
     /// A fully initialized renderer ready for frame rendering
-    pub(crate) async fn new(
+    pub(crate) fn new(
         device: &Device,
         queue: &Queue,
         format: TextureFormat,
         bounds: Rectangle<f32>,
         viewport_size: Size<u32>,
-        hypercube: &Hypercube,
         ui_controls: UiControls,
     ) -> Self {
         let camera_uniform = CameraUniform::new();
@@ -472,7 +472,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let sticker_instances = generate_sticker_instances(hypercube);
+        let sticker_instances = generate_sticker_instances();
         let num_stickers = sticker_instances.len();
 
         // Create instance buffer for sticker data
@@ -1554,5 +1554,27 @@ impl Renderer {
 
         // Draw debug instances (36 vertices per cube, debug_instance_count instances)
         render_pass.draw(0..36, 0..debug_instance_count);
+    }
+}
+
+impl shader::Pipeline for Renderer {
+    /// Creates the renderer's GPU resources.
+    ///
+    /// The real hypercube data, viewport bounds, and UI controls aren't known yet at this
+    /// point; they're supplied on the very first `prepare` call via `resize` and the other
+    /// `update_*` methods, so placeholder values are fine here.
+    fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
+        Renderer::new(
+            device,
+            queue,
+            format,
+            Rectangle::default(),
+            Size::new(1, 1),
+            UiControls {
+                sticker_scale: 0.0,
+                face_scale: 0.0,
+                render_mode: RenderMode::Standard,
+            },
+        )
     }
 }
