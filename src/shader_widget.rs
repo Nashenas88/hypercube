@@ -51,7 +51,14 @@ impl shader::Primitive for HypercubePrimitive {
         bounds: &Rectangle,
         viewport: &shader::Viewport,
     ) {
-        pipeline.resize(device, *bounds, viewport.physical_size());
+        let scale = viewport.scale_factor();
+        let physical_bounds = Rectangle {
+            x: bounds.x * scale,
+            y: bounds.y * scale,
+            width: bounds.width * scale,
+            height: bounds.height * scale,
+        };
+        pipeline.resize(device, physical_bounds, viewport.physical_size());
         pipeline.update_instances(
             queue,
             &self.rotation_4d,
