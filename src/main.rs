@@ -120,7 +120,7 @@ impl HypercubeApp {
     }
 
     /// Create the view for the application
-    pub(crate) fn view(&self) -> Element<Message> {
+    pub(crate) fn view(&self) -> Element<'_, Message> {
         // Left pane with controls
         let mut controls = Column::new()
             .spacing(20)
@@ -163,7 +163,7 @@ impl HypercubeApp {
                     .push(iced::widget::text("Sticker Scale"))
                     .push(
                         Slider::new(0.0..=0.9, self.sticker_scale, Message::StickerScale)
-                            .step(0.01)
+                            .step(0.01f32)
                             .width(250),
                     ),
             )
@@ -173,7 +173,7 @@ impl HypercubeApp {
                     .push(iced::widget::text("Face Scale"))
                     .push(
                         Slider::new(1.0..=5.0, self.face_scale, Message::FaceScale)
-                            .step(0.01)
+                            .step(0.01f32)
                             .width(250),
                     ),
             );
