@@ -6,6 +6,8 @@
 use iced::mouse;
 use nalgebra::{Matrix4, Point3, Vector3};
 
+use crate::consts::MOUSE_KEY;
+
 /// Mouse rotation sensitivity for camera controls
 const MOUSE_SENSITIVITY: f32 = 0.5;
 /// Mouse wheel zoom sensitivity
@@ -93,13 +95,13 @@ impl CameraController {
     /// * `button` - The mouse button that was pressed/released
     /// * `state` - Whether the button was pressed or released
     pub(crate) fn process_mouse_press(&mut self, button: &mouse::Button) {
-        if *button == mouse::Button::Right {
+        if *button == MOUSE_KEY {
             self.last_mouse_pos = None;
         }
     }
 
     pub(crate) fn process_mouse_release(&mut self, button: &mouse::Button) {
-        if *button == mouse::Button::Right {
+        if *button == MOUSE_KEY {
             self.last_mouse_pos = None;
         }
     }

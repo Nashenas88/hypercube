@@ -7,6 +7,7 @@ use iced::widget::{Checkbox, Column, PickList, Row, Shader, Slider};
 use iced::{Element, Length, Settings, Task};
 
 mod camera;
+mod consts;
 mod cube;
 mod math;
 mod ray_casting;

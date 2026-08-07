@@ -10,6 +10,7 @@ use iced::{Event, Point, Rectangle, event, mouse};
 use nalgebra::{Matrix4, Vector3};
 
 use crate::camera::{Camera, CameraController, Projection};
+use crate::consts::MOUSE_KEY;
 use crate::cube::{
     BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES,
     VERTEX_NORMAL_INDICES,
@@ -25,6 +26,15 @@ pub(crate) struct UiControls {
     pub(crate) sticker_scale: f32,
     pub(crate) face_scale: f32,
     pub(crate) render_mode: RenderMode,
+}
+
+fn scale_bounds(bounds: &Rectangle, scale: f32) -> Rectangle {
+    Rectangle {
+        x: bounds.x * scale,
+        y: bounds.y * scale,
+        width: bounds.width * scale,
+        height: bounds.height * scale,
+    }
 }
 
 /// Custom primitive for rendering our 4D hypercube
@@ -52,12 +62,7 @@ impl shader::Primitive for HypercubePrimitive {
         viewport: &shader::Viewport,
     ) {
         let scale = viewport.scale_factor();
-        let physical_bounds = Rectangle {
-            x: bounds.x * scale,
-            y: bounds.y * scale,
-            width: bounds.width * scale,
-            height: bounds.height * scale,
-        };
+        let physical_bounds = scale_bounds(bounds, scale);
         pipeline.resize(device, physical_bounds, viewport.physical_size());
         pipeline.update_instances(
             queue,
@@ -171,7 +176,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
         }
 
         match status {
-            event::Status::Captured => Some(Action::capture()),
+            event::Status::Captured => Some(Action::request_redraw()),
             event::Status::Ignored => None,
         }
     }
@@ -341,14 +346,14 @@ impl HypercubeShaderProgram {
                 return event::Status::Captured;
             }
             mouse::Event::ButtonPressed(button) => {
-                if cursor.position_in(bounds).is_some() && *button == mouse::Button::Right {
+                if cursor.position_in(bounds).is_some() && *button == MOUSE_KEY {
                     state.mouse_pressed = true;
                     state.camera_controller.process_mouse_press(button);
                     return event::Status::Captured;
                 }
             }
             mouse::Event::ButtonReleased(button) => {
-                if *button == mouse::Button::Right {
+                if *button == MOUSE_KEY {
                     state.mouse_pressed = false;
                     state.camera_controller.process_mouse_release(button);
                     return event::Status::Captured;
