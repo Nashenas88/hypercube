@@ -10,7 +10,6 @@ use iced::{Event, Point, Rectangle, event, mouse};
 use nalgebra::{Matrix4, Vector3};
 
 use crate::camera::{Camera, CameraController, Projection};
-use crate::consts::MOUSE_KEY;
 use crate::cube::{
     BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES,
     VERTEX_NORMAL_INDICES,
@@ -18,6 +17,7 @@ use crate::cube::{
 use crate::math::{VIEWER_DISTANCE, process_4d_rotation, project_cube_point};
 use crate::ray_casting::{calculate_mouse_ray, find_intersected_sticker};
 use crate::renderer::{DebugInstanceWithDistance, Renderer};
+use crate::settings::RotateButton;
 use crate::{AABBMode, Message, RenderMode};
 
 /// Parameters controlled from the ui.
@@ -113,6 +113,7 @@ pub(crate) struct HypercubeShaderProgram {
     face_scale: f32,
     render_mode: RenderMode,
     aabb_mode: AABBMode,
+    rotate_button: RotateButton,
 }
 
 impl HypercubeShaderProgram {
@@ -122,12 +123,14 @@ impl HypercubeShaderProgram {
         face_scale: f32,
         render_mode: RenderMode,
         aabb_mode: AABBMode,
+        rotate_button: RotateButton,
     ) -> Self {
         Self {
             sticker_scale,
             face_scale,
             render_mode,
             aabb_mode,
+            rotate_button,
         }
     }
 }
@@ -346,16 +349,16 @@ impl HypercubeShaderProgram {
                 return event::Status::Captured;
             }
             mouse::Event::ButtonPressed(button) => {
-                if cursor.position_in(bounds).is_some() && *button == MOUSE_KEY {
+                if cursor.position_in(bounds).is_some()
+                    && *button == self.rotate_button.to_mouse_button()
+                {
                     state.mouse_pressed = true;
-                    state.camera_controller.process_mouse_press(button);
                     return event::Status::Captured;
                 }
             }
-            mouse::Event::ButtonReleased(button) => {
-                if *button == MOUSE_KEY {
+            mouse::Event::ButtonReleased(_) => {
+                if state.mouse_pressed {
                     state.mouse_pressed = false;
-                    state.camera_controller.process_mouse_release(button);
                     return event::Status::Captured;
                 }
             }

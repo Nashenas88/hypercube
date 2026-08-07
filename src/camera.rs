@@ -3,10 +3,7 @@
 //! This module provides an orbital camera system that allows users to rotate around
 //! the hypercube origin and zoom in/out for better viewing angles.
 
-use iced::mouse;
 use nalgebra::{Matrix4, Point3, Vector3};
-
-use crate::consts::MOUSE_KEY;
 
 /// Mouse rotation sensitivity for camera controls
 const MOUSE_SENSITIVITY: f32 = 0.5;
@@ -50,8 +47,6 @@ pub(crate) struct CameraController {
     pub(crate) yaw: f32,
     /// Vertical rotation angle in degrees (clamped to prevent flipping)
     pub(crate) pitch: f32,
-    /// Last recorded mouse position for delta calculations
-    pub(crate) last_mouse_pos: Option<(f32, f32)>,
 }
 
 impl CameraController {
@@ -64,7 +59,6 @@ impl CameraController {
             distance,
             yaw: 0.0,
             pitch: 0.0,
-            last_mouse_pos: None,
         }
     }
 
@@ -85,25 +79,6 @@ impl CameraController {
         camera.eye = Point3::new(x, y, z);
         camera.target = Point3::new(0.0, 0.0, 0.0);
         camera.up = Vector3::new(0.0, 1.0, 0.0);
-    }
-
-    /// Processes mouse button input for camera control.
-    ///
-    /// Tracks right mouse button state for enabling/disabling camera rotation.
-    ///
-    /// # Arguments
-    /// * `button` - The mouse button that was pressed/released
-    /// * `state` - Whether the button was pressed or released
-    pub(crate) fn process_mouse_press(&mut self, button: &mouse::Button) {
-        if *button == MOUSE_KEY {
-            self.last_mouse_pos = None;
-        }
-    }
-
-    pub(crate) fn process_mouse_release(&mut self, button: &mouse::Button) {
-        if *button == MOUSE_KEY {
-            self.last_mouse_pos = None;
-        }
     }
 
     /// Processes mouse movement for camera rotation.

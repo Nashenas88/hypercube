@@ -7,13 +7,14 @@ use iced::widget::{Checkbox, Column, PickList, Row, Shader, Slider};
 use iced::{Element, Length, Settings, Task};
 
 mod camera;
-mod consts;
 mod cube;
 mod math;
 mod ray_casting;
 mod renderer;
+mod settings;
 mod shader_widget;
 
+use settings::{AppSettings, RotateButton};
 use shader_widget::HypercubeShaderProgram;
 
 /// Rendering modes for visualization
@@ -68,6 +69,7 @@ pub(crate) struct HypercubeApp {
     render_mode: RenderMode,
     aabb_mode: AABBMode,
     debug_mode: bool,
+    rotate_button: RotateButton,
 }
 
 /// Messages that the application can receive
@@ -78,6 +80,7 @@ pub(crate) enum Message {
     RenderMode(RenderMode),
     AABBMode(AABBMode),
     DebugMode(bool),
+    RotateButton(RotateButton),
 }
 
 impl HypercubeApp {
@@ -89,6 +92,7 @@ impl HypercubeApp {
             render_mode: RenderMode::Standard,
             aabb_mode: AABBMode::None,
             debug_mode: false,
+            rotate_button: settings::load().rotate_button,
         }
     }
 
@@ -115,6 +119,12 @@ impl HypercubeApp {
             Message::DebugMode(enabled) => {
                 self.debug_mode = enabled;
             }
+            Message::RotateButton(button) => {
+                self.rotate_button = button;
+                settings::save(&AppSettings {
+                    rotate_button: button,
+                });
+            }
         }
 
         Task::none()
@@ -129,6 +139,19 @@ impl HypercubeApp {
                 Checkbox::new(self.debug_mode)
                     .label("Debug Mode")
                     .on_toggle(Message::DebugMode),
+            )
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(iced::widget::text("Rotate Button"))
+                    .push(
+                        PickList::new(
+                            &RotateButton::ALL[..],
+                            Some(self.rotate_button),
+                            Message::RotateButton,
+                        )
+                        .width(250),
+                    ),
             );
 
         if self.debug_mode {
@@ -190,6 +213,7 @@ impl HypercubeApp {
             self.face_scale,
             self.render_mode,
             self.aabb_mode,
+            self.rotate_button,
         ))
         .width(Length::Fill)
         .height(Length::Fill);
