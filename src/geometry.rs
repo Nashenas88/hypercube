@@ -4,6 +4,7 @@
 //! including colors, individual stickers, 3D sides, and the complete hypercube.
 
 use nalgebra::Vector4;
+use serde::{Deserialize, Serialize};
 
 use crate::math::GRID_EXTENT;
 
@@ -26,7 +27,7 @@ pub(crate) const FIXED_DIMS: [usize; 8] = [3, 2, 1, 0, 0, 1, 2, 3];
 ///
 /// Uses standard Rubik's cube colors for the first 6 sides, with two additional
 /// colors (Purple and Brown) for the extra dimensions in 4D space.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Color {
     // Using standard Rubik's cube colors for the first 6
     White,
