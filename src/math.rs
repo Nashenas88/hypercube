@@ -5,7 +5,7 @@
 
 use nalgebra::{Matrix4, Point3, Vector3, Vector4};
 
-use crate::cube::{BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS};
+use crate::geometry::{BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS};
 
 /// Mouse sensitivity for 4D rotation controls
 const MOUSE_SENSITIVITY: f32 = 0.5;

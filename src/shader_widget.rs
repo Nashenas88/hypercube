@@ -10,7 +10,7 @@ use iced::{Event, Point, Rectangle, event, mouse};
 use nalgebra::{Matrix4, Vector3};
 
 use crate::camera::{Camera, CameraController, Projection};
-use crate::cube::{
+use crate::geometry::{
     BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES,
     VERTEX_NORMAL_INDICES,
 };

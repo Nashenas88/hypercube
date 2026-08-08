@@ -9,7 +9,7 @@ use nalgebra::{Matrix4, Point3, Vector3, Vector4};
 
 use crate::AABBMode;
 use crate::camera::{Camera, Projection};
-use crate::cube::{Hypercube, NORMAL_TO_BASE_INDICES};
+use crate::geometry::{Hypercube, NORMAL_TO_BASE_INDICES};
 use crate::math::{
     BASE_STICKER_SIZE, GRID_EXTENT, calc_sticker_center, is_face_visible, project_cube_point,
     transform_sticker_vertices_to_3d,
@@ -237,7 +237,7 @@ fn calculate_face_aabb(
     face_spacing: f32,
     viewer_distance: f32,
 ) -> AABB {
-    use crate::cube::{BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS};
+    use crate::geometry::{BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS};
 
     // Get face center and orientation info
     let face_center_4d = FACE_CENTERS[face_id];

@@ -12,7 +12,7 @@ use wgpu::util::DeviceExt;
 
 use crate::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
-use crate::cube::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube, VERTEX_NORMAL_INDICES};
+use crate::geometry::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube, VERTEX_NORMAL_INDICES};
 use crate::math::{BASE_STICKER_SIZE, VIEWER_DISTANCE};
 use crate::shader_widget::UiControls;
 
