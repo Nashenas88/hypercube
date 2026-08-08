@@ -14,6 +14,7 @@ use crate::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
 use crate::geometry::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube, VERTEX_NORMAL_INDICES};
 use crate::math::{BASE_STICKER_SIZE, VIEWER_DISTANCE};
+use crate::piece::StickerInstance;
 use crate::shader_widget::UiControls;
 
 /// GPU renderer for the hypercube visualization.
@@ -76,20 +77,6 @@ pub(crate) struct Renderer {
     transform_buffer: wgpu::Buffer,
     /// Skybox bind group
     skybox_bind_group: wgpu::BindGroup,
-}
-
-/// Instance data for vertex shader - represents a sticker in 4D space
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct StickerInstance {
-    /// 4D position of the sticker
-    position_4d: [f32; 4],
-    /// RGBA color of the sticker
-    color: [f32; 4],
-    /// Face ID (0-7) for this sticker
-    face_id: u32,
-    /// Padding for alignment
-    _padding: [u32; 3],
 }
 
 /// Transform data passed to compute shader
