@@ -1,12 +1,11 @@
-//! 4D hypercube data structures and geometry.
+//! 4D hypercube rendering-mesh geometry.
 //!
-//! This module defines the core data structures for representing a 4D Rubik's cube,
-//! including colors, individual stickers, 3D sides, and the complete hypercube.
+//! Static, puzzle-state-independent tables: tesseract side positions, cube
+//! mesh vertices, and winding-index tables used by the renderer and ray
+//! caster. Puzzle state itself lives in `piece.rs`.
 
 use nalgebra::Vector4;
 use serde::{Deserialize, Serialize};
-
-use crate::math::GRID_EXTENT;
 
 /// Face centers for the 8 faces of the tesseract
 pub(crate) const FACE_CENTERS: [Vector4<f32>; 8] = [
@@ -39,100 +38,6 @@ pub(crate) enum Color {
     // Two more for the 4D aspect
     Purple,
     Brown,
-}
-
-/// Individual sticker on the hypercube surface.
-///
-/// Each sticker represents one colored square that would be visible on the surface
-/// of the 4D hypercube. Contains 4D position information.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Sticker {
-    /// Position within the 4D hypercube coordinate system
-    pub(crate) position: Vector4<f32>,
-}
-
-/// One 3D face of the 4D hypercube.
-///
-/// Each face is a 3x3x3 arrangement of stickers, representing one of the 8 cubic
-/// cells that make up the tesseract (4D hypercube).
-#[derive(Clone, Debug)]
-pub(crate) struct Face {
-    /// Collection of 27 stickers arranged in a 3x3x3 cube
-    pub(crate) stickers: Vec<Sticker>,
-}
-
-impl Face {
-    /// Creates a new 3D face.
-    ///
-    /// Generates a 3x3x3 grid of stickers positioned using authentic tesseract geometry.
-    /// Uses the coordinate pattern {-2/3, 0, +2/3} for the free dimensions.
-    ///
-    /// # Arguments
-    /// * `face_center` - 4D center position for this face of the tesseract
-    /// * `fixed_dim` - Which dimension (0=X, 1=Y, 2=Z, 3=W) is fixed for this face
-    ///
-    /// # Returns
-    /// A new side with 27 stickers arranged in a 3D grid
-    pub(crate) fn new(face_center: Vector4<f32>, fixed_dim: usize) -> Self {
-        let mut stickers = Vec::with_capacity(27);
-
-        // Generate 3x3x3 grid with authentic tesseract spacing
-        for i in 0..3 {
-            for j in 0..3 {
-                for k in 0..3 {
-                    // Convert grid indices to sticker coordinates: -2/3, 0, +2/3
-                    let grid_coords = [
-                        (i as f32 - 1.0) * GRID_EXTENT,
-                        (j as f32 - 1.0) * GRID_EXTENT,
-                        (k as f32 - 1.0) * GRID_EXTENT,
-                    ];
-
-                    // Apply offsets to the free dimensions only
-                    let mut position = face_center;
-                    let mut coord_idx = 0;
-                    for dim in 0..4 {
-                        if dim != fixed_dim {
-                            position[dim] += grid_coords[coord_idx];
-                            coord_idx += 1;
-                        }
-                    }
-
-                    stickers.push(Sticker { position });
-                }
-            }
-        }
-        Self { stickers }
-    }
-}
-
-/// The complete 4D hypercube (tesseract) structure.
-///
-/// Consists of 8 cubic faces arranged in 4D space, representing a 4D Rubik's cube.
-/// Each face is a 3x3x3 arrangement of colored stickers.
-#[derive(Debug, Clone)]
-pub(crate) struct Hypercube {
-    /// The 8 cubic faces that make up the tesseract
-    pub(crate) faces: Vec<Face>,
-}
-
-impl Hypercube {
-    /// Creates a new hypercube in solved state.
-    ///
-    /// Initializes 8 sides with distinct colors, positioned at the vertices
-    /// of a tesseract. Each face is a 3x3x3 grid positioned at the correct
-    /// 4D location.
-    ///
-    /// # Returns
-    /// A solved 4D hypercube ready for visualization and manipulation
-    pub(crate) fn new() -> Self {
-        let faces = FACE_CENTERS
-            .iter()
-            .zip(FIXED_DIMS.iter())
-            .map(|(&face_center, &fixed_dim)| Face::new(face_center, fixed_dim))
-            .collect();
-
-        Self { faces }
-    }
 }
 
 impl From<Color> for Vector4<f32> {
