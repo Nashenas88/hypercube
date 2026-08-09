@@ -22,6 +22,15 @@ impl RotateButton {
             RotateButton::Right => mouse::Button::Right,
         }
     }
+
+    /// The mouse button used for puzzle turn-clicks: whichever button isn't
+    /// driving camera rotation, so the two never conflict.
+    pub(crate) fn click_button(self) -> mouse::Button {
+        match self {
+            RotateButton::Left => mouse::Button::Right,
+            RotateButton::Right => mouse::Button::Left,
+        }
+    }
 }
 
 impl std::fmt::Display for RotateButton {

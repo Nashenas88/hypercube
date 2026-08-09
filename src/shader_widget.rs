@@ -14,6 +14,8 @@ use crate::geometry::{
     BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES, VERTEX_NORMAL_INDICES,
 };
 use crate::math::{VIEWER_DISTANCE, process_4d_rotation, project_cube_point};
+use crate::moves::base_angle;
+use crate::piece::{FACET_TABLE, Hypercube, StickerInstance, generate_sticker_instances};
 use crate::ray_casting::{calculate_mouse_ray, find_intersected_sticker};
 use crate::renderer::{DebugInstanceWithDistance, Renderer};
 use crate::settings::RotateButton;
@@ -47,6 +49,7 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) cached_normals: Vec<Vector3<f32>>,
     pub(crate) hovered_sticker: Option<usize>,
     pub(crate) debug_instances: Vec<DebugInstanceWithDistance>,
+    pub(crate) sticker_instances: Vec<StickerInstance>,
 }
 
 impl shader::Primitive for HypercubePrimitive {
@@ -74,6 +77,7 @@ impl shader::Primitive for HypercubePrimitive {
         pipeline.update_indices(queue, &self.cached_indices);
         pipeline.update_highlighting(queue, self.hovered_sticker);
         pipeline.update_debug_instances(queue, &self.debug_instances);
+        pipeline.update_sticker_instances(queue, &self.sticker_instances);
         pipeline.set_render_mode(self.ui_controls.render_mode);
     }
 
@@ -104,6 +108,7 @@ pub(crate) struct HypercubeShaderState {
     cached_normals: Vec<Vector3<f32>>,
     hovered_sticker: Option<usize>,
     debug_instances: Vec<DebugInstanceWithDistance>,
+    hypercube: Hypercube,
 }
 
 /// The shader program that handles 4D hypercube rendering
@@ -200,6 +205,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             cached_normals: state.cached_normals.clone(),
             hovered_sticker: state.hovered_sticker,
             debug_instances: state.debug_instances.clone(),
+            sticker_instances: generate_sticker_instances(&state.hypercube),
         }
     }
 }
@@ -352,6 +358,13 @@ impl HypercubeShaderProgram {
                     state.mouse_pressed = true;
                     return event::Status::Captured;
                 }
+                if cursor.position_in(bounds).is_some()
+                    && *button == self.rotate_button.click_button()
+                    && let Some(sticker_index) = state.hovered_sticker
+                {
+                    Self::handle_facet_click(state, sticker_index);
+                    return event::Status::Captured;
+                }
             }
             mouse::Event::ButtonReleased(_) => {
                 if state.mouse_pressed {
@@ -379,6 +392,29 @@ impl HypercubeShaderProgram {
         }
 
         event::Status::Ignored
+    }
+
+    /// Applies the move triggered by clicking the given facet, if any -
+    /// non-actionable facets (cell-centers, the invisible center) are a
+    /// no-op. Direction follows the clicked facet's own signed local
+    /// coordinates, which is inherently viewer-relative; Shift reverses it.
+    fn handle_facet_click(state: &mut HypercubeShaderState, sticker_index: usize) {
+        let facet = &FACET_TABLE[sticker_index];
+        if !facet.is_actionable {
+            return;
+        }
+
+        let local_nonzero_count = facet.local_coords.iter().filter(|c| **c != 0).count();
+        let magnitude = base_angle(local_nonzero_count);
+        let angle = if state.shift_pressed {
+            -magnitude
+        } else {
+            magnitude
+        };
+
+        state
+            .hypercube
+            .apply_move(facet.axis, facet.side_sign, facet.local_coords, angle);
     }
 
     /// Handle keyboard events for additional controls
@@ -445,6 +481,7 @@ impl Default for HypercubeShaderState {
             cached_normals,
             hovered_sticker: None,
             debug_instances: Vec::new(),
+            hypercube: Hypercube::solved(),
         }
     }
 }
