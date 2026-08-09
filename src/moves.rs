@@ -1,12 +1,11 @@
-//! Discrete move application for the piece-based puzzle.
+//! Move application for the piece-based puzzle, discrete and continuous.
 //!
 //! A move rotates one tesseract "side" (the 27 pieces sharing a fixed value
 //! on one axis) as a rigid 3x3x3 sub-cube. The rotation axis is always the
 //! clicked piece's own position restricted to the 3 "free" axes
 //! (`local_coords`); the number of nonzero local coords determines whether
 //! it's a 90 degree face-type, 180 degree edge-type, or 120 degree
-//! corner-type turn. See the plan for the full derivation and worked
-//! numeric examples.
+//! corner-type turn.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -54,6 +53,25 @@ pub(crate) fn discrete_rotation(local_coords: [i8; 3], angle: f32) -> ([usize; 3
         "perm isn't a bijection"
     );
     (perm, sign)
+}
+
+/// Rotates a continuous local-space position by `angle` about `local_coords`,
+/// without rounding to the lattice. Used to render the in-between frames of
+/// a move's animation; `discrete_rotation` is used for the final, snapped
+/// state instead.
+pub(crate) fn rotate_local_position(
+    local_coords: [i8; 3],
+    angle: f32,
+    local_position: [f32; 3],
+) -> [f32; 3] {
+    let axis = Vector3::new(
+        local_coords[0] as f32,
+        local_coords[1] as f32,
+        local_coords[2] as f32,
+    );
+    let rotation = Rotation3::from_axis_angle(&Unit::new_normalize(axis), angle);
+    let rotated = rotation * Vector3::new(local_position[0], local_position[1], local_position[2]);
+    [rotated.x, rotated.y, rotated.z]
 }
 
 /// Target angle magnitude for a click, given the clicked facet's number of
@@ -114,14 +132,13 @@ impl Hypercube {
 mod tests {
     use super::*;
 
-    /// side_axis=W(3), side_sign=+1, free_axes=[X(0),Y(1),Z(2)] throughout -
-    /// matches the worked examples in the plan.
+    /// side_axis=W(3), side_sign=+1, free_axes=[X(0),Y(1),Z(2)] throughout.
     const SIDE_AXIS: usize = 3;
     const SIDE_SIGN: i8 = 1;
 
     #[test]
     fn discrete_rotation_matches_worked_180_edge_example() {
-        // local_coords=(1,1,0): plan derives perm=[Y,X,Z]=[1,0,2], sign=[1,1,-1].
+        // local_coords=(1,1,0): X<->Y swap, Z negated.
         let (perm, sign) = discrete_rotation([1, 1, 0], PI);
         assert_eq!(perm, [1, 0, 2]);
         assert_eq!(sign, [1, 1, -1]);
@@ -129,7 +146,7 @@ mod tests {
 
     #[test]
     fn discrete_rotation_matches_worked_120_corner_example() {
-        // local_coords=(1,1,1): plan derives perm=[Z,X,Y]=[2,0,1], sign=[1,1,1].
+        // local_coords=(1,1,1): cyclic X<-Z<-Y<-X.
         let (perm, sign) = discrete_rotation([1, 1, 1], TAU / 3.0);
         assert_eq!(perm, [2, 0, 1]);
         assert_eq!(sign, [1, 1, 1]);
@@ -143,6 +160,43 @@ mod tests {
             sorted.sort_unstable();
             assert_eq!(sorted, [0, 1, 2]);
             assert!(sign.iter().all(|&s| s == 1 || s == -1));
+        }
+    }
+
+    #[test]
+    fn rotate_local_position_at_zero_angle_is_identity() {
+        for &local_coords in &[[1i8, 0, 0], [1, 1, 0], [1, 1, 1]] {
+            let position = [1.0, -1.0, 0.5];
+            let rotated = rotate_local_position(local_coords, 0.0, position);
+            for i in 0..3 {
+                assert!((rotated[i] - position[i]).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn rotate_local_position_at_snapped_angle_matches_discrete_rotation() {
+        for (local_coords, angle) in [
+            ([1i8, 0, 0], FRAC_PI_2),
+            ([1, 1, 0], PI),
+            ([1, 1, 1], TAU / 3.0),
+        ] {
+            let (perm, sign) = discrete_rotation(local_coords, angle);
+            let position = [1.0, -1.0, 0.5];
+            let expected = [
+                sign[0] as f32 * position[perm[0]],
+                sign[1] as f32 * position[perm[1]],
+                sign[2] as f32 * position[perm[2]],
+            ];
+            let rotated = rotate_local_position(local_coords, angle, position);
+            for i in 0..3 {
+                assert!(
+                    (rotated[i] - expected[i]).abs() < 1e-5,
+                    "component {i}: rotated={:?} expected={:?}",
+                    rotated,
+                    expected
+                );
+            }
         }
     }
 
