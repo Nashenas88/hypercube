@@ -118,8 +118,6 @@ pub(crate) struct LightUniform {
 pub(crate) struct FaceDataUniform {
     /// Face centers for all 8 faces (vec4<f32>)
     face_centers: [[f32; 4]; 8],
-    /// Fixed dimensions for all 8 faces, only first index is used, rest are for padding
-    fixed_dims: [[u32; 4]; 8],
 }
 
 /// Normals uniform data (8 faces × 6 normals each)
@@ -404,7 +402,6 @@ impl Renderer {
         // Create face data uniform from constants
         let face_data_uniform = FaceDataUniform {
             face_centers: FACE_CENTERS.map(|v| [v.x, v.y, v.z, v.w]),
-            fixed_dims: FIXED_DIMS.map(|d| [d as u32, 0, 0, 0]),
         };
         let face_data_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Face Data Buffer"),

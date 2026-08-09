@@ -29,7 +29,6 @@ struct LightUniform {
 
 struct FaceDataUniform {
     face_centers: array<vec4<f32>, 8>,
-    fixed_dims: array<vec4<u32>, 8>,
 }
 
 struct NormalsUniform {
