@@ -45,6 +45,8 @@ pub(crate) struct Renderer {
     vertex_buffer: wgpu::Buffer,
     /// Number of stickers (each generates 36 vertices)
     num_stickers: usize,
+    /// GPU buffer containing per-sticker instance data (position, color, face_id)
+    instance_buffer: wgpu::Buffer,
     /// Index buffers for each 4D face
     face_index_buffer: wgpu::Buffer,
     /// CPU-side camera uniform data
@@ -1238,6 +1240,7 @@ impl Renderer {
             vertex_buffer,
             face_index_buffer,
             num_stickers,
+            instance_buffer,
             camera_uniform,
             camera_buffer,
             normals_uniform,
@@ -1370,6 +1373,14 @@ impl Renderer {
 
     pub(crate) fn update_indices(&mut self, queue: &Queue, indices: &[u16]) {
         queue.write_buffer(&self.face_index_buffer, 0, bytemuck::cast_slice(indices));
+    }
+
+    pub(crate) fn update_sticker_instances(
+        &mut self,
+        queue: &Queue,
+        instances: &[StickerInstance],
+    ) {
+        queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
     }
 
     /// Updates the highlighting uniform buffer with the currently hovered sticker.
