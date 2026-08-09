@@ -335,7 +335,6 @@ pub(crate) fn find_intersected_sticker(
                 viewer_distance,
             );
             if ray_intersects_aabb(ray, &face_aabb) {
-                log::info!("Ray hit face {face_id}");
                 intersectable_faces.push(face_id);
 
                 // Create debug instance for face AABB only if enabled
