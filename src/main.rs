@@ -233,6 +233,7 @@ impl HypercubeApp {
             self.render_mode,
             self.aabb_mode,
             self.settings.rotate_button,
+            self.settings.animation_duration_ms,
         ))
         .width(Length::Fill)
         .height(Length::Fill);

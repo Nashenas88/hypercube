@@ -4,6 +4,8 @@
 //! logic, camera controls, and 4D transformations. It follows Option C architecture
 //! where the shader widget manages its own state independently.
 
+use std::time::{Duration, Instant};
+
 use iced::wgpu;
 use iced::widget::{Action, shader};
 use iced::{Event, Point, Rectangle, event, mouse};
@@ -13,13 +15,103 @@ use crate::camera::{Camera, CameraController, Projection};
 use crate::geometry::{
     BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES, VERTEX_NORMAL_INDICES,
 };
-use crate::math::{VIEWER_DISTANCE, process_4d_rotation, project_cube_point};
-use crate::moves::base_angle;
-use crate::piece::{FACET_TABLE, Hypercube, StickerInstance, generate_sticker_instances};
+use crate::math::{GRID_EXTENT, VIEWER_DISTANCE, process_4d_rotation, project_cube_point};
+use crate::moves::{base_angle, rotate_local_position};
+use crate::piece::{
+    FACET_TABLE, Hypercube, Piece, StickerInstance, free_axes, generate_sticker_instances,
+};
 use crate::ray_casting::{calculate_mouse_ray, find_intersected_sticker};
 use crate::renderer::{DebugInstanceWithDistance, Renderer};
 use crate::settings::RotateButton;
 use crate::{AABBMode, Message, RenderMode};
+
+/// An in-progress move's animation: piece state has already been committed
+/// atomically by `apply_move`; this only drives the visual sweep from the
+/// pre-move snapshot toward the (already-final) post-move positions.
+struct AnimatingMove {
+    side_axis: usize,
+    side_sign: i8,
+    local_coords: [i8; 3],
+    /// Signed target angle (its sign already encodes direction).
+    angle: f32,
+    pre_move_pieces: Vec<Piece>,
+    elapsed: Duration,
+    duration: Duration,
+}
+
+/// Smoothstep ease: slow-fast-slow, applied to the normalized [0,1] progress.
+fn ease(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Builds the GPU instance list for the current frame. Piece state is
+/// already final (`apply_move` commits atomically) - while a move is
+/// animating, the 27 affected facets are instead swept from their pre-move
+/// position/color toward that already-committed final position, using the
+/// exact same rotation formula `apply_move` used, so the last animated
+/// frame always lines up perfectly with the static post-move render it
+/// hands off to.
+fn sticker_instances_for_render(state: &HypercubeShaderState) -> Vec<StickerInstance> {
+    let Some(animating) = &state.animating_move else {
+        return generate_sticker_instances(&state.hypercube);
+    };
+
+    let t = if animating.duration.is_zero() {
+        1.0
+    } else {
+        (animating.elapsed.as_secs_f32() / animating.duration.as_secs_f32()).clamp(0.0, 1.0)
+    };
+    let partial_angle = animating.angle * ease(t);
+    let axes = free_axes(animating.side_axis);
+
+    FACET_TABLE
+        .iter()
+        .map(|facet| {
+            let pre_move_piece = &animating.pre_move_pieces[facet.piece_slot];
+            let color = pre_move_piece.colors[facet.axis]
+                .expect("FACET_TABLE entries are only built where colors[axis] is Some");
+
+            let position_4d = if pre_move_piece.position[animating.side_axis] == animating.side_sign
+            {
+                let local_position = [
+                    pre_move_piece.position[axes[0]] as f32,
+                    pre_move_piece.position[axes[1]] as f32,
+                    pre_move_piece.position[axes[2]] as f32,
+                ];
+                let rotated =
+                    rotate_local_position(animating.local_coords, partial_angle, local_position);
+
+                let mut unscaled = [0.0f32; 4];
+                unscaled[animating.side_axis] = pre_move_piece.position[animating.side_axis] as f32;
+                for i in 0..3 {
+                    unscaled[axes[i]] = rotated[i];
+                }
+
+                // Matches `facet_position_4d`'s static convention: a facet's
+                // own axis is unscaled, the other 3 are GRID_EXTENT-scaled -
+                // which axis that is depends on this facet, not on the move.
+                let mut position_4d = [0.0f32; 4];
+                for axis in 0..4 {
+                    position_4d[axis] = if axis == facet.axis {
+                        unscaled[axis]
+                    } else {
+                        unscaled[axis] * GRID_EXTENT
+                    };
+                }
+                position_4d
+            } else {
+                facet.position_4d
+            };
+
+            StickerInstance {
+                position_4d,
+                color: nalgebra::Vector4::from(color).into(),
+                face_id: facet.face_id as u32,
+                _padding: [0; 3],
+            }
+        })
+        .collect()
+}
 
 /// Parameters controlled from the ui.
 #[derive(Debug, Clone, Copy)]
@@ -109,6 +201,8 @@ pub(crate) struct HypercubeShaderState {
     hovered_sticker: Option<usize>,
     debug_instances: Vec<DebugInstanceWithDistance>,
     hypercube: Hypercube,
+    animating_move: Option<AnimatingMove>,
+    last_redraw_instant: Option<Instant>,
 }
 
 /// The shader program that handles 4D hypercube rendering
@@ -118,6 +212,7 @@ pub(crate) struct HypercubeShaderProgram {
     render_mode: RenderMode,
     aabb_mode: AABBMode,
     rotate_button: RotateButton,
+    animation_duration_ms: u32,
 }
 
 impl HypercubeShaderProgram {
@@ -128,6 +223,7 @@ impl HypercubeShaderProgram {
         render_mode: RenderMode,
         aabb_mode: AABBMode,
         rotate_button: RotateButton,
+        animation_duration_ms: u32,
     ) -> Self {
         Self {
             sticker_scale,
@@ -135,6 +231,7 @@ impl HypercubeShaderProgram {
             render_mode,
             aabb_mode,
             rotate_button,
+            animation_duration_ms,
         }
     }
 }
@@ -171,6 +268,9 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 result
             }
             Event::Keyboard(keyboard_event) => self.handle_keyboard_event(state, keyboard_event),
+            Event::Window(iced::window::Event::RedrawRequested(now)) => {
+                Self::advance_animation(state, *now)
+            }
             _ => event::Status::Ignored,
         };
 
@@ -205,7 +305,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             cached_normals: state.cached_normals.clone(),
             hovered_sticker: state.hovered_sticker,
             debug_instances: state.debug_instances.clone(),
-            sticker_instances: generate_sticker_instances(&state.hypercube),
+            sticker_instances: sticker_instances_for_render(state),
         }
     }
 }
@@ -331,8 +431,10 @@ impl HypercubeShaderProgram {
                     }
                 }
 
-                // Perform ray casting for sticker hover detection (only when not dragging)
-                if !state.mouse_pressed {
+                // Perform ray casting for sticker hover detection (only when not
+                // dragging or mid-animation, since state has already moved past
+                // what's currently rendering)
+                if !state.mouse_pressed && state.animating_move.is_none() {
                     let mouse_ray =
                         calculate_mouse_ray(position, bounds, &state.camera, &state.projection);
 
@@ -360,9 +462,10 @@ impl HypercubeShaderProgram {
                 }
                 if cursor.position_in(bounds).is_some()
                     && *button == self.rotate_button.click_button()
+                    && state.animating_move.is_none()
                     && let Some(sticker_index) = state.hovered_sticker
                 {
-                    Self::handle_facet_click(state, sticker_index);
+                    self.handle_facet_click(state, sticker_index);
                     return event::Status::Captured;
                 }
             }
@@ -398,7 +501,7 @@ impl HypercubeShaderProgram {
     /// non-actionable facets (cell-centers, the invisible center) are a
     /// no-op. Direction follows the clicked facet's own signed local
     /// coordinates, which is inherently viewer-relative; Shift reverses it.
-    fn handle_facet_click(state: &mut HypercubeShaderState, sticker_index: usize) {
+    fn handle_facet_click(&self, state: &mut HypercubeShaderState, sticker_index: usize) {
         let facet = &FACET_TABLE[sticker_index];
         if !facet.is_actionable {
             return;
@@ -412,9 +515,46 @@ impl HypercubeShaderProgram {
             magnitude
         };
 
+        let pre_move_pieces = state.hypercube.pieces.clone();
         state
             .hypercube
             .apply_move(facet.axis, facet.side_sign, facet.local_coords, angle);
+
+        state.animating_move = Some(AnimatingMove {
+            side_axis: facet.axis,
+            side_sign: facet.side_sign,
+            local_coords: facet.local_coords,
+            angle,
+            pre_move_pieces,
+            elapsed: Duration::ZERO,
+            duration: Duration::from_millis(self.animation_duration_ms as u64),
+        });
+        state.last_redraw_instant = None;
+        state.hovered_sticker = None;
+    }
+
+    /// Advances the in-progress move animation (if any) by the time elapsed
+    /// since the last redraw, and requests another redraw if it isn't done
+    /// yet - self-sustaining until the animation completes, at which point
+    /// no further redraw is requested and the loop naturally stops.
+    fn advance_animation(state: &mut HypercubeShaderState, now: Instant) -> event::Status {
+        let Some(animating) = state.animating_move.as_mut() else {
+            return event::Status::Ignored;
+        };
+
+        let delta = state
+            .last_redraw_instant
+            .map(|last| now.duration_since(last))
+            .unwrap_or_default();
+        animating.elapsed += delta;
+        state.last_redraw_instant = Some(now);
+
+        if animating.elapsed >= animating.duration {
+            state.animating_move = None;
+            state.last_redraw_instant = None;
+        }
+
+        event::Status::Captured
     }
 
     /// Handle keyboard events for additional controls
@@ -482,6 +622,8 @@ impl Default for HypercubeShaderState {
             hovered_sticker: None,
             debug_instances: Vec::new(),
             hypercube: Hypercube::solved(),
+            animating_move: None,
+            last_redraw_instant: None,
         }
     }
 }
