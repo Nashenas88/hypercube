@@ -53,10 +53,6 @@ pub(crate) struct Renderer {
     camera_uniform: CameraUniform,
     /// GPU buffer containing camera matrices
     camera_buffer: wgpu::Buffer,
-    /// CPU-side normals uniform data
-    normals_uniform: NormalsUniform,
-    /// GPU buffer containing normals data
-    normals_buffer: wgpu::Buffer,
     /// CPU-side highlighting uniform data
     highlighting_uniform: HighlightingUniform,
     /// GPU buffer containing highlighting data
@@ -118,15 +114,6 @@ pub(crate) struct LightUniform {
 pub(crate) struct FaceDataUniform {
     /// Face centers for all 8 faces (vec4<f32>)
     face_centers: [[f32; 4]; 8],
-}
-
-/// Normals uniform data (8 faces × 6 normals each)
-/// Note: WGSL vec3<f32> arrays have 16-byte alignment, so we pad to vec4<f32>
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct NormalsUniform {
-    /// 48 normals (8 faces × 6 normals each), padded to vec4<f32> for alignment
-    normals: [[f32; 4]; 48],
 }
 
 /// Highlighting uniform data for sticker hover effects
@@ -409,17 +396,6 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Create initial normals uniform (will be updated later)
-        let normals_uniform = NormalsUniform {
-            normals: [[0.0; 4]; 48],
-        };
-
-        let normals_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Normals Buffer"),
-            contents: bytemuck::cast_slice(&[normals_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
         // Create initial highlighting uniform (no sticker highlighted)
         let highlighting_uniform = HighlightingUniform {
             hovered_sticker_index: u32::MAX, // No sticker highlighted
@@ -563,16 +539,6 @@ impl Renderer {
                         binding: 4,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 5,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
@@ -580,7 +546,7 @@ impl Renderer {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 6,
+                        binding: 5,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -593,7 +559,7 @@ impl Renderer {
                 label: Some("Main Bind Group Layout"),
             });
 
-        // Normal shader bind group layout (transform, camera, face_data, normals, instances)
+        // Normal shader bind group layout (transform, camera, face_data, instances)
         let normal_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -629,16 +595,6 @@ impl Renderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -762,14 +718,10 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: normals_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
                     resource: instance_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 6,
+                    binding: 5,
                     resource: highlighting_buffer.as_entire_binding(),
                 },
             ],
@@ -793,10 +745,6 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: normals_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
                     resource: instance_buffer.as_entire_binding(),
                 },
             ],
@@ -1217,8 +1165,6 @@ impl Renderer {
             instance_buffer,
             camera_uniform,
             camera_buffer,
-            normals_uniform,
-            normals_buffer,
             highlighting_uniform,
             highlighting_buffer,
             debug_instance_buffer,
@@ -1324,24 +1270,6 @@ impl Renderer {
             &self.transform_buffer,
             0,
             bytemuck::cast_slice(&[transform_data]),
-        );
-    }
-
-    /// Updates the normals uniform buffer with pre-calculated normals.
-    ///
-    /// # Arguments
-    /// * `queue` - GPU command queue for buffer updates
-    /// * `normals` - Pre-calculated normals (48 vec3s: 8 faces × 6 normals each)
-    pub(crate) fn update_normals(&mut self, queue: &Queue, normals: &[nalgebra::Vector3<f32>]) {
-        // Convert Vec<Vector3> to [[f32; 4]; 48] (pad to vec4 for WGSL alignment)
-        for (i, normal) in normals.iter().enumerate().take(48) {
-            self.normals_uniform.normals[i] = [normal.x, normal.y, normal.z, 0.0];
-        }
-
-        queue.write_buffer(
-            &self.normals_buffer,
-            0,
-            bytemuck::cast_slice(&[self.normals_uniform]),
         );
     }
 

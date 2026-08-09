@@ -196,7 +196,6 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) rotation_4d: Matrix4<f32>,
     pub(crate) ui_controls: UiControls,
     pub(crate) cached_indices: Vec<u16>,
-    pub(crate) cached_normals: Vec<Vector3<f32>>,
     pub(crate) hovered_sticker: Option<usize>,
     pub(crate) debug_instances: Vec<DebugInstanceWithDistance>,
     pub(crate) sticker_instances: Vec<StickerInstance>,
@@ -223,7 +222,6 @@ impl shader::Primitive for HypercubePrimitive {
             self.ui_controls.face_scale,
         );
         pipeline.update_camera(queue, &self.camera, &self.projection);
-        pipeline.update_normals(queue, &self.cached_normals);
         pipeline.update_indices(queue, &self.cached_indices);
         pipeline.update_highlighting(queue, self.hovered_sticker);
         pipeline.update_debug_instances(queue, &self.debug_instances);
@@ -255,7 +253,6 @@ pub(crate) struct HypercubeShaderState {
     last_mouse_pos: Option<Point>,
     shift_pressed: bool,
     cached_indices: Vec<u16>,
-    cached_normals: Vec<Vector3<f32>>,
     hovered_sticker: Option<usize>,
     debug_instances: Vec<DebugInstanceWithDistance>,
     hypercube: Hypercube,
@@ -313,7 +310,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.projection.aspect = bounds.width / bounds.height;
         }
 
-        // Check if 4D rotation changed and recalculate normals
+        // Check if 4D rotation changed and recalculate indices
         let mut rotation_changed = false;
 
         let status = match event {
@@ -332,10 +329,9 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             _ => event::Status::Ignored,
         };
 
-        // Recalculate normals if rotation changed
+        // Recalculate indices if rotation changed
         if rotation_changed {
-            (state.cached_normals, state.cached_indices) =
-                Self::calculate_normals_and_indices(&state.rotation_4d);
+            state.cached_indices = Self::calculate_indices(&state.rotation_4d);
         }
 
         match status {
@@ -360,7 +356,6 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 render_mode: self.render_mode,
             },
             cached_indices: state.cached_indices.clone(),
-            cached_normals: state.cached_normals.clone(),
             hovered_sticker: state.hovered_sticker,
             debug_instances: state.debug_instances.clone(),
             sticker_instances: sticker_instances_for_render(state, self.face_scale),
@@ -369,11 +364,11 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 }
 
 impl HypercubeShaderProgram {
-    /// Calculate normals for all cube faces after 4D transformation and 3D projection
-    fn calculate_normals_and_indices(
-        rotation_4d: &nalgebra::Matrix4<f32>,
-    ) -> (Vec<Vector3<f32>>, Vec<u16>) {
-        let mut normals = Vec::with_capacity(48); // 8 faces × 6 normals each
+    /// Calculate the winding-corrected index buffer for all cube faces after
+    /// 4D transformation and 3D projection. Shading normals are computed
+    /// directly in the vertex shader from each instance's own basis instead
+    /// (see `compute_world_normal` in shader.wgsl/normal_shader.wgsl).
+    fn calculate_indices(rotation_4d: &nalgebra::Matrix4<f32>) -> Vec<u16> {
         let mut indices = Vec::with_capacity(288); // 36 indices * 8 4d faces
 
         for (face_idx, (face_center_4d, fixed_dim)) in
@@ -438,20 +433,11 @@ impl HypercubeShaderProgram {
                     triangle_indices.swap(1, 2);
                 }
 
-                if triangle_idx % 2 == 0 {
-                    log::debug!(
-                        "normal: {normal:?} for face {}, {face_idx}",
-                        triangle_idx / 2
-                    );
-                    // Add this normal for all 6 vertices of this cube face (2 triangles × 3 vertices)
-                    normals.push(normal);
-                }
-
                 indices.extend(triangle_indices);
             }
         }
 
-        (normals, indices)
+        indices
     }
 
     /// Handle mouse events for 3D navigation and 4D rotation
@@ -664,8 +650,7 @@ impl Default for HypercubeShaderState {
         };
 
         let rotation_4d = nalgebra::Matrix4::identity();
-        let (cached_normals, cached_indices) =
-            HypercubeShaderProgram::calculate_normals_and_indices(&rotation_4d);
+        let cached_indices = HypercubeShaderProgram::calculate_indices(&rotation_4d);
 
         Self {
             camera,
@@ -676,7 +661,6 @@ impl Default for HypercubeShaderState {
             last_mouse_pos: None,
             shift_pressed: false,
             cached_indices,
-            cached_normals,
             hovered_sticker: None,
             debug_instances: Vec::new(),
             hypercube: Hypercube::solved(),
