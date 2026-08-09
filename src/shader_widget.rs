@@ -87,7 +87,8 @@ fn sticker_instances_for_render(
             let color = pre_move_piece.colors[facet.axis]
                 .expect("FACET_TABLE entries are only built where colors[axis] is Some");
 
-            let position_4d = if pre_move_piece.position[animating.side_axis] == animating.side_sign
+            let (position_4d, basis) = if pre_move_piece.position[animating.side_axis]
+                == animating.side_sign
             {
                 // `facet_position_4d`'s static convention is `pos *
                 // GRID_EXTENT + extension`, where `extension` is zero except
@@ -125,14 +126,44 @@ fn sticker_instances_for_render(
                 if facet_axis_is_free.is_some() {
                     position_4d[facet.axis] -= pre_move_piece.position[facet.axis] as f32 * spread;
                 }
-                position_4d
+
+                // The facet's static mesh basis is the unit vectors along
+                // `facet.free_axes`. Each one is either exactly `side_axis`
+                // (untouched by the slab's rotation) or a one-hot vector
+                // inside the rotating `axes` subspace - rotating that one-hot
+                // vector the same way position is rotated above gives the
+                // basis vector's new direction directly, by linearity.
+                let mut basis = [[0.0f32; 4]; 3];
+                for (i, &a) in facet.free_axes.iter().enumerate() {
+                    basis[i] = if a == animating.side_axis {
+                        let mut v = [0.0f32; 4];
+                        v[a] = 1.0;
+                        v
+                    } else {
+                        let j = axes.iter().position(|&x| x == a).expect(
+                            "a facet free axis other than side_axis must be one of the move's free axes",
+                        );
+                        let mut one_hot = [0.0f32; 3];
+                        one_hot[j] = 1.0;
+                        let rotated =
+                            rotate_local_position(animating.local_coords, partial_angle, one_hot);
+                        let mut v = [0.0f32; 4];
+                        for k in 0..3 {
+                            v[axes[k]] = rotated[k];
+                        }
+                        v
+                    };
+                }
+
+                (position_4d, basis)
             } else {
-                facet.position_4d
+                (facet.position_4d, facet.basis)
             };
 
             StickerInstance {
                 position_4d,
                 color: nalgebra::Vector4::from(color).into(),
+                basis,
                 face_id: facet.face_id as u32,
                 _padding: [0; 3],
             }
@@ -683,6 +714,77 @@ mod tests {
         result
     }
 
+    /// At the end of a move, a rotated basis vector is `±` some world unit
+    /// vector, matching `discrete_rotation`'s signed-permutation snap - but
+    /// unlike position, the *sign* isn't independently meaningful here: the
+    /// sticker mesh spans `[-s, s]` symmetrically along each of its 3 basis
+    /// vectors, so any signed permutation of a facet's basis sweeps out the
+    /// exact same rendered point set (e.g. a piece that spins in place on
+    /// the turning face's own layer can land on a basis that's a nontrivial
+    /// signed permutation of the static identity basis and still be
+    /// pixel-identical, since the mesh has no per-face markings to reveal
+    /// that it rotated). What *is* meaningful, and load-bearing for the
+    /// sticker to render on the correct face at all, is which 3 of the 4
+    /// world axes end up spanned - reduce to that set, dropping sign and
+    /// order, for comparisons against the static post-move basis.
+    fn basis_axis_set(basis: [[f32; 4]; 3]) -> Vec<usize> {
+        let mut axes: Vec<usize> = basis
+            .iter()
+            .map(|v| {
+                let (axis, value) = v
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+                    .expect("basis vector has 4 components");
+                assert!(
+                    value.abs() > 0.5,
+                    "basis vector isn't close to a signed unit axis: {v:?}"
+                );
+                axis
+            })
+            .collect();
+        axes.sort_unstable();
+        axes
+    }
+
+    /// At `partial_angle = 0` (start of a move), the rotated basis must
+    /// exactly reproduce the static pre-move basis - `rotate_local_position`
+    /// at angle 0 is the identity, so this should hold bit-for-bit.
+    #[test]
+    fn animated_basis_matches_static_basis_at_start_of_move() {
+        for side_axis in 0..4usize {
+            for side_sign in [-1i8, 1] {
+                for local_coords in [[1i8, 0, 0], [1, 1, 0], [1, 1, 1]] {
+                    let nonzero = local_coords.iter().filter(|c| **c != 0).count();
+                    let angle = base_angle(nonzero);
+
+                    let pre_move = Hypercube::solved();
+                    let mut state = HypercubeShaderState::default();
+                    state.hypercube = pre_move.clone();
+                    state.animating_move = Some(AnimatingMove {
+                        side_axis,
+                        side_sign,
+                        local_coords,
+                        angle,
+                        pre_move_pieces: pre_move.pieces.clone(),
+                        elapsed: Duration::ZERO,
+                        duration: Duration::from_millis(250),
+                    });
+
+                    let instances = sticker_instances_for_render(&state, 2.0);
+                    for (facet, instance) in FACET_TABLE.iter().zip(instances.iter()) {
+                        assert_eq!(
+                            instance.basis, facet.basis,
+                            "mismatch for side_axis={side_axis} side_sign={side_sign} \
+                             local_coords={local_coords:?} piece_slot={} axis={}",
+                            facet.piece_slot, facet.axis
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// At the end of an animation, the full set of rendered (position,
     /// color) pairs - after the shader's face-spread step - must exactly
     /// match what the static post-move render would show - checked as a set
@@ -725,7 +827,7 @@ mod tests {
                             duration: Duration::from_millis(250),
                         });
 
-                        let mut animated_end: Vec<([i32; 4], [u8; 4])> =
+                        let mut animated_end: Vec<([i32; 4], [u8; 4], Vec<usize>)> =
                             sticker_instances_for_render(&state, face_scale)
                                 .iter()
                                 .map(|inst| {
@@ -734,10 +836,14 @@ mod tests {
                                         inst.face_id,
                                         face_scale,
                                     );
-                                    (round_key(spread), color_key(inst.color))
+                                    (
+                                        round_key(spread),
+                                        color_key(inst.color),
+                                        basis_axis_set(inst.basis),
+                                    )
                                 })
                                 .collect();
-                        let mut static_post: Vec<([i32; 4], [u8; 4])> =
+                        let mut static_post: Vec<([i32; 4], [u8; 4], Vec<usize>)> =
                             generate_sticker_instances(&post_move)
                                 .iter()
                                 .map(|inst| {
@@ -746,7 +852,11 @@ mod tests {
                                         inst.face_id,
                                         face_scale,
                                     );
-                                    (round_key(spread), color_key(inst.color))
+                                    (
+                                        round_key(spread),
+                                        color_key(inst.color),
+                                        basis_axis_set(inst.basis),
+                                    )
                                 })
                                 .collect();
                         animated_end.sort_unstable();
@@ -757,6 +867,88 @@ mod tests {
                             "mismatch for side_axis={side_axis} side_sign={side_sign} \
                              local_coords={local_coords:?} direction={direction}"
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The set-based checks above can't catch a wrong basis on one row being
+    /// masked by another row that legitimately has the same spanned axis
+    /// set (face-swapping facets sharing a move come in groups). This pins
+    /// down the one thing that's actually load-bearing per facet: at the end
+    /// of a move, a facet whose own axis isn't `side_axis` swaps onto
+    /// whichever new axis `apply_move`'s permutation sends it to - checked
+    /// directly against `discrete_rotation` (already covered by its own
+    /// tests in `moves.rs`), independent of the position/color machinery.
+    #[test]
+    fn animated_basis_flat_direction_matches_new_facet_axis_at_end_of_move() {
+        use crate::moves::discrete_rotation;
+
+        for side_axis in 0..4usize {
+            for side_sign in [-1i8, 1] {
+                for local_coords in [
+                    [1i8, 0, 0],
+                    [0, 1, 0],
+                    [0, 0, 1],
+                    [1, 1, 0],
+                    [1, 0, 1],
+                    [0, 1, 1],
+                    [1, 1, 1],
+                ] {
+                    for direction in [1i8, -1] {
+                        let nonzero = local_coords.iter().filter(|c| **c != 0).count();
+                        let angle = base_angle(nonzero) * direction as f32;
+                        let axes = free_axes(side_axis);
+                        let (perm, _sign) = discrete_rotation(local_coords, angle);
+                        let mut inv_perm = [0usize; 3];
+                        for slot in 0..3 {
+                            inv_perm[perm[slot]] = slot;
+                        }
+
+                        let pre_move = Hypercube::solved();
+                        let mut state = HypercubeShaderState::default();
+                        state.hypercube = pre_move.clone();
+                        state.animating_move = Some(AnimatingMove {
+                            side_axis,
+                            side_sign,
+                            local_coords,
+                            angle,
+                            pre_move_pieces: pre_move.pieces.clone(),
+                            elapsed: Duration::from_millis(250),
+                            duration: Duration::from_millis(250),
+                        });
+
+                        let instances = sticker_instances_for_render(&state, 2.0);
+                        for (facet, instance) in FACET_TABLE.iter().zip(instances.iter()) {
+                            // Facets on the turning face's own layer
+                            // (`facet.axis == side_axis`) genuinely spin in
+                            // place but their basis stays entirely within
+                            // `axes`, spanning the same set regardless of
+                            // rotation - nothing to pin down there, covered
+                            // by the symmetric-mesh reasoning above instead.
+                            if facet.axis == side_axis {
+                                continue;
+                            }
+                            if pre_move.pieces[facet.piece_slot].position[side_axis] != side_sign {
+                                continue;
+                            }
+                            let p = axes
+                                .iter()
+                                .position(|&x| x == facet.axis)
+                                .expect("facet.axis != side_axis must be one of axes");
+                            let new_axis = axes[inv_perm[p]];
+                            let spanned = basis_axis_set(instance.basis);
+                            assert!(
+                                !spanned.contains(&new_axis),
+                                "facet piece_slot={} axis={} should have swapped flat \
+                                 direction onto axis {new_axis}, but basis still spans it: \
+                                 {spanned:?} (side_axis={side_axis} side_sign={side_sign} \
+                                 local_coords={local_coords:?} direction={direction})",
+                                facet.piece_slot,
+                                facet.axis
+                            );
+                        }
                     }
                 }
             }

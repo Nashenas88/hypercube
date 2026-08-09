@@ -48,6 +48,7 @@ struct HighlightingUniform {
 struct StickerInstance {
     position_4d: vec4<f32>,
     color: vec4<f32>,
+    basis: array<vec4<f32>, 3>,
     face_id: u32,
     _padding: array<u32, 3>,
 }
@@ -127,8 +128,7 @@ fn vs_main(
     
     // Get face center from face_id
     let face_center_4d = face_data.face_centers[instance.face_id];
-    let fixed_dim = face_data.fixed_dims[instance.face_id][0];
-    
+
     // Calculate sticker center in 4D
     let sticker_center_4d = calculate_sticker_center_4d(instance.position_4d, face_center_4d, transform.face_spacing);
     
@@ -164,23 +164,14 @@ fn vs_main(
     //     corrected_vertex.x = -corrected_vertex.x;
     // }
     
-    // Generate vertex in 4D space around sticker center
-    var vertex_4d = sticker_center_4d;
-    var offset_idx = 0u;
-    
-    for (var axis = 0u; axis < 4u; axis++) {
-        if (axis != fixed_dim) {
-            if (offset_idx == 0u) {
-                vertex_4d[axis] += corrected_vertex.x;
-            } else if (offset_idx == 1u) {
-                vertex_4d[axis] += corrected_vertex.y;
-            } else if (offset_idx == 2u) {
-                vertex_4d[axis] += corrected_vertex.z;
-            }
-            offset_idx++;
-        }
-    }
-    
+    // Generate vertex in 4D space around sticker center by embedding the
+    // local cube offset along the instance's own (possibly mid-rotation)
+    // basis vectors, rather than a fixed world axis.
+    var vertex_4d = sticker_center_4d
+        + corrected_vertex.x * instance.basis[0]
+        + corrected_vertex.y * instance.basis[1]
+        + corrected_vertex.z * instance.basis[2];
+
     // Apply 4D rotation
     let rotated_vertex_4d = transform.rotation_matrix * vertex_4d;
     

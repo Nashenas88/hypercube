@@ -49,6 +49,9 @@ pub(crate) struct StickerInstance {
     pub(crate) position_4d: [f32; 4],
     /// RGBA color of the sticker
     pub(crate) color: [f32; 4],
+    /// The 3 world-space basis vectors (one per local mesh axis) the vertex
+    /// shader embeds the sticker's local cube offsets along.
+    pub(crate) basis: [[f32; 4]; 3],
     /// Face ID (0-7) for this sticker
     pub(crate) face_id: u32,
     /// Padding for alignment
@@ -185,6 +188,9 @@ pub(crate) struct FacetGeometry {
     pub(crate) face_id: usize,
     /// 4D render position, matching the old `Sticker::position` layout.
     pub(crate) position_4d: [f32; 4],
+    /// The 3 world-space unit vectors (one per local mesh axis, ascending)
+    /// the vertex shader embeds this facet's local cube offsets along.
+    pub(crate) basis: [[f32; 4]; 3],
     /// True for face/edge/corner-type pieces (facet_count 2..=4) - the only
     /// pieces that can be clicked to trigger a move.
     pub(crate) is_actionable: bool,
@@ -208,6 +214,16 @@ fn facet_position_4d(position: [i8; 4], fixed_axis: usize) -> [f32; 4] {
     pos
 }
 
+/// The 3 world-space unit vectors for `axes`, in order - the identity mesh
+/// basis a facet uses when not mid-animation.
+fn unit_vectors(axes: [usize; 3]) -> [[f32; 4]; 3] {
+    axes.map(|axis| {
+        let mut v = [0.0f32; 4];
+        v[axis] = 1.0;
+        v
+    })
+}
+
 fn build_facet_table() -> [FacetGeometry; NUM_FACETS] {
     let mut table = Vec::with_capacity(NUM_FACETS);
     for piece_slot in 0..81 {
@@ -223,6 +239,7 @@ fn build_facet_table() -> [FacetGeometry; NUM_FACETS] {
                 axis,
                 face_id: face_id_for(axis, position[axis]),
                 position_4d: facet_position_4d(position, axis),
+                basis: unit_vectors(axes),
                 is_actionable: facet_count >= 2,
                 side_sign: position[axis],
                 free_axes: axes,
@@ -252,6 +269,7 @@ pub(crate) fn generate_sticker_instances(hypercube: &Hypercube) -> Vec<StickerIn
             StickerInstance {
                 position_4d: facet.position_4d,
                 color: nalgebra::Vector4::from(color).into(),
+                basis: facet.basis,
                 face_id: facet.face_id as u32,
                 _padding: [0; 3],
             }
