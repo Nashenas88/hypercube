@@ -33,10 +33,24 @@ impl std::fmt::Display for RotateButton {
     }
 }
 
+pub(crate) const ANIMATION_DURATION_MS_RANGE: std::ops::RangeInclusive<u32> = 100..=600;
+const DEFAULT_ANIMATION_DURATION_MS: u32 = 250;
+
 /// Settings persisted across application runs.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct AppSettings {
     pub(crate) rotate_button: RotateButton,
+    /// Duration of a move's turn animation, in milliseconds.
+    pub(crate) animation_duration_ms: u32,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            rotate_button: RotateButton::default(),
+            animation_duration_ms: DEFAULT_ANIMATION_DURATION_MS,
+        }
+    }
 }
 
 fn config_path() -> Option<PathBuf> {

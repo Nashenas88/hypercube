@@ -16,7 +16,7 @@ mod renderer;
 mod settings;
 mod shader_widget;
 
-use settings::{AppSettings, RotateButton};
+use settings::{ANIMATION_DURATION_MS_RANGE, AppSettings, RotateButton};
 use shader_widget::HypercubeShaderProgram;
 
 /// Rendering modes for visualization
@@ -71,7 +71,7 @@ pub(crate) struct HypercubeApp {
     render_mode: RenderMode,
     aabb_mode: AABBMode,
     debug_mode: bool,
-    rotate_button: RotateButton,
+    settings: AppSettings,
 }
 
 /// Messages that the application can receive
@@ -83,6 +83,7 @@ pub(crate) enum Message {
     AABBMode(AABBMode),
     DebugMode(bool),
     RotateButton(RotateButton),
+    AnimationDuration(u32),
 }
 
 impl HypercubeApp {
@@ -94,7 +95,7 @@ impl HypercubeApp {
             render_mode: RenderMode::Standard,
             aabb_mode: AABBMode::None,
             debug_mode: false,
-            rotate_button: settings::load().rotate_button,
+            settings: settings::load(),
         }
     }
 
@@ -122,10 +123,12 @@ impl HypercubeApp {
                 self.debug_mode = enabled;
             }
             Message::RotateButton(button) => {
-                self.rotate_button = button;
-                settings::save(&AppSettings {
-                    rotate_button: button,
-                });
+                self.settings.rotate_button = button;
+                settings::save(&self.settings);
+            }
+            Message::AnimationDuration(duration_ms) => {
+                self.settings.animation_duration_ms = duration_ms;
+                settings::save(&self.settings);
             }
         }
 
@@ -149,7 +152,7 @@ impl HypercubeApp {
                     .push(
                         PickList::new(
                             &RotateButton::ALL[..],
-                            Some(self.rotate_button),
+                            Some(self.settings.rotate_button),
                             Message::RotateButton,
                         )
                         .width(250),
@@ -206,6 +209,20 @@ impl HypercubeApp {
                             .step(0.01f32)
                             .width(250),
                     ),
+            )
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(iced::widget::text("Animation Duration (ms)"))
+                    .push(
+                        Slider::new(
+                            ANIMATION_DURATION_MS_RANGE,
+                            self.settings.animation_duration_ms,
+                            Message::AnimationDuration,
+                        )
+                        .step(10u32)
+                        .width(250),
+                    ),
             );
 
         // Right pane with 3D viewport
@@ -215,7 +232,7 @@ impl HypercubeApp {
             self.face_scale,
             self.render_mode,
             self.aabb_mode,
-            self.rotate_button,
+            self.settings.rotate_button,
         ))
         .width(Length::Fill)
         .height(Length::Fill);
