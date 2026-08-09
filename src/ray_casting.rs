@@ -9,11 +9,12 @@ use nalgebra::{Matrix4, Point3, Vector3, Vector4};
 
 use crate::AABBMode;
 use crate::camera::{Camera, Projection};
-use crate::geometry::{Hypercube, NORMAL_TO_BASE_INDICES};
+use crate::geometry::NORMAL_TO_BASE_INDICES;
 use crate::math::{
     BASE_STICKER_SIZE, GRID_EXTENT, calc_sticker_center, is_face_visible, project_cube_point,
     transform_sticker_vertices_to_3d,
 };
+use crate::piece::FACET_TABLE;
 use crate::renderer::DebugInstanceWithDistance;
 use crate::shader_widget::HypercubeShaderState;
 
@@ -307,35 +308,6 @@ fn get_face_debug_color(face_id: usize) -> [f32; 4] {
     }
 }
 
-/// Sticker data for ray casting that preserves original indices
-#[derive(Debug, Clone)]
-struct StickerData {
-    /// Global sticker index (face_id * 27 + sticker_index)
-    global_index: usize,
-    /// Face ID this sticker belongs to
-    face_id: usize,
-    /// 4D position of the sticker
-    position: nalgebra::Vector4<f32>,
-}
-
-/// Generate sticker data for ray casting
-/// Returns Vec<StickerData> with original global indices preserved
-fn generate_sticker_data() -> Vec<StickerData> {
-    let mut sticker_data = Vec::new();
-
-    for (face_id, face) in Hypercube::new().faces.iter().enumerate() {
-        for (sticker_index, sticker) in face.stickers.iter().enumerate() {
-            sticker_data.push(StickerData {
-                global_index: face_id * 27 + sticker_index,
-                face_id,
-                position: sticker.position,
-            });
-        }
-    }
-
-    sticker_data
-}
-
 /// Find the sticker that the 3D mouse ray intersects
 /// Returns the sticker index and debug AABBs for intersected faces/stickers
 pub(crate) fn find_intersected_sticker(
@@ -382,19 +354,19 @@ pub(crate) fn find_intersected_sticker(
     let mut closest_distance = f32::INFINITY;
     let mut closest_sticker = None;
 
-    // Generate sticker data for ray casting
-    let sticker_data = generate_sticker_data();
-
     // Only check stickers on faces that the ray could potentially hit
-    for sticker in &sticker_data {
+    for (sticker_index, sticker) in FACET_TABLE.iter().enumerate() {
         // Skip stickers on faces that ray doesn't intersect
         if !intersectable_faces.contains(&sticker.face_id) {
             continue;
         }
 
         // Transform sticker to 4D world space for AABB calculation
-        let sticker_center_4d =
-            calc_sticker_center(sticker.position, sticker.face_id, face_spacing);
+        let sticker_center_4d = calc_sticker_center(
+            nalgebra::Vector4::from(sticker.position_4d),
+            sticker.face_id,
+            face_spacing,
+        );
 
         // Use shared transformation logic from math.rs
         let world_vertices = transform_sticker_vertices_to_3d(
@@ -423,11 +395,11 @@ pub(crate) fn find_intersected_sticker(
                 && distance < closest_distance
             {
                 closest_distance = distance;
-                closest_sticker = if sticker.global_index % 27 == 13 {
+                closest_sticker = if sticker.is_actionable {
+                    Some(sticker_index)
+                } else {
                     // Don't highlight the center piece. No actions can be performed on it.
                     None
-                } else {
-                    Some(sticker.global_index)
                 };
             }
         }
