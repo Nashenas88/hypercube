@@ -44,11 +44,9 @@ pub(crate) enum Color {
 /// Individual sticker on the hypercube surface.
 ///
 /// Each sticker represents one colored square that would be visible on the surface
-/// of the 4D hypercube. Contains color and 4D position information.
+/// of the 4D hypercube. Contains 4D position information.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Sticker {
-    /// Color of this sticker
-    pub(crate) color: Color,
     /// Position within the 4D hypercube coordinate system
     pub(crate) position: Vector4<f32>,
 }
@@ -64,19 +62,18 @@ pub(crate) struct Face {
 }
 
 impl Face {
-    /// Creates a new 3D face with all stickers of the same color.
+    /// Creates a new 3D face.
     ///
     /// Generates a 3x3x3 grid of stickers positioned using authentic tesseract geometry.
     /// Uses the coordinate pattern {-2/3, 0, +2/3} for the free dimensions.
     ///
     /// # Arguments
-    /// * `center_color` - Color for all stickers on this side
     /// * `face_center` - 4D center position for this face of the tesseract
     /// * `fixed_dim` - Which dimension (0=X, 1=Y, 2=Z, 3=W) is fixed for this face
     ///
     /// # Returns
     /// A new side with 27 stickers arranged in a 3D grid
-    pub(crate) fn new(center_color: Color, face_center: Vector4<f32>, fixed_dim: usize) -> Self {
+    pub(crate) fn new(face_center: Vector4<f32>, fixed_dim: usize) -> Self {
         let mut stickers = Vec::with_capacity(27);
 
         // Generate 3x3x3 grid with authentic tesseract spacing
@@ -100,10 +97,7 @@ impl Face {
                         }
                     }
 
-                    stickers.push(Sticker {
-                        color: center_color,
-                        position,
-                    });
+                    stickers.push(Sticker { position });
                 }
             }
         }
@@ -131,11 +125,10 @@ impl Hypercube {
     /// # Returns
     /// A solved 4D hypercube ready for visualization and manipulation
     pub(crate) fn new() -> Self {
-        let faces = COLORS
+        let faces = FACE_CENTERS
             .iter()
-            .zip(FACE_CENTERS.iter())
             .zip(FIXED_DIMS.iter())
-            .map(|((&color, &face_center), &fixed_dim)| Face::new(color, face_center, fixed_dim))
+            .map(|(&face_center, &fixed_dim)| Face::new(face_center, fixed_dim))
             .collect();
 
         Self { faces }
@@ -163,18 +156,6 @@ impl From<Color> for Vector4<f32> {
         }
     }
 }
-
-/// Colors for each 4D face.
-const COLORS: [Color; 8] = [
-    Color::White,
-    Color::Yellow,
-    Color::Blue,
-    Color::Green,
-    Color::Red,
-    Color::Orange,
-    Color::Purple,
-    Color::Brown,
-];
 
 /// 36 vertices for a cube (6 faces × 6 vertices per face using 2 triangles each).
 ///
