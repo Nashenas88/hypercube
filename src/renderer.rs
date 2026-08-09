@@ -12,9 +12,9 @@ use wgpu::util::DeviceExt;
 
 use crate::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
-use crate::geometry::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, Hypercube, VERTEX_NORMAL_INDICES};
+use crate::geometry::{CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, VERTEX_NORMAL_INDICES};
 use crate::math::{BASE_STICKER_SIZE, VIEWER_DISTANCE};
-use crate::piece::StickerInstance;
+use crate::piece::{Hypercube, StickerInstance, generate_sticker_instances};
 use crate::shader_widget::UiControls;
 
 /// GPU renderer for the hypercube visualization.
@@ -339,29 +339,6 @@ fn load_cross_cubemap(
     Ok((cubemap_texture, view, sampler))
 }
 
-/// Generates instance data for the vertex shader from hypercube stickers
-pub(crate) fn generate_sticker_instances() -> Vec<StickerInstance> {
-    let mut instances = Vec::new();
-
-    for (face_id, face) in Hypercube::new().faces.iter().enumerate() {
-        for sticker in &face.stickers {
-            instances.push(StickerInstance {
-                position_4d: [
-                    sticker.position.x,
-                    sticker.position.y,
-                    sticker.position.z,
-                    sticker.position.w,
-                ],
-                color: nalgebra::Vector4::from(sticker.color).into(),
-                face_id: face_id as u32,
-                _padding: [0; 3],
-            });
-        }
-    }
-
-    instances
-}
-
 impl Renderer {
     /// Creates a new renderer with initialized GPU resources.
     ///
@@ -461,7 +438,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let sticker_instances = generate_sticker_instances();
+        let sticker_instances = generate_sticker_instances(&Hypercube::solved());
         let num_stickers = sticker_instances.len();
 
         // Create instance buffer for sticker data
