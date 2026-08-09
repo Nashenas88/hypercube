@@ -73,30 +73,37 @@ fn sticker_instances_for_render(state: &HypercubeShaderState) -> Vec<StickerInst
 
             let position_4d = if pre_move_piece.position[animating.side_axis] == animating.side_sign
             {
-                let local_position = [
-                    pre_move_piece.position[axes[0]] as f32,
-                    pre_move_piece.position[axes[1]] as f32,
-                    pre_move_piece.position[axes[2]] as f32,
+                // `facet_position_4d`'s static convention is `pos *
+                // GRID_EXTENT + extension`, where `extension` is zero except
+                // at the facet's own axis (the extra push from grid-scale
+                // out to the tesseract boundary). `extension` is fixed to
+                // the piece's own body, so it must rotate along with the
+                // piece rather than stay pinned to the pre-move axis -
+                // folding it into the local position before rotating
+                // (instead of exempting an axis after rotating) achieves
+                // that, since rotation is linear.
+                let mut local_combined = [
+                    pre_move_piece.position[axes[0]] as f32 * GRID_EXTENT,
+                    pre_move_piece.position[axes[1]] as f32 * GRID_EXTENT,
+                    pre_move_piece.position[axes[2]] as f32 * GRID_EXTENT,
                 ];
-                let rotated =
-                    rotate_local_position(animating.local_coords, partial_angle, local_position);
-
-                let mut unscaled = [0.0f32; 4];
-                unscaled[animating.side_axis] = pre_move_piece.position[animating.side_axis] as f32;
-                for i in 0..3 {
-                    unscaled[axes[i]] = rotated[i];
+                if let Some(i) = axes.iter().position(|&axis| axis == facet.axis) {
+                    local_combined[i] +=
+                        pre_move_piece.position[facet.axis] as f32 * (1.0 - GRID_EXTENT);
                 }
+                let rotated =
+                    rotate_local_position(animating.local_coords, partial_angle, local_combined);
 
-                // Matches `facet_position_4d`'s static convention: a facet's
-                // own axis is unscaled, the other 3 are GRID_EXTENT-scaled -
-                // which axis that is depends on this facet, not on the move.
                 let mut position_4d = [0.0f32; 4];
-                for axis in 0..4 {
-                    position_4d[axis] = if axis == facet.axis {
-                        unscaled[axis]
+                position_4d[animating.side_axis] = pre_move_piece.position[animating.side_axis]
+                    as f32
+                    * if facet.axis == animating.side_axis {
+                        1.0
                     } else {
-                        unscaled[axis] * GRID_EXTENT
+                        GRID_EXTENT
                     };
+                for i in 0..3 {
+                    position_4d[axes[i]] = rotated[i];
                 }
                 position_4d
             } else {
@@ -624,6 +631,82 @@ impl Default for HypercubeShaderState {
             hypercube: Hypercube::solved(),
             animating_move: None,
             last_redraw_instant: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_key(v: [f32; 4]) -> [i32; 4] {
+        v.map(|x| (x * 1000.0).round() as i32)
+    }
+
+    fn color_key(c: [f32; 4]) -> [u8; 4] {
+        c.map(|x| (x * 255.0).round() as u8)
+    }
+
+    /// At the end of an animation, the full set of rendered (position,
+    /// color) pairs must exactly match what the static post-move render
+    /// would show - checked as a set (not a row-by-row comparison), since
+    /// each animated row keeps its pre-move identity while sweeping to
+    /// wherever its content ends up, which is a different GPU row than the
+    /// static render uses for the same visual result.
+    #[test]
+    fn animated_end_state_matches_post_move_static_render_for_all_move_types() {
+        for side_axis in 0..4usize {
+            for side_sign in [-1i8, 1] {
+                for local_coords in [
+                    [1i8, 0, 0],
+                    [0, 1, 0],
+                    [0, 0, 1],
+                    [1, 1, 0],
+                    [1, 0, 1],
+                    [0, 1, 1],
+                    [1, 1, 1],
+                ] {
+                    for direction in [1i8, -1] {
+                        let nonzero = local_coords.iter().filter(|c| **c != 0).count();
+                        let angle = base_angle(nonzero) * direction as f32;
+
+                        let pre_move = Hypercube::solved();
+                        let mut post_move = pre_move.clone();
+                        post_move.apply_move(side_axis, side_sign, local_coords, angle);
+
+                        let mut state = HypercubeShaderState::default();
+                        state.hypercube = pre_move.clone();
+                        state.animating_move = Some(AnimatingMove {
+                            side_axis,
+                            side_sign,
+                            local_coords,
+                            angle,
+                            pre_move_pieces: pre_move.pieces.clone(),
+                            elapsed: Duration::from_millis(250),
+                            duration: Duration::from_millis(250),
+                        });
+
+                        let mut animated_end: Vec<([i32; 4], [u8; 4])> =
+                            sticker_instances_for_render(&state)
+                                .iter()
+                                .map(|inst| (round_key(inst.position_4d), color_key(inst.color)))
+                                .collect();
+                        let mut static_post: Vec<([i32; 4], [u8; 4])> =
+                            generate_sticker_instances(&post_move)
+                                .iter()
+                                .map(|inst| (round_key(inst.position_4d), color_key(inst.color)))
+                                .collect();
+                        animated_end.sort_unstable();
+                        static_post.sort_unstable();
+
+                        assert_eq!(
+                            animated_end, static_post,
+                            "mismatch for side_axis={side_axis} side_sign={side_sign} \
+                             local_coords={local_coords:?} direction={direction}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
