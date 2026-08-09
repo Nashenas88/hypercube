@@ -940,7 +940,7 @@ impl Renderer {
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &[],
                     zero_initialize_workgroup_memory: false,
-                }
+                },
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -953,7 +953,7 @@ impl Renderer {
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &[],
                     zero_initialize_workgroup_memory: false,
-                }
+                },
             }),
             primitive: wgpu::PrimitiveState {
                 front_face: wgpu::FrontFace::Ccw,
@@ -985,7 +985,7 @@ impl Renderer {
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &[],
                     zero_initialize_workgroup_memory: false,
-                }
+                },
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -998,7 +998,7 @@ impl Renderer {
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &[],
                     zero_initialize_workgroup_memory: false,
-                }
+                },
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1041,7 +1041,7 @@ impl Renderer {
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &[],
                     zero_initialize_workgroup_memory: false,
-                }
+                },
             },
             fragment: Some(wgpu::FragmentState {
                 module: &normal_shader,
@@ -1054,7 +1054,7 @@ impl Renderer {
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &[],
                     zero_initialize_workgroup_memory: false,
-                }
+                },
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1101,7 +1101,7 @@ impl Renderer {
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &[],
                     zero_initialize_workgroup_memory: false,
-                }
+                },
             },
             fragment: Some(wgpu::FragmentState {
                 module: &depth_shader,
@@ -1114,7 +1114,7 @@ impl Renderer {
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &[],
                     zero_initialize_workgroup_memory: false,
-                }
+                },
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1161,7 +1161,7 @@ impl Renderer {
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &[],
                     zero_initialize_workgroup_memory: false,
-                }
+                },
             },
             fragment: Some(wgpu::FragmentState {
                 module: &debug_aabb_shader,
@@ -1174,7 +1174,7 @@ impl Renderer {
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &[],
                     zero_initialize_workgroup_memory: false,
-                }
+                },
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,

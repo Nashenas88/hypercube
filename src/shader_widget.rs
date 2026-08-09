@@ -4,15 +4,14 @@
 //! logic, camera controls, and 4D transformations. It follows Option C architecture
 //! where the shader widget manages its own state independently.
 
-use iced::widget::{Action, shader};
 use iced::wgpu;
+use iced::widget::{Action, shader};
 use iced::{Event, Point, Rectangle, event, mouse};
 use nalgebra::{Matrix4, Vector3};
 
 use crate::camera::{Camera, CameraController, Projection};
 use crate::geometry::{
-    BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES,
-    VERTEX_NORMAL_INDICES,
+    BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES, VERTEX_NORMAL_INDICES,
 };
 use crate::math::{VIEWER_DISTANCE, process_4d_rotation, project_cube_point};
 use crate::ray_casting::{calculate_mouse_ray, find_intersected_sticker};
@@ -144,7 +143,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
         state: &mut Self::State,
         event: &Event,
         bounds: Rectangle,
-        cursor: mouse::Cursor
+        cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
         // Update camera each frame
         state.camera_controller.update_camera(&mut state.camera);
@@ -166,9 +165,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 }
                 result
             }
-            Event::Keyboard(keyboard_event) => {
-                self.handle_keyboard_event(state, keyboard_event)
-            }
+            Event::Keyboard(keyboard_event) => self.handle_keyboard_event(state, keyboard_event),
             _ => event::Status::Ignored,
         };
 

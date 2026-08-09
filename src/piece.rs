@@ -114,7 +114,8 @@ fn undigit(d: usize) -> i8 {
 /// Bijection from a lattice position to its canonical `Vec` slot (base-3
 /// digit encoding, axis 0 most significant).
 pub(crate) fn index_of(position: [i8; 4]) -> usize {
-    ((digit(position[0]) * 3 + digit(position[1])) * 3 + digit(position[2])) * 3 + digit(position[3])
+    ((digit(position[0]) * 3 + digit(position[1])) * 3 + digit(position[2])) * 3
+        + digit(position[3])
 }
 
 /// Inverse of `index_of`.
@@ -229,15 +230,16 @@ fn build_facet_table() -> [FacetGeometry; NUM_FACETS] {
             });
         }
     }
-    table
-        .try_into()
-        .unwrap_or_else(|v: Vec<FacetGeometry>| panic!("expected {NUM_FACETS} facets, got {}", v.len()))
+    table.try_into().unwrap_or_else(|v: Vec<FacetGeometry>| {
+        panic!("expected {NUM_FACETS} facets, got {}", v.len())
+    })
 }
 
 /// Fixed, state-independent bijection from GPU instance index to facet
 /// geometry. Built once; the only thing that varies frame-to-frame is each
 /// facet's live color, looked up from a `Hypercube` in `generate_sticker_instances`.
-pub(crate) static FACET_TABLE: LazyLock<[FacetGeometry; NUM_FACETS]> = LazyLock::new(build_facet_table);
+pub(crate) static FACET_TABLE: LazyLock<[FacetGeometry; NUM_FACETS]> =
+    LazyLock::new(build_facet_table);
 
 /// Builds the full GPU instance list for the current puzzle state, in the
 /// stable order defined by `FACET_TABLE`.
