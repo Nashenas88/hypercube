@@ -112,7 +112,7 @@ pub(crate) struct LightUniform {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct FaceDataUniform {
-    /// Face centers for all 8 faces (vec4<f32>)
+    /// Face centers for all 8 faces (`vec4<f32>`)
     face_centers: [[f32; 4]; 8],
 }
 

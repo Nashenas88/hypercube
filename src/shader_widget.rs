@@ -49,7 +49,7 @@ enum AnimationTick {
     Completed,
 }
 
-/// Smoothstep ease: slow-fast-slow, applied to the normalized [0,1] progress.
+/// Smoothstep ease: slow-fast-slow, applied to the normalized \[0,1\] progress.
 fn ease(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
