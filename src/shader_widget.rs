@@ -9,13 +9,16 @@ use std::time::{Duration, Instant};
 use iced::wgpu;
 use iced::widget::{Action, shader};
 use iced::{Event, Point, Rectangle, event, mouse};
-use nalgebra::{Matrix4, Vector3};
+use nalgebra::{Matrix4, Vector3, Vector4};
 
 use crate::camera::{Camera, CameraController, Projection};
 use crate::geometry::{
     BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES, VERTEX_NORMAL_INDICES,
 };
-use crate::math::{GRID_EXTENT, VIEWER_DISTANCE, process_4d_rotation, project_cube_point};
+use crate::math::{
+    GRID_EXTENT, VIEWER_DISTANCE, create_4d_plane_rotation, process_4d_rotation,
+    project_cube_point, shortest_arc_plane,
+};
 use crate::moves::{base_angle, rotate_local_position};
 use crate::piece::{
     FACET_TABLE, Hypercube, Piece, StickerInstance, free_axes, generate_sticker_instances,
@@ -49,10 +52,30 @@ enum AnimationTick {
     Completed,
 }
 
+/// An in-progress "center this face" animation, triggered by double-clicking
+/// a sticker: sweeps `rotation_4d` from its value when the double-click
+/// landed toward `start_rotation` rotated by `total_angle` in `plane`, which
+/// by construction carries the double-clicked face's normal onto the
+/// screen-centered pole (see `shortest_arc_plane` and its call site below).
+struct AnimatingFocus {
+    start_rotation: Matrix4<f32>,
+    plane: (Vector4<f32>, Vector4<f32>),
+    total_angle: f32,
+    elapsed: Duration,
+    duration: Duration,
+}
+
 /// Smoothstep ease: slow-fast-slow, applied to the normalized \[0,1\] progress.
 fn ease(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
+
+/// Max cursor movement between a rotate-button press and release for it to
+/// still count as a click rather than a drag.
+const CLICK_DRAG_THRESHOLD_PX: f32 = 4.0;
+/// Max gap between two qualifying clicks on the same face for them to count
+/// as a double-click.
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
 /// Builds the GPU instance list for the current frame. Piece state is
 /// already final (`apply_move` commits atomically) - while a move is
@@ -272,6 +295,13 @@ pub(crate) struct HypercubeShaderState {
     debug_instances: Vec<DebugInstanceWithDistance>,
     hypercube: Hypercube,
     animating_move: Option<AnimatingMove>,
+    animating_focus: Option<AnimatingFocus>,
+    /// Position and hovered sticker (if any) recorded when the rotate button
+    /// was last pressed, used at release time to tell a click from a drag.
+    rotate_press: Option<(Point, Option<usize>)>,
+    /// Time and face of an unmatched first click on the rotate button,
+    /// waiting to see if a second click lands within `DOUBLE_CLICK_WINDOW`.
+    pending_face_click: Option<(Instant, usize)>,
     last_redraw_instant: Option<Instant>,
     reset_generation: u64,
 }
@@ -324,6 +354,9 @@ impl shader::Program<Message> for HypercubeShaderProgram {
         if self.reset_generation != state.reset_generation {
             state.hypercube = Hypercube::solved();
             state.animating_move = None;
+            state.animating_focus = None;
+            state.rotate_press = None;
+            state.pending_face_click = None;
             state.last_redraw_instant = None;
             state.hovered_sticker = None;
             state.debug_instances.clear();
@@ -353,17 +386,42 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             }
             Event::Keyboard(keyboard_event) => self.handle_keyboard_event(state, keyboard_event),
             Event::Window(iced::window::Event::RedrawRequested(now)) => {
-                match Self::advance_animation(state, *now) {
-                    AnimationTick::Completed => {
-                        if !state.mouse_pressed
-                            && let Some(position) = cursor.position_in(bounds)
-                        {
-                            self.update_hover(state, position, bounds);
-                        }
-                        event::Status::Captured
-                    }
-                    AnimationTick::Running => event::Status::Captured,
-                    AnimationTick::Ignored => event::Status::Ignored,
+                let delta = state
+                    .last_redraw_instant
+                    .map(|last| now.duration_since(last))
+                    .unwrap_or_default();
+
+                let move_tick = Self::advance_animation(state, delta);
+                let focus_tick = Self::advance_focus_animation(state, delta);
+
+                if state.animating_move.is_none() && state.animating_focus.is_none() {
+                    state.last_redraw_instant = None;
+                } else {
+                    state.last_redraw_instant = Some(*now);
+                }
+
+                if matches!(
+                    focus_tick,
+                    AnimationTick::Running | AnimationTick::Completed
+                ) {
+                    rotation_changed = true;
+                }
+
+                if matches!(
+                    (&move_tick, &focus_tick),
+                    (AnimationTick::Completed, _) | (_, AnimationTick::Completed)
+                ) && !state.mouse_pressed
+                    && let Some(position) = cursor.position_in(bounds)
+                {
+                    self.update_hover(state, position, bounds);
+                }
+
+                if matches!(move_tick, AnimationTick::Ignored)
+                    && matches!(focus_tick, AnimationTick::Ignored)
+                {
+                    event::Status::Ignored
+                } else {
+                    event::Status::Captured
                 }
             }
             _ => event::Status::Ignored,
@@ -526,15 +584,24 @@ impl HypercubeShaderProgram {
                 return event::Status::Captured;
             }
             mouse::Event::ButtonPressed(button) => {
-                if cursor.position_in(bounds).is_some()
+                if let Some(position) = cursor.position_in(bounds)
                     && *button == self.rotate_button.to_mouse_button()
                 {
+                    // A fresh press always takes precedence over an
+                    // in-progress auto-centering animation, so a deliberate
+                    // drag never has to fight it frame-by-frame. This only
+                    // ever cancels an animation from an *earlier*
+                    // interaction: the animation this same press might
+                    // trigger doesn't start until its matching release.
+                    state.animating_focus = None;
+                    state.rotate_press = Some((position, state.hovered_sticker));
                     state.mouse_pressed = true;
                     return event::Status::Captured;
                 }
                 if cursor.position_in(bounds).is_some()
                     && *button == self.rotate_button.click_button()
                     && state.animating_move.is_none()
+                    && state.animating_focus.is_none()
                     && let Some(sticker_index) = state.hovered_sticker
                 {
                     self.handle_facet_click(state, sticker_index);
@@ -542,8 +609,22 @@ impl HypercubeShaderProgram {
                 }
             }
             mouse::Event::ButtonReleased(_) => {
-                if state.mouse_pressed {
+                let was_dragging = state.mouse_pressed;
+                if was_dragging {
                     state.mouse_pressed = false;
+                }
+
+                if let Some((press_pos, sticker_at_press)) = state.rotate_press.take() {
+                    self.handle_rotate_click(
+                        state,
+                        press_pos,
+                        cursor.position_in(bounds),
+                        sticker_at_press,
+                    );
+                    return event::Status::Captured;
+                }
+
+                if was_dragging {
                     return event::Status::Captured;
                 }
             }
@@ -586,6 +667,68 @@ impl HypercubeShaderProgram {
         state.debug_instances = debug_instances;
     }
 
+    /// Resolves a rotate-button release into a click-vs-drag decision and,
+    /// for a qualifying click, double-click detection. `press_pos`/
+    /// `sticker_at_press` were captured when the button went down;
+    /// `release_pos` is the cursor position now (`None` if it left the
+    /// widget bounds). A release that isn't a same-spot click on a sticker
+    /// (a real drag, or landing off any sticker) always clears any pending
+    /// click, matching standard double-click behavior.
+    fn handle_rotate_click(
+        &self,
+        state: &mut HypercubeShaderState,
+        press_pos: Point,
+        release_pos: Option<Point>,
+        sticker_at_press: Option<usize>,
+    ) {
+        let is_click = release_pos.is_some_and(|release_pos| {
+            let dx = release_pos.x - press_pos.x;
+            let dy = release_pos.y - press_pos.y;
+            (dx * dx + dy * dy).sqrt() < CLICK_DRAG_THRESHOLD_PX
+        });
+
+        let Some(sticker_index) = sticker_at_press.filter(|_| is_click) else {
+            state.pending_face_click = None;
+            return;
+        };
+
+        let face_id = FACET_TABLE[sticker_index].face_id;
+        let now = Instant::now();
+        let is_double_click = state
+            .pending_face_click
+            .is_some_and(|(last_time, last_face)| {
+                last_face == face_id && now.duration_since(last_time) <= DOUBLE_CLICK_WINDOW
+            });
+
+        if is_double_click && state.animating_move.is_none() && state.animating_focus.is_none() {
+            self.start_focus_animation(state, face_id);
+            state.pending_face_click = None;
+        } else {
+            state.pending_face_click = Some((now, face_id));
+        }
+    }
+
+    /// Starts an animation that reorients the puzzle in 4D so `face_id`'s
+    /// normal ends up centered and facing the viewer. The target is
+    /// `FACE_CENTERS[0]` (W=-1), not `FACE_CENTERS[7]` (W=+1): the latter is
+    /// exactly the pole `is_face_visible` culls (see `math.rs`'s doc
+    /// comment), so aiming there would make the double-clicked face vanish
+    /// instead of centering it.
+    fn start_focus_animation(&self, state: &mut HypercubeShaderState, face_id: usize) {
+        let target = FACE_CENTERS[0];
+        let current_normal = (state.rotation_4d * FACE_CENTERS[face_id]).normalize();
+        let (u, v, total_angle) = shortest_arc_plane(current_normal, target);
+
+        state.animating_focus = Some(AnimatingFocus {
+            start_rotation: state.rotation_4d,
+            plane: (u, v),
+            total_angle,
+            elapsed: Duration::ZERO,
+            duration: Duration::from_millis(self.animation_duration_ms as u64),
+        });
+        state.last_redraw_instant = None;
+    }
+
     /// Applies the move triggered by clicking the given facet, if any -
     /// non-actionable facets (cell-centers, the invisible center) are a
     /// no-op. Direction follows the clicked facet's own signed local
@@ -626,21 +769,44 @@ impl HypercubeShaderProgram {
     /// since the last redraw, and requests another redraw if it isn't done
     /// yet - self-sustaining until the animation completes, at which point
     /// no further redraw is requested and the loop naturally stops.
-    fn advance_animation(state: &mut HypercubeShaderState, now: Instant) -> AnimationTick {
+    fn advance_animation(state: &mut HypercubeShaderState, delta: Duration) -> AnimationTick {
         let Some(animating) = state.animating_move.as_mut() else {
             return AnimationTick::Ignored;
         };
 
-        let delta = state
-            .last_redraw_instant
-            .map(|last| now.duration_since(last))
-            .unwrap_or_default();
         animating.elapsed += delta;
-        state.last_redraw_instant = Some(now);
 
         if animating.elapsed >= animating.duration {
             state.animating_move = None;
-            state.last_redraw_instant = None;
+            return AnimationTick::Completed;
+        }
+
+        AnimationTick::Running
+    }
+
+    /// Advances an in-progress "center this face" animation (see
+    /// `AnimatingFocus`) by `delta`, mirroring `advance_animation`'s shape.
+    /// Unlike a move animation, this one has an externally visible effect
+    /// every tick - it directly drives `rotation_4d` - rather than only
+    /// affecting a separate per-frame sweep computation.
+    fn advance_focus_animation(state: &mut HypercubeShaderState, delta: Duration) -> AnimationTick {
+        let Some(animating) = state.animating_focus.as_mut() else {
+            return AnimationTick::Ignored;
+        };
+
+        animating.elapsed += delta;
+
+        let t = if animating.duration.is_zero() {
+            1.0
+        } else {
+            (animating.elapsed.as_secs_f32() / animating.duration.as_secs_f32()).clamp(0.0, 1.0)
+        };
+        let (u, v) = animating.plane;
+        let angle = animating.total_angle * ease(t);
+        state.rotation_4d = create_4d_plane_rotation(u, v, angle) * animating.start_rotation;
+
+        if animating.elapsed >= animating.duration {
+            state.animating_focus = None;
             return AnimationTick::Completed;
         }
 
@@ -711,6 +877,9 @@ impl Default for HypercubeShaderState {
             debug_instances: Vec::new(),
             hypercube: Hypercube::solved(),
             animating_move: None,
+            animating_focus: None,
+            rotate_press: None,
+            pending_face_click: None,
             last_redraw_instant: None,
             reset_generation: 0,
         }
