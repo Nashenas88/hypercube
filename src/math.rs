@@ -208,6 +208,47 @@ pub(crate) fn project_cube_point(
     project_4d_to_3d(vertex_4d, rotation_4d, viewer_distance)
 }
 
+/// Rotates within the plane spanned by orthonormal `u` and `v` by `angle`,
+/// leaving their orthogonal complement fixed. `create_4d_rotation_xw`/`_yw`
+/// are the special cases where `u`, `v` are standard basis vectors.
+pub(crate) fn create_4d_plane_rotation(
+    u: Vector4<f32>,
+    v: Vector4<f32>,
+    angle: f32,
+) -> Matrix4<f32> {
+    let (cos, sin) = (angle.cos(), angle.sin());
+    let outer_uu = u * u.transpose();
+    let outer_vv = v * v.transpose();
+    let outer_vu = v * u.transpose();
+    let outer_uv = u * v.transpose();
+    Matrix4::identity() + (outer_uu + outer_vv) * (cos - 1.0) + (outer_vu - outer_uv) * sin
+}
+
+/// Finds the orthonormal plane and signed angle such that rotating `from` by
+/// `create_4d_plane_rotation(from, v, angle)` carries it onto unit vector
+/// `to` (shortest arc). Falls back to an arbitrary orthogonal plane when
+/// `from`/`to` are anti-parallel, since no unique plane exists in that case.
+pub(crate) fn shortest_arc_plane(
+    from: Vector4<f32>,
+    to: Vector4<f32>,
+) -> (Vector4<f32>, Vector4<f32>, f32) {
+    let dot = from.dot(&to).clamp(-1.0, 1.0);
+    if dot > 0.999_999 {
+        return (from, to, 0.0);
+    }
+    let v = if dot < -0.999_999 {
+        let fallback = if from.x.abs() < 0.9 {
+            Vector4::new(1.0, 0.0, 0.0, 0.0)
+        } else {
+            Vector4::new(0.0, 1.0, 0.0, 0.0)
+        };
+        (fallback - from * from.dot(&fallback)).normalize()
+    } else {
+        (to - from * dot).normalize()
+    };
+    (from, v, dot.acos())
+}
+
 /// Check if a 4D face is visible from the viewer position.
 ///
 /// Replaces the duplicate implementation in ray_casting.rs is_face_visible().
@@ -230,4 +271,70 @@ pub(crate) fn is_face_visible(
     let to_viewer = viewer_position - rotated_face_center;
     let dot_product = rotated_face_center.dot(&to_viewer);
     dot_product < 0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::FACE_CENTERS;
+    use std::f32::consts::FRAC_PI_2;
+
+    const EPSILON: f32 = 1e-4;
+
+    fn assert_vector4_close(a: Vector4<f32>, b: Vector4<f32>) {
+        assert!(
+            (a - b).norm() < EPSILON,
+            "expected {b:?} to be close to {a:?}"
+        );
+    }
+
+    #[test]
+    fn plane_rotation_matches_xw_special_case() {
+        let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        for angle in [0.3, FRAC_PI_2, -1.1] {
+            let general = create_4d_plane_rotation(x, w, angle);
+            let special = create_4d_rotation_xw(angle);
+            assert!(
+                (general - special).norm() < EPSILON,
+                "angle {angle}: {general:?} != {special:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shortest_arc_plane_is_noop_for_identical_vectors() {
+        let (_, _, angle) = shortest_arc_plane(FACE_CENTERS[4], FACE_CENTERS[4]);
+        assert!(angle.abs() < EPSILON);
+    }
+
+    #[test]
+    fn shortest_arc_plane_round_trips_for_orthogonal_axes() {
+        for &from in &FACE_CENTERS {
+            for &to in &FACE_CENTERS {
+                let (u, v, angle) = shortest_arc_plane(from, to);
+                let rotation = create_4d_plane_rotation(u, v, angle);
+                assert_vector4_close(rotation * from, to);
+            }
+        }
+    }
+
+    #[test]
+    fn shortest_arc_plane_round_trips_for_antiparallel_axes() {
+        // Face 7 (W=+1) and face 0 (W=-1) are exact opposites - the
+        // fallback-plane branch, since `from`/`to` alone don't determine a
+        // unique rotation plane.
+        let (u, v, angle) = shortest_arc_plane(FACE_CENTERS[7], FACE_CENTERS[0]);
+        let rotation = create_4d_plane_rotation(u, v, angle);
+        assert_vector4_close(rotation * FACE_CENTERS[7], FACE_CENTERS[0]);
+    }
+
+    #[test]
+    fn plane_rotation_is_orthogonal() {
+        let u = Vector4::new(0.0, 1.0, 0.0, 0.0);
+        let v = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        let rotation = create_4d_plane_rotation(u, v, 0.7);
+        let identity = rotation * rotation.transpose();
+        assert!((identity - Matrix4::identity()).norm() < EPSILON);
+    }
 }
