@@ -39,6 +39,16 @@ struct AnimatingMove {
     duration: Duration,
 }
 
+/// Outcome of advancing the move animation by one tick.
+enum AnimationTick {
+    /// No animation was in progress this tick.
+    Ignored,
+    /// Animation advanced but is still running.
+    Running,
+    /// Animation just crossed its duration threshold this tick.
+    Completed,
+}
+
 /// Smoothstep ease: slow-fast-slow, applied to the normalized [0,1] progress.
 fn ease(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
@@ -324,7 +334,18 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             }
             Event::Keyboard(keyboard_event) => self.handle_keyboard_event(state, keyboard_event),
             Event::Window(iced::window::Event::RedrawRequested(now)) => {
-                Self::advance_animation(state, *now)
+                match Self::advance_animation(state, *now) {
+                    AnimationTick::Completed => {
+                        if !state.mouse_pressed
+                            && let Some(position) = cursor.position_in(bounds)
+                        {
+                            self.update_hover(state, position, bounds);
+                        }
+                        event::Status::Captured
+                    }
+                    AnimationTick::Running => event::Status::Captured,
+                    AnimationTick::Ignored => event::Status::Ignored,
+                }
             }
             _ => event::Status::Ignored,
         };
@@ -479,19 +500,7 @@ impl HypercubeShaderProgram {
                 // dragging or mid-animation, since state has already moved past
                 // what's currently rendering)
                 if !state.mouse_pressed && state.animating_move.is_none() {
-                    let mouse_ray =
-                        calculate_mouse_ray(position, bounds, &state.camera, &state.projection);
-
-                    let (hovered_sticker, debug_instances) = find_intersected_sticker(
-                        &mouse_ray,
-                        state,
-                        self.sticker_scale,
-                        self.face_scale,
-                        VIEWER_DISTANCE,
-                        self.aabb_mode,
-                    );
-                    state.hovered_sticker = hovered_sticker;
-                    state.debug_instances = debug_instances;
+                    self.update_hover(state, position, bounds);
                 }
 
                 state.last_mouse_pos = Some(position);
@@ -541,6 +550,23 @@ impl HypercubeShaderProgram {
         event::Status::Ignored
     }
 
+    /// Casts a ray from the given position and updates `hovered_sticker` and
+    /// `debug_instances` on `state` with the result.
+    fn update_hover(&self, state: &mut HypercubeShaderState, position: Point, bounds: Rectangle) {
+        let mouse_ray = calculate_mouse_ray(position, bounds, &state.camera, &state.projection);
+
+        let (hovered_sticker, debug_instances) = find_intersected_sticker(
+            &mouse_ray,
+            state,
+            self.sticker_scale,
+            self.face_scale,
+            VIEWER_DISTANCE,
+            self.aabb_mode,
+        );
+        state.hovered_sticker = hovered_sticker;
+        state.debug_instances = debug_instances;
+    }
+
     /// Applies the move triggered by clicking the given facet, if any -
     /// non-actionable facets (cell-centers, the invisible center) are a
     /// no-op. Direction follows the clicked facet's own signed local
@@ -581,9 +607,9 @@ impl HypercubeShaderProgram {
     /// since the last redraw, and requests another redraw if it isn't done
     /// yet - self-sustaining until the animation completes, at which point
     /// no further redraw is requested and the loop naturally stops.
-    fn advance_animation(state: &mut HypercubeShaderState, now: Instant) -> event::Status {
+    fn advance_animation(state: &mut HypercubeShaderState, now: Instant) -> AnimationTick {
         let Some(animating) = state.animating_move.as_mut() else {
-            return event::Status::Ignored;
+            return AnimationTick::Ignored;
         };
 
         let delta = state
@@ -596,9 +622,10 @@ impl HypercubeShaderProgram {
         if animating.elapsed >= animating.duration {
             state.animating_move = None;
             state.last_redraw_instant = None;
+            return AnimationTick::Completed;
         }
 
-        event::Status::Captured
+        AnimationTick::Running
     }
 
     /// Handle keyboard events for additional controls
