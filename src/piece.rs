@@ -11,7 +11,7 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::geometry::Color;
+use crate::geometry::{Color, FACE_CENTERS};
 use crate::math::GRID_EXTENT;
 
 /// A single puzzle piece: its current lattice position and, per axis, the
@@ -56,6 +56,12 @@ pub(crate) struct StickerInstance {
     pub(crate) face_id: u32,
     /// Padding for alignment
     pub(crate) _padding: [u32; 3],
+    /// The sticker's actual outward-facing 4D unit normal, used for 4D face
+    /// culling. Unlike `face_id` (the facet's *rest* face membership, used
+    /// only for the face-spread positioning offset), this tracks the
+    /// facet's true current orientation, so it sweeps continuously during a
+    /// move animation instead of snapping at the end.
+    pub(crate) face_normal_4d: [f32; 4],
 }
 
 /// Colors for the 8 sides of the puzzle, indexed by `face_id_for`.
@@ -272,6 +278,7 @@ pub(crate) fn generate_sticker_instances(hypercube: &Hypercube) -> Vec<StickerIn
                 basis: facet.basis,
                 face_id: facet.face_id as u32,
                 _padding: [0; 3],
+                face_normal_4d: FACE_CENTERS[facet.face_id].into(),
             }
         })
         .collect()

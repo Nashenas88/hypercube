@@ -97,7 +97,8 @@ fn sticker_instances_for_render(
             let color = pre_move_piece.colors[facet.axis]
                 .expect("FACET_TABLE entries are only built where colors[axis] is Some");
 
-            let (position_4d, basis) = if pre_move_piece.position[animating.side_axis]
+            let (position_4d, basis, face_normal_4d) = if pre_move_piece.position
+                [animating.side_axis]
                 == animating.side_sign
             {
                 // `facet_position_4d`'s static convention is `pos *
@@ -165,9 +166,31 @@ fn sticker_instances_for_render(
                     };
                 }
 
-                (position_4d, basis)
+                // The facet's outward normal is the one-hot vector along its
+                // own axis (signed by `side_sign`), used for 4D face
+                // culling. When `facet.axis == side_axis`, this is the
+                // slab's own outer face - it doesn't rotate, so it stays
+                // static. Otherwise it's genuinely sweeping toward a
+                // different tesseract cell along with the rest of the
+                // rotating subspace, so it rotates the same way the
+                // tangent basis vectors above do.
+                let face_normal_4d = if let Some(j) = facet_axis_is_free {
+                    let mut one_hot = [0.0f32; 3];
+                    one_hot[j] = facet.side_sign as f32;
+                    let rotated =
+                        rotate_local_position(animating.local_coords, partial_angle, one_hot);
+                    let mut v = [0.0f32; 4];
+                    for k in 0..3 {
+                        v[axes[k]] = rotated[k];
+                    }
+                    v
+                } else {
+                    FACE_CENTERS[facet.face_id].into()
+                };
+
+                (position_4d, basis, face_normal_4d)
             } else {
-                (facet.position_4d, facet.basis)
+                (facet.position_4d, facet.basis, FACE_CENTERS[facet.face_id].into())
             };
 
             StickerInstance {
@@ -176,6 +199,7 @@ fn sticker_instances_for_render(
                 basis,
                 face_id: facet.face_id as u32,
                 _padding: [0; 3],
+                face_normal_4d,
             }
         })
         .collect()
@@ -812,6 +836,50 @@ mod tests {
         }
     }
 
+    /// At `partial_angle = 0` (start of a move), every instance's
+    /// `face_normal_4d` - the vector the shader culls against - must exactly
+    /// reproduce the static pre-move `FACE_CENTERS[face_id]`, the same way
+    /// `basis` does above.
+    #[test]
+    fn animated_face_normal_matches_static_face_center_at_start_of_move() {
+        for side_axis in 0..4usize {
+            for side_sign in [-1i8, 1] {
+                for local_coords in [[1i8, 0, 0], [1, 1, 0], [1, 1, 1]] {
+                    let nonzero = local_coords.iter().filter(|c| **c != 0).count();
+                    let angle = base_angle(nonzero);
+
+                    let pre_move = Hypercube::solved();
+                    let mut state = HypercubeShaderState::default();
+                    state.hypercube = pre_move.clone();
+                    state.animating_move = Some(AnimatingMove {
+                        side_axis,
+                        side_sign,
+                        local_coords,
+                        angle,
+                        pre_move_pieces: pre_move.pieces.clone(),
+                        elapsed: Duration::ZERO,
+                        duration: Duration::from_millis(250),
+                    });
+
+                    let instances = sticker_instances_for_render(&state, 2.0);
+                    for (facet, instance) in FACET_TABLE.iter().zip(instances.iter()) {
+                        let expected: [f32; 4] = FACE_CENTERS[facet.face_id].into();
+                        assert_eq!(
+                            instance.face_normal_4d, expected,
+                            "mismatch for side_axis={side_axis} side_sign={side_sign} \
+                             local_coords={local_coords:?} piece_slot={} axis={}",
+                            facet.piece_slot, facet.axis
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Position, color, spanned basis axes, and face normal for one rendered
+    /// row, used to compare animated vs. static render output as a set.
+    type RenderRow = ([i32; 4], [u8; 4], Vec<usize>, [i32; 4]);
+
     /// At the end of an animation, the full set of rendered (position,
     /// color) pairs - after the shader's face-spread step - must exactly
     /// match what the static post-move render would show - checked as a set
@@ -854,7 +922,7 @@ mod tests {
                             duration: Duration::from_millis(250),
                         });
 
-                        let mut animated_end: Vec<([i32; 4], [u8; 4], Vec<usize>)> =
+                        let mut animated_end: Vec<RenderRow> =
                             sticker_instances_for_render(&state, face_scale)
                                 .iter()
                                 .map(|inst| {
@@ -867,10 +935,11 @@ mod tests {
                                         round_key(spread),
                                         color_key(inst.color),
                                         basis_axis_set(inst.basis),
+                                        round_key(inst.face_normal_4d),
                                     )
                                 })
                                 .collect();
-                        let mut static_post: Vec<([i32; 4], [u8; 4], Vec<usize>)> =
+                        let mut static_post: Vec<RenderRow> =
                             generate_sticker_instances(&post_move)
                                 .iter()
                                 .map(|inst| {
@@ -883,6 +952,7 @@ mod tests {
                                         round_key(spread),
                                         color_key(inst.color),
                                         basis_axis_set(inst.basis),
+                                        round_key(inst.face_normal_4d),
                                     )
                                 })
                                 .collect();

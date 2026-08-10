@@ -25,6 +25,7 @@ struct StickerInstance {
     basis: array<vec4<f32>, 3>,
     face_id: u32,
     _padding: array<u32, 3>,
+    face_normal_4d: vec4<f32>,
 }
 
 @group(0) @binding(0)
@@ -127,7 +128,7 @@ fn vs_main(
     let sticker_center_4d = calculate_sticker_center_4d(instance.position_4d, face_center_4d, transform.face_spacing);
     
     // Check if this face is visible (4D culling)
-    let face_visible = is_face_visible(face_center_4d, transform.rotation_matrix, transform.viewer_distance);
+    let face_visible = is_face_visible(instance.face_normal_4d, transform.rotation_matrix, transform.viewer_distance);
     
     if (!face_visible) {
         // Face is culled - move vertex off-screen
