@@ -3,7 +3,7 @@
 //! An interactive 4D Rubik's cube that can be rotated in 4D space and viewed
 //! through 3D projection. Uses iced for UI and wgpu for GPU rendering.
 
-use iced::widget::{Checkbox, Column, PickList, Row, Shader, Slider};
+use iced::widget::{Button, Checkbox, Column, PickList, Row, Shader, Slider};
 use iced::{Element, Length, Settings, Task};
 
 mod camera;
@@ -72,6 +72,7 @@ pub(crate) struct HypercubeApp {
     aabb_mode: AABBMode,
     debug_mode: bool,
     settings: AppSettings,
+    reset_generation: u64,
 }
 
 /// Messages that the application can receive
@@ -84,6 +85,7 @@ pub(crate) enum Message {
     DebugMode(bool),
     RotateButton(RotateButton),
     AnimationDuration(u32),
+    Reset,
 }
 
 impl HypercubeApp {
@@ -96,6 +98,7 @@ impl HypercubeApp {
             aabb_mode: AABBMode::None,
             debug_mode: false,
             settings: settings::load(),
+            reset_generation: 0,
         }
     }
 
@@ -130,6 +133,9 @@ impl HypercubeApp {
                 self.settings.animation_duration_ms = duration_ms;
                 settings::save(&self.settings);
             }
+            Message::Reset => {
+                self.reset_generation = self.reset_generation.wrapping_add(1);
+            }
         }
 
         Task::none()
@@ -157,7 +163,8 @@ impl HypercubeApp {
                         )
                         .width(250),
                     ),
-            );
+            )
+            .push(Button::new("Reset").on_press(Message::Reset));
 
         if self.debug_mode {
             controls = controls
@@ -234,6 +241,7 @@ impl HypercubeApp {
             self.aabb_mode,
             self.settings.rotate_button,
             self.settings.animation_duration_ms,
+            self.reset_generation,
         ))
         .width(Length::Fill)
         .height(Length::Fill);

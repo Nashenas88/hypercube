@@ -268,6 +268,7 @@ pub(crate) struct HypercubeShaderState {
     hypercube: Hypercube,
     animating_move: Option<AnimatingMove>,
     last_redraw_instant: Option<Instant>,
+    reset_generation: u64,
 }
 
 /// The shader program that handles 4D hypercube rendering
@@ -278,6 +279,7 @@ pub(crate) struct HypercubeShaderProgram {
     aabb_mode: AABBMode,
     rotate_button: RotateButton,
     animation_duration_ms: u32,
+    reset_generation: u64,
 }
 
 impl HypercubeShaderProgram {
@@ -289,6 +291,7 @@ impl HypercubeShaderProgram {
         aabb_mode: AABBMode,
         rotate_button: RotateButton,
         animation_duration_ms: u32,
+        reset_generation: u64,
     ) -> Self {
         Self {
             sticker_scale,
@@ -297,6 +300,7 @@ impl HypercubeShaderProgram {
             aabb_mode,
             rotate_button,
             animation_duration_ms,
+            reset_generation,
         }
     }
 }
@@ -312,6 +316,16 @@ impl shader::Program<Message> for HypercubeShaderProgram {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
+        if self.reset_generation != state.reset_generation {
+            state.hypercube = Hypercube::solved();
+            state.animating_move = None;
+            state.last_redraw_instant = None;
+            state.hovered_sticker = None;
+            state.debug_instances.clear();
+            state.reset_generation = self.reset_generation;
+            return Some(Action::request_redraw());
+        }
+
         // Update camera each frame
         state.camera_controller.update_camera(&mut state.camera);
 
@@ -693,6 +707,7 @@ impl Default for HypercubeShaderState {
             hypercube: Hypercube::solved(),
             animating_move: None,
             last_redraw_instant: None,
+            reset_generation: 0,
         }
     }
 }
@@ -701,6 +716,7 @@ impl Default for HypercubeShaderState {
 mod tests {
     use super::*;
     use crate::geometry::FACE_CENTERS;
+    use iced::widget::shader::Program;
 
     fn round_key(v: [f32; 4]) -> [i32; 4] {
         v.map(|x| (x * 1000.0).round() as i32)
@@ -964,5 +980,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A bumped `reset_generation` must resolve the puzzle back to solved,
+    /// cancel any in-progress move animation, and request a redraw - the
+    /// mechanism a "Reset" button relies on to reach state owned by the
+    /// shader widget's `Program::State`.
+    #[test]
+    fn reset_generation_mismatch_resets_hypercube_and_cancels_animation() {
+        let mut state = HypercubeShaderState::default();
+        assert_eq!(state.reset_generation, 0);
+
+        let facet = FACET_TABLE
+            .iter()
+            .find(|f| f.is_actionable)
+            .expect("at least one actionable facet exists");
+        let nonzero = facet.local_coords.iter().filter(|c| **c != 0).count();
+        let angle = base_angle(nonzero);
+        let pre_move_pieces = state.hypercube.pieces.clone();
+        state
+            .hypercube
+            .apply_move(facet.axis, facet.side_sign, facet.local_coords, angle);
+        assert!(!state.hypercube.is_solved());
+        state.animating_move = Some(AnimatingMove {
+            side_axis: facet.axis,
+            side_sign: facet.side_sign,
+            local_coords: facet.local_coords,
+            angle,
+            pre_move_pieces,
+            elapsed: Duration::ZERO,
+            duration: Duration::from_millis(250),
+        });
+
+        let program = HypercubeShaderProgram::new(
+            0.5,
+            2.0,
+            RenderMode::Standard,
+            AABBMode::None,
+            RotateButton::default(),
+            250,
+            1,
+        );
+
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let action = program.update(
+            &mut state,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+
+        assert!(action.is_some(), "reset must request a redraw");
+        assert!(state.hypercube.is_solved());
+        assert!(state.animating_move.is_none());
+        assert_eq!(state.reset_generation, 1);
     }
 }
