@@ -67,7 +67,7 @@ impl AABBMode {
 #[derive(Debug)]
 pub(crate) struct HypercubeApp {
     sticker_scale: f32,
-    face_scale: f32,
+    face_gap: f32,
     render_mode: RenderMode,
     aabb_mode: AABBMode,
     debug_mode: bool,
@@ -79,7 +79,7 @@ pub(crate) struct HypercubeApp {
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
     StickerScale(f32),
-    FaceScale(f32),
+    FaceGap(f32),
     RenderMode(RenderMode),
     AABBMode(AABBMode),
     DebugMode(bool),
@@ -93,7 +93,7 @@ impl HypercubeApp {
     pub(crate) fn new() -> Self {
         Self {
             sticker_scale: 0.5, // Default from existing code
-            face_scale: 2.0,    // New parameter for future use
+            face_gap: 0.4,
             render_mode: RenderMode::Standard,
             aabb_mode: AABBMode::None,
             debug_mode: false,
@@ -113,8 +113,8 @@ impl HypercubeApp {
             Message::StickerScale(value) => {
                 self.sticker_scale = value;
             }
-            Message::FaceScale(value) => {
-                self.face_scale = value;
+            Message::FaceGap(value) => {
+                self.face_gap = value;
             }
             Message::RenderMode(mode) => {
                 self.render_mode = mode;
@@ -210,9 +210,9 @@ impl HypercubeApp {
             .push(
                 Column::new()
                     .spacing(5)
-                    .push(iced::widget::text("Face Scale"))
+                    .push(iced::widget::text("Face Gap"))
                     .push(
-                        Slider::new(1.0..=5.0, self.face_scale, Message::FaceScale)
+                        Slider::new(0.0..=1.5, self.face_gap, Message::FaceGap)
                             .step(0.01f32)
                             .width(250),
                     ),
@@ -236,7 +236,7 @@ impl HypercubeApp {
         let viewport = Shader::new(HypercubeShaderProgram::new(
             // Invert value since the slider can't work in reverse.
             1.0 - self.sticker_scale,
-            self.face_scale,
+            self.face_gap,
             self.render_mode,
             self.aabb_mode,
             self.settings.rotate_button,

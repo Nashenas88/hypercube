@@ -11,7 +11,7 @@ use crate::AABBMode;
 use crate::camera::{Camera, Projection};
 use crate::geometry::NORMAL_TO_BASE_INDICES;
 use crate::math::{
-    BASE_STICKER_SIZE, GRID_EXTENT, calc_sticker_center, is_face_visible, project_cube_point,
+    BASE_STICKER_SIZE, GRID_EXTENT, face_push_offset_3d, is_face_visible, project_cube_point,
     transform_sticker_vertices_to_3d,
 };
 use crate::piece::FACET_TABLE;
@@ -235,15 +235,15 @@ fn calculate_face_aabb(
     face_id: usize,
     rotation_4d: &Matrix4<f32>,
     sticker_scale: f32,
-    face_spacing: f32,
+    gap_distance: f32,
     viewer_distance: f32,
 ) -> AABB {
     use crate::geometry::{BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS};
 
     // Get face center and orientation info
     let face_center_4d = FACE_CENTERS[face_id];
-    let scaled_face_center = face_center_4d * face_spacing;
     let fixed_dim = FIXED_DIMS[face_id];
+    let push = face_push_offset_3d(face_center_4d, rotation_4d, viewer_distance) * gap_distance;
 
     // Transform the 8 corner vertices of BASE_CUBE_VERTICES to match this face
     // We need to find the bounds that encompass all possible stickers on this face
@@ -262,11 +262,11 @@ fn calculate_face_aabb(
             Vector3::new(base_vertex[0], base_vertex[1], base_vertex[2]) * face_bound;
         let corner_3d = project_cube_point(
             local_vertex,
-            scaled_face_center,
+            face_center_4d,
             fixed_dim,
             rotation_4d,
             viewer_distance,
-        );
+        ) + push;
         transformed_corners_3d.push(corner_3d);
     }
 
@@ -314,7 +314,7 @@ pub(crate) fn find_intersected_sticker(
     ray: &Ray,
     state: &HypercubeShaderState,
     sticker_scale: f32,
-    face_spacing: f32,
+    gap_distance: f32,
     viewer_distance: f32,
     aabb_mode: AABBMode,
 ) -> (Option<usize>, Vec<DebugInstanceWithDistance>) {
@@ -331,7 +331,7 @@ pub(crate) fn find_intersected_sticker(
                 face_id,
                 &state.rotation_4d,
                 sticker_scale,
-                face_spacing,
+                gap_distance,
                 viewer_distance,
             );
             if ray_intersects_aabb(ray, &face_aabb) {
@@ -360,19 +360,13 @@ pub(crate) fn find_intersected_sticker(
             continue;
         }
 
-        // Transform sticker to 4D world space for AABB calculation
-        let sticker_center_4d = calc_sticker_center(
-            nalgebra::Vector4::from(sticker.position_4d),
-            sticker.face_id,
-            face_spacing,
-        );
-
         // Use shared transformation logic from math.rs
         let world_vertices = transform_sticker_vertices_to_3d(
-            sticker_center_4d,
+            nalgebra::Vector4::from(sticker.position_4d),
             sticker.face_id,
             &state.rotation_4d,
             sticker_scale,
+            gap_distance,
             viewer_distance,
         );
 

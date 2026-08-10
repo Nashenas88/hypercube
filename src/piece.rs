@@ -292,8 +292,8 @@ mod tests {
     fn index_of_position_of_round_trip() {
         for index in 0..81 {
             let position = position_of(index);
-            for axis in 0..4 {
-                assert!((-1..=1).contains(&position[axis]));
+            for coord in &position {
+                assert!((-1..=1).contains(coord));
             }
             assert_eq!(index_of(position), index);
         }

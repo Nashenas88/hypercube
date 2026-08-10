@@ -87,8 +87,9 @@ pub(crate) struct Transform4D {
     viewer_distance: f32,
     /// Scale of individual stickers
     sticker_scale: f32,
-    /// Spacing between faces
-    face_spacing: f32,
+    /// 3D distance to push each face outward from the tesseract, applied
+    /// after 4D-to-3D projection
+    face_gap: f32,
     /// Padding for alignment
     _padding: f32,
 }
@@ -688,7 +689,7 @@ impl Renderer {
             rotation_matrix: nalgebra::Matrix4::identity().into(),
             viewer_distance: VIEWER_DISTANCE,
             sticker_scale: ui_controls.sticker_scale,
-            face_spacing: ui_controls.face_scale,
+            face_gap: ui_controls.face_gap,
             _padding: 0.0,
         };
         let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1250,20 +1251,20 @@ impl Renderer {
     /// * `queue` - GPU queue for submitting commands
     /// * `rotation_4d` - Current 4D rotation matrix
     /// * `sticker_scale` - Scale factor for individual stickers (from sticker scale slider)
-    /// * `face_scale` - Scale factor for face spacing (from face scale slider)
+    /// * `face_gap` - 3D distance to push each face outward (from face gap slider)
     pub(crate) fn update_instances(
         &mut self,
         queue: &Queue,
         rotation_4d: &nalgebra::Matrix4<f32>,
         sticker_scale: f32,
-        face_scale: f32,
+        face_gap: f32,
     ) {
         // Update transform uniform
         let transform_data = Transform4D {
             rotation_matrix: (*rotation_4d).into(),
             viewer_distance: VIEWER_DISTANCE,
             sticker_scale,
-            face_spacing: face_scale,
+            face_gap,
             _padding: 0.0,
         };
         queue.write_buffer(
@@ -1472,7 +1473,7 @@ impl shader::Pipeline for Renderer {
             Size::new(1, 1),
             UiControls {
                 sticker_scale: 0.0,
-                face_scale: 0.0,
+                face_gap: 0.0,
                 render_mode: RenderMode::Standard,
             },
         )

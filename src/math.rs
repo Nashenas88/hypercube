@@ -111,32 +111,29 @@ pub(crate) fn project_4d_to_3d(
     )
 }
 
-/// Transform a 4D sticker position to 3D world space.
+/// The outward push for a face, projected into 3D: the same
+/// `face_normal_4d` used for 4D culling, rotated and projected through
+/// `project_4d_to_3d` like any other point. Used to push already-projected
+/// sticker geometry outward by a 3D offset instead of scaling a 4D anchor
+/// before projection (which drives the perspective divide toward its
+/// `viewer_distance - w = 0` singularity as the push grows).
 ///
-/// Combines sticker offset calculation with 4D rotation and 3D projection.
-/// Replaces duplicate logic in ray_casting.rs transform_sticker_to_3d().
-///
-/// # Arguments
-/// * `sticker_position_4d` - 4D position of the sticker
-/// * `face_id` - Face ID (0-7) to determine face center and fixed dimension
-/// * `rotation_4d` - 4D rotation matrix
-/// * `face_spacing` - Spacing multiplier for face separation
-/// * `viewer_distance` - Distance of 4D viewer from W=0 plane
-///
-/// # Returns
-/// 3D world position of the transformed sticker
-pub(crate) fn calc_sticker_center(
-    sticker_position_4d: Vector4<f32>,
-    face_id: usize,
-    face_spacing: f32,
-) -> Vector4<f32> {
-    // Get face information
-    let face_center_4d = FACE_CENTERS[face_id];
-
-    // Calculate sticker center in 4D (matching shader logic)
-    let sticker_offset_4d = sticker_position_4d - face_center_4d;
-    let scaled_face_center = face_center_4d * face_spacing;
-    scaled_face_center + sticker_offset_4d
+/// Deliberately *not* normalized to a fixed length: `face_normal_4d` is
+/// always a 4D unit vector, so this projected vector's own length already
+/// shrinks smoothly toward zero exactly when a face's outward direction is
+/// nearly aligned with the 4D depth axis - which is also exactly when that
+/// face's piece renders near the center of the screen. Normalizing here
+/// would force a near-zero (and therefore direction-unstable) vector back
+/// up to full length, snapping the piece to a full-size displacement in a
+/// swinging direction as the puzzle rotates through that zone; using the
+/// natural length instead lets the push taper out smoothly there.
+pub(crate) fn face_push_offset_3d(
+    face_normal_4d: Vector4<f32>,
+    rotation_4d: &Matrix4<f32>,
+    viewer_distance: f32,
+) -> Vector3<f32> {
+    let projected = project_4d_to_3d(face_normal_4d, rotation_4d, viewer_distance);
+    Vector3::new(projected.x, projected.y, projected.z)
 }
 
 /// Transform all vertices of a sticker cube to 3D space.
@@ -145,36 +142,41 @@ pub(crate) fn calc_sticker_center(
 /// ray_casting.rs and shader_widget.rs.
 ///
 /// # Arguments
-/// * `sticker_position_4d` - 4D position of the sticker
-/// * `face_id` - Face ID (0-7) to determine face center and fixed dimension  
+/// * `sticker_position_4d` - 4D position of the sticker (nominal, unpushed)
+/// * `face_id` - Face ID (0-7) to determine face center and fixed dimension
 /// * `rotation_4d` - 4D rotation matrix
 /// * `sticker_scale` - Scale factor for individual stickers
-/// * `face_spacing` - Spacing multiplier for face separation
+/// * `gap_distance` - 3D distance to push the sticker outward along its
+///   face's outward direction, applied after projection
 /// * `viewer_distance` - Distance of 4D viewer from W=0 plane
 ///
 /// # Returns
 /// Vector of 36 transformed 3D vertices (one complete cube)
 pub(crate) fn transform_sticker_vertices_to_3d(
-    sticker_center_4d: Vector4<f32>,
+    sticker_position_4d: Vector4<f32>,
     face_id: usize,
     rotation_4d: &Matrix4<f32>,
     sticker_scale: f32,
+    gap_distance: f32,
     viewer_distance: f32,
 ) -> Vec<Point3<f32>> {
     let fixed_dim = FIXED_DIMS[face_id];
+    let push =
+        face_push_offset_3d(FACE_CENTERS[face_id], rotation_4d, viewer_distance) * gap_distance;
 
     // Transform each cube vertex exactly like the shader does
     let mut world_vertices = Vec::with_capacity(36);
     for vertex in &BASE_CUBE_VERTICES {
         let local_vertex =
             Vector3::new(vertex[0], vertex[1], vertex[2]) * BASE_STICKER_SIZE * sticker_scale;
-        world_vertices.push(project_cube_point(
+        let projected = project_cube_point(
             local_vertex,
-            sticker_center_4d,
+            sticker_position_4d,
             fixed_dim,
             rotation_4d,
             viewer_distance,
-        ));
+        );
+        world_vertices.push(projected + push);
     }
 
     world_vertices

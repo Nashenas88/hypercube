@@ -6,7 +6,7 @@ struct Transform4D {
     rotation_matrix: mat4x4<f32>,
     viewer_distance: f32,
     sticker_scale: f32,
-    face_spacing: f32,
+    face_gap: f32,
     _padding: f32,
 }
 
@@ -104,10 +104,19 @@ fn is_face_visible(face_center_4d: vec4<f32>, rotation_matrix: mat4x4<f32>, view
     return dot_product < 0.0;
 }
 
-fn calculate_sticker_center_4d(sticker_position_4d: vec4<f32>, face_center_4d: vec4<f32>, face_spacing: f32) -> vec4<f32> {
-    let sticker_offset_4d = sticker_position_4d - face_center_4d;
-    let scaled_face_center = face_center_4d * face_spacing;
-    return scaled_face_center + sticker_offset_4d;
+// The outward push for a face, projected into 3D: `face_normal_4d` rotated
+// and projected like any other point. Pushing already-projected geometry
+// by this offset (rather than scaling a 4D anchor before projection) can
+// never cross the perspective divide's `viewer_distance - w = 0`
+// singularity. Deliberately not normalized to a fixed length:
+// `face_normal_4d` is always a 4D unit vector, so this projected vector's
+// own length already shrinks smoothly toward zero exactly when a face's
+// piece renders near the center of the screen - normalizing would force
+// that near-zero (direction-unstable) vector back up to full length,
+// snapping the piece to a full-size displacement in a swinging direction
+// instead of tapering out smoothly.
+fn face_push_offset_3d(face_normal_4d: vec4<f32>, rotation_matrix: mat4x4<f32>, viewer_distance: f32) -> vec3<f32> {
+    return project_4d_to_3d(rotation_matrix * face_normal_4d, viewer_distance);
 }
 
 @vertex
@@ -117,16 +126,11 @@ fn vs_main(
     @builtin(vertex_index) vertex_index: u32,
 ) -> VertexOutput {
     var out: VertexOutput;
-    
+
     // Get instance data
     let instance = instances[instance_index];
-    
-    // Get face center from face_id
-    let face_center_4d = face_data.face_centers[instance.face_id];
+    let sticker_center_4d = instance.position_4d;
 
-    // Calculate sticker center in 4D
-    let sticker_center_4d = calculate_sticker_center_4d(instance.position_4d, face_center_4d, transform.face_spacing);
-    
     // Check if this face is visible (4D culling)
     let face_visible = is_face_visible(instance.face_normal_4d, transform.rotation_matrix, transform.viewer_distance);
     
@@ -173,13 +177,15 @@ fn vs_main(
 
     // Apply 4D rotation
     let rotated_vertex_4d = transform.rotation_matrix * vertex_4d;
-    
-    // Project to 3D
-    let vertex_3d = project_4d_to_3d(rotated_vertex_4d, transform.viewer_distance);
-    
+
+    // Project to 3D, then push outward along the face's own current
+    // direction by a constant 3D distance - see face_push_offset_3d.
+    let push = face_push_offset_3d(instance.face_normal_4d, transform.rotation_matrix, transform.viewer_distance) * transform.face_gap;
+    let vertex_3d = project_4d_to_3d(rotated_vertex_4d, transform.viewer_distance) + push;
+
     // Apply 3D view/projection matrix
     out.clip_position = camera.view_proj * vec4<f32>(vertex_3d, 1.0);
-    
+
     // Convert normal vector to color (normalize to 0-1 range)
     out.color = vec4<f32>(world_normal * 0.5 + 0.5, 1.0);
     

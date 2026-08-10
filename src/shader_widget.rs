@@ -61,10 +61,7 @@ fn ease(t: f32) -> f32 {
 /// exact same rotation formula `apply_move` used, so the last animated
 /// frame always lines up perfectly with the static post-move render it
 /// hands off to.
-fn sticker_instances_for_render(
-    state: &HypercubeShaderState,
-    face_scale: f32,
-) -> Vec<StickerInstance> {
+fn sticker_instances_for_render(state: &HypercubeShaderState) -> Vec<StickerInstance> {
     let Some(animating) = &state.animating_move else {
         return generate_sticker_instances(&state.hypercube);
     };
@@ -76,19 +73,6 @@ fn sticker_instances_for_render(
     };
     let partial_angle = animating.angle * ease(t);
     let axes = free_axes(animating.side_axis);
-    // The shader's `calculate_sticker_center_4d` unconditionally adds
-    // `face_center_4d * (face_scale - 1)` to every instance, based on its
-    // *static* face_id - a fixed push, along the sticker's pre-move axis,
-    // that spreads the 8 tesseract faces apart. For a facet whose own axis
-    // isn't rotating (side_axis, or the rotation axis itself) that's
-    // exactly right, since face_id never changes there either. But for a
-    // facet whose axis is genuinely rotating, that fixed push keeps
-    // anchoring it to the pre-move face regardless of where it's actually
-    // heading, dwarfing the grid-position fix above. It's folded into the
-    // same rotating "extension" as the grid-boundary reach below, then the
-    // shader's fixed (unrotated) contribution is subtracted back out of
-    // what's supplied here so only the rotating amount actually shows up.
-    let spread = face_scale - 1.0;
 
     FACET_TABLE
         .iter()
@@ -118,7 +102,7 @@ fn sticker_instances_for_render(
                 let facet_axis_is_free = axes.iter().position(|&axis| axis == facet.axis);
                 if let Some(i) = facet_axis_is_free {
                     local_combined[i] +=
-                        pre_move_piece.position[facet.axis] as f32 * (1.0 - GRID_EXTENT + spread);
+                        pre_move_piece.position[facet.axis] as f32 * (1.0 - GRID_EXTENT);
                 }
                 let rotated =
                     rotate_local_position(animating.local_coords, partial_angle, local_combined);
@@ -133,9 +117,6 @@ fn sticker_instances_for_render(
                     };
                 for i in 0..3 {
                     position_4d[axes[i]] = rotated[i];
-                }
-                if facet_axis_is_free.is_some() {
-                    position_4d[facet.axis] -= pre_move_piece.position[facet.axis] as f32 * spread;
                 }
 
                 // The facet's static mesh basis is the unit vectors along
@@ -209,7 +190,7 @@ fn sticker_instances_for_render(
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UiControls {
     pub(crate) sticker_scale: f32,
-    pub(crate) face_scale: f32,
+    pub(crate) face_gap: f32,
     pub(crate) render_mode: RenderMode,
 }
 
@@ -253,7 +234,7 @@ impl shader::Primitive for HypercubePrimitive {
             queue,
             &self.rotation_4d,
             self.ui_controls.sticker_scale,
-            self.ui_controls.face_scale,
+            self.ui_controls.face_gap,
         );
         pipeline.update_camera(queue, &self.camera, &self.projection);
         pipeline.update_indices(queue, &self.cached_indices);
@@ -298,7 +279,7 @@ pub(crate) struct HypercubeShaderState {
 /// The shader program that handles 4D hypercube rendering
 pub(crate) struct HypercubeShaderProgram {
     sticker_scale: f32,
-    face_scale: f32,
+    face_gap: f32,
     render_mode: RenderMode,
     aabb_mode: AABBMode,
     rotate_button: RotateButton,
@@ -310,7 +291,7 @@ impl HypercubeShaderProgram {
     /// Create a new shader program with the given parameters
     pub(crate) fn new(
         sticker_scale: f32,
-        face_scale: f32,
+        face_gap: f32,
         render_mode: RenderMode,
         aabb_mode: AABBMode,
         rotate_button: RotateButton,
@@ -319,7 +300,7 @@ impl HypercubeShaderProgram {
     ) -> Self {
         Self {
             sticker_scale,
-            face_scale,
+            face_gap,
             render_mode,
             aabb_mode,
             rotate_button,
@@ -411,13 +392,13 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             rotation_4d: state.rotation_4d,
             ui_controls: UiControls {
                 sticker_scale: self.sticker_scale,
-                face_scale: self.face_scale,
+                face_gap: self.face_gap,
                 render_mode: self.render_mode,
             },
             cached_indices: state.cached_indices.clone(),
             hovered_sticker: state.hovered_sticker,
             debug_instances: state.debug_instances.clone(),
-            sticker_instances: sticker_instances_for_render(state, self.face_scale),
+            sticker_instances: sticker_instances_for_render(state),
         }
     }
 }
@@ -597,7 +578,7 @@ impl HypercubeShaderProgram {
             &mouse_ray,
             state,
             self.sticker_scale,
-            self.face_scale,
+            self.face_gap,
             VIEWER_DISTANCE,
             self.aabb_mode,
         );
@@ -750,21 +731,6 @@ mod tests {
         c.map(|x| (x * 255.0).round() as u8)
     }
 
-    /// Mirrors the shader's `calculate_sticker_center_4d`: it unconditionally
-    /// adds `face_center * (face_scale - 1)` to every instance based on its
-    /// own (static) face_id, spreading the 8 tesseract faces apart. Tests
-    /// need to apply this too, since `sticker_instances_for_render`'s CPU
-    /// output intentionally pre-compensates for it rather than matching the
-    /// final on-screen position directly.
-    fn apply_face_spread(position_4d: [f32; 4], face_id: u32, face_scale: f32) -> [f32; 4] {
-        let face_center = FACE_CENTERS[face_id as usize];
-        let mut result = position_4d;
-        for axis in 0..4 {
-            result[axis] += face_center[axis] * (face_scale - 1.0);
-        }
-        result
-    }
-
     /// At the end of a move, a rotated basis vector is `±` some world unit
     /// vector, matching `discrete_rotation`'s signed-permutation snap - but
     /// unlike position, the *sign* isn't independently meaningful here: the
@@ -810,19 +776,21 @@ mod tests {
                     let angle = base_angle(nonzero);
 
                     let pre_move = Hypercube::solved();
-                    let mut state = HypercubeShaderState::default();
-                    state.hypercube = pre_move.clone();
-                    state.animating_move = Some(AnimatingMove {
-                        side_axis,
-                        side_sign,
-                        local_coords,
-                        angle,
-                        pre_move_pieces: pre_move.pieces.clone(),
-                        elapsed: Duration::ZERO,
-                        duration: Duration::from_millis(250),
-                    });
+                    let state = HypercubeShaderState {
+                        hypercube: pre_move.clone(),
+                        animating_move: Some(AnimatingMove {
+                            side_axis,
+                            side_sign,
+                            local_coords,
+                            angle,
+                            pre_move_pieces: pre_move.pieces.clone(),
+                            elapsed: Duration::ZERO,
+                            duration: Duration::from_millis(250),
+                        }),
+                        ..Default::default()
+                    };
 
-                    let instances = sticker_instances_for_render(&state, 2.0);
+                    let instances = sticker_instances_for_render(&state);
                     for (facet, instance) in FACET_TABLE.iter().zip(instances.iter()) {
                         assert_eq!(
                             instance.basis, facet.basis,
@@ -849,19 +817,21 @@ mod tests {
                     let angle = base_angle(nonzero);
 
                     let pre_move = Hypercube::solved();
-                    let mut state = HypercubeShaderState::default();
-                    state.hypercube = pre_move.clone();
-                    state.animating_move = Some(AnimatingMove {
-                        side_axis,
-                        side_sign,
-                        local_coords,
-                        angle,
-                        pre_move_pieces: pre_move.pieces.clone(),
-                        elapsed: Duration::ZERO,
-                        duration: Duration::from_millis(250),
-                    });
+                    let state = HypercubeShaderState {
+                        hypercube: pre_move.clone(),
+                        animating_move: Some(AnimatingMove {
+                            side_axis,
+                            side_sign,
+                            local_coords,
+                            angle,
+                            pre_move_pieces: pre_move.pieces.clone(),
+                            elapsed: Duration::ZERO,
+                            duration: Duration::from_millis(250),
+                        }),
+                        ..Default::default()
+                    };
 
-                    let instances = sticker_instances_for_render(&state, 2.0);
+                    let instances = sticker_instances_for_render(&state);
                     for (facet, instance) in FACET_TABLE.iter().zip(instances.iter()) {
                         let expected: [f32; 4] = FACE_CENTERS[facet.face_id].into();
                         assert_eq!(
@@ -881,16 +851,13 @@ mod tests {
     type RenderRow = ([i32; 4], [u8; 4], Vec<usize>, [i32; 4]);
 
     /// At the end of an animation, the full set of rendered (position,
-    /// color) pairs - after the shader's face-spread step - must exactly
-    /// match what the static post-move render would show - checked as a set
-    /// (not a row-by-row comparison), since each animated row keeps its
-    /// pre-move identity while sweeping to wherever its content ends up,
-    /// which is a different GPU row than the static render uses for the
-    /// same visual result.
+    /// color) pairs must exactly match what the static post-move render
+    /// would show - checked as a set (not a row-by-row comparison), since
+    /// each animated row keeps its pre-move identity while sweeping to
+    /// wherever its content ends up, which is a different GPU row than the
+    /// static render uses for the same visual result.
     #[test]
     fn animated_end_state_matches_post_move_static_render_for_all_move_types() {
-        let face_scale = 2.0f32;
-
         for side_axis in 0..4usize {
             for side_sign in [-1i8, 1] {
                 for local_coords in [
@@ -910,29 +877,26 @@ mod tests {
                         let mut post_move = pre_move.clone();
                         post_move.apply_move(side_axis, side_sign, local_coords, angle);
 
-                        let mut state = HypercubeShaderState::default();
-                        state.hypercube = pre_move.clone();
-                        state.animating_move = Some(AnimatingMove {
-                            side_axis,
-                            side_sign,
-                            local_coords,
-                            angle,
-                            pre_move_pieces: pre_move.pieces.clone(),
-                            elapsed: Duration::from_millis(250),
-                            duration: Duration::from_millis(250),
-                        });
+                        let state = HypercubeShaderState {
+                            hypercube: pre_move.clone(),
+                            animating_move: Some(AnimatingMove {
+                                side_axis,
+                                side_sign,
+                                local_coords,
+                                angle,
+                                pre_move_pieces: pre_move.pieces.clone(),
+                                elapsed: Duration::from_millis(250),
+                                duration: Duration::from_millis(250),
+                            }),
+                            ..Default::default()
+                        };
 
                         let mut animated_end: Vec<RenderRow> =
-                            sticker_instances_for_render(&state, face_scale)
+                            sticker_instances_for_render(&state)
                                 .iter()
                                 .map(|inst| {
-                                    let spread = apply_face_spread(
-                                        inst.position_4d,
-                                        inst.face_id,
-                                        face_scale,
-                                    );
                                     (
-                                        round_key(spread),
+                                        round_key(inst.position_4d),
                                         color_key(inst.color),
                                         basis_axis_set(inst.basis),
                                         round_key(inst.face_normal_4d),
@@ -943,13 +907,8 @@ mod tests {
                             generate_sticker_instances(&post_move)
                                 .iter()
                                 .map(|inst| {
-                                    let spread = apply_face_spread(
-                                        inst.position_4d,
-                                        inst.face_id,
-                                        face_scale,
-                                    );
                                     (
-                                        round_key(spread),
+                                        round_key(inst.position_4d),
                                         color_key(inst.color),
                                         basis_axis_set(inst.basis),
                                         round_key(inst.face_normal_4d),
@@ -1004,19 +963,21 @@ mod tests {
                         }
 
                         let pre_move = Hypercube::solved();
-                        let mut state = HypercubeShaderState::default();
-                        state.hypercube = pre_move.clone();
-                        state.animating_move = Some(AnimatingMove {
-                            side_axis,
-                            side_sign,
-                            local_coords,
-                            angle,
-                            pre_move_pieces: pre_move.pieces.clone(),
-                            elapsed: Duration::from_millis(250),
-                            duration: Duration::from_millis(250),
-                        });
+                        let state = HypercubeShaderState {
+                            hypercube: pre_move.clone(),
+                            animating_move: Some(AnimatingMove {
+                                side_axis,
+                                side_sign,
+                                local_coords,
+                                angle,
+                                pre_move_pieces: pre_move.pieces.clone(),
+                                elapsed: Duration::from_millis(250),
+                                duration: Duration::from_millis(250),
+                            }),
+                            ..Default::default()
+                        };
 
-                        let instances = sticker_instances_for_render(&state, 2.0);
+                        let instances = sticker_instances_for_render(&state);
                         for (facet, instance) in FACET_TABLE.iter().zip(instances.iter()) {
                             // Facets on the turning face's own layer
                             // (`facet.axis == side_axis`) genuinely spin in
