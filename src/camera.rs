@@ -34,6 +34,18 @@ impl Camera {
     pub(crate) fn build_view_matrix(&self) -> Matrix4<f32> {
         Matrix4::look_at_rh(&self.eye, &self.target, &self.up)
     }
+
+    /// Builds a rotation-only view matrix (translation stripped).
+    ///
+    /// Shares the same orientation as [`Camera::build_view_matrix`] but keeps the
+    /// eye fixed at the origin, so the result carries no eye-position translation.
+    fn build_rotation_only_view_matrix(&self) -> Matrix4<f32> {
+        let mut view = self.build_view_matrix();
+        view[(0, 3)] = 0.0;
+        view[(1, 3)] = 0.0;
+        view[(2, 3)] = 0.0;
+        view
+    }
 }
 
 /// Orbital camera controller for smooth navigation around a target point.
@@ -142,24 +154,120 @@ impl Projection {
 pub(crate) struct CameraUniform {
     /// Combined view-projection matrix as 4x4 array
     pub(crate) view_proj: [[f32; 4]; 4],
+    /// Inverse of the translation-free view-projection matrix, used by the skybox
+    /// to reproject screen position back to a world-space direction.
+    pub(crate) view_proj_inv: [[f32; 4]; 4],
 }
 
 impl CameraUniform {
-    /// Creates a new camera uniform with identity matrix.
+    /// Creates a new camera uniform with identity matrices.
     pub(crate) fn new() -> Self {
         Self {
             view_proj: nalgebra::Matrix4::identity().into(),
+            view_proj_inv: nalgebra::Matrix4::identity().into(),
         }
     }
 
     /// Updates the uniform with current camera and projection matrices.
     ///
-    /// Combines the projection and view matrices for efficient GPU transformation.
+    /// Combines the projection and view matrices for efficient GPU transformation,
+    /// and derives the translation-free inverse used by the skybox pass.
     ///
     /// # Arguments
     /// * `camera` - Current camera state for view matrix
     /// * `projection` - Current projection parameters
     pub(crate) fn update_view_proj(&mut self, camera: &Camera, projection: &Projection) {
-        self.view_proj = (projection.build_projection_matrix() * camera.build_view_matrix()).into();
+        let proj = projection.build_projection_matrix();
+        self.view_proj = (proj * camera.build_view_matrix()).into();
+
+        let rotation_only_view_proj = proj * camera.build_rotation_only_view_matrix();
+        self.view_proj_inv = rotation_only_view_proj
+            .try_inverse()
+            .unwrap_or_else(Matrix4::identity)
+            .into();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn camera_at(distance: f32, yaw: f32, pitch: f32) -> Camera {
+        let controller = CameraController {
+            distance,
+            yaw,
+            pitch,
+        };
+        let mut camera = Camera {
+            eye: Point3::new(0.0, 0.0, 0.0),
+            target: Point3::new(0.0, 0.0, 0.0),
+            up: Vector3::new(0.0, 1.0, 0.0),
+        };
+        controller.update_camera(&mut camera);
+        camera
+    }
+
+    fn test_projection() -> Projection {
+        Projection {
+            aspect: 16.0 / 9.0,
+            fovy: 45.0_f32.to_radians(),
+            znear: 0.1,
+            zfar: 100.0,
+        }
+    }
+
+    /// Reproduces the skybox vertex shader's screen-corner-to-world-direction math
+    /// (`vs_sky` in shader.wgsl) for the four NDC screen corners.
+    fn corner_world_directions(camera: &Camera, projection: &Projection) -> [Vector3<f32>; 4] {
+        let mut uniform = CameraUniform::new();
+        uniform.update_view_proj(camera, projection);
+        let inv = Matrix4::from(uniform.view_proj_inv);
+
+        [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].map(|(x, y)| {
+            let world_pos = inv * nalgebra::Vector4::new(x, y, 1.0, 1.0);
+            Vector3::new(world_pos.x, world_pos.y, world_pos.z) / world_pos.w
+        })
+    }
+
+    fn pairwise_angle_cosines(dirs: &[Vector3<f32>; 4]) -> Vec<f32> {
+        let mut cosines = Vec::new();
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                cosines.push(dirs[i].normalize().dot(&dirs[j].normalize()));
+            }
+        }
+        cosines
+    }
+
+    #[test]
+    fn skybox_directions_preserve_angles_under_yaw_rotation() {
+        let projection = test_projection();
+        let dirs_a = corner_world_directions(&camera_at(20.0, 0.0, 89.0), &projection);
+        let dirs_b = corner_world_directions(&camera_at(20.0, 90.0, 89.0), &projection);
+
+        let cosines_a = pairwise_angle_cosines(&dirs_a);
+        let cosines_b = pairwise_angle_cosines(&dirs_b);
+
+        for (a, b) in cosines_a.iter().zip(cosines_b.iter()) {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "corner angle changed under yaw rotation at extreme pitch: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn skybox_directions_are_independent_of_camera_distance() {
+        let projection = test_projection();
+        let dirs_near = corner_world_directions(&camera_at(5.0, 30.0, 89.0), &projection);
+        let dirs_far = corner_world_directions(&camera_at(50.0, 30.0, 89.0), &projection);
+
+        for (near, far) in dirs_near.iter().zip(dirs_far.iter()) {
+            let cos_angle = near.normalize().dot(&far.normalize());
+            assert!(
+                cos_angle > 1.0 - 1e-4,
+                "skybox direction depends on camera distance: cos_angle = {cos_angle}"
+            );
+        }
     }
 }

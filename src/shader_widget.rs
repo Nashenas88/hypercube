@@ -671,7 +671,7 @@ impl Default for HypercubeShaderState {
 
         let projection = Projection {
             aspect: 800.0 / 600.0,
-            fovy: 45.0,
+            fovy: std::f32::consts::FRAC_PI_4,
             znear: 0.1,
             zfar: 100.0,
         };

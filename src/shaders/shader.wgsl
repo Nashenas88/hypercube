@@ -16,6 +16,7 @@ struct Transform4D {
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
+    view_proj_inv: mat4x4<f32>,
 };
 
 struct LightUniform {
@@ -282,18 +283,19 @@ fn vs_sky(@location(0) position: vec2<f32>) -> SkyboxVertexOutput {
     let y = position.y;
     
     out.clip_position = vec4<f32>(x, y, 1.0, 1.0);
-    
-    // Convert screen position back to world direction for cubemap sampling
-    // Inverse of view-projection matrix to get world space direction
-    let inverse_view_proj = transpose(sky_camera.view_proj);
-    let world_pos = inverse_view_proj * vec4<f32>(x, y, 1.0, 1.0);
-    out.world_position = normalize(world_pos.xyz / world_pos.w);
-    
+
+    // Convert screen position back to world direction for cubemap sampling using
+    // the translation-free inverse view-projection matrix. Leaving the result
+    // un-normalized keeps it affine in (x, y), so linear interpolation across the
+    // quad's four corners lands on the exact per-pixel direction.
+    let world_pos = sky_camera.view_proj_inv * vec4<f32>(x, y, 1.0, 1.0);
+    out.world_position = world_pos.xyz / world_pos.w;
+
     return out;
 }
 
 // Skybox fragment shader
 @fragment
 fn fs_sky(in: SkyboxVertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(sky_texture, sky_sampler, in.world_position);
+    return textureSample(sky_texture, sky_sampler, normalize(in.world_position));
 }
