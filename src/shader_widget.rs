@@ -891,18 +891,17 @@ mod tests {
                             ..Default::default()
                         };
 
-                        let mut animated_end: Vec<RenderRow> =
-                            sticker_instances_for_render(&state)
-                                .iter()
-                                .map(|inst| {
-                                    (
-                                        round_key(inst.position_4d),
-                                        color_key(inst.color),
-                                        basis_axis_set(inst.basis),
-                                        round_key(inst.face_normal_4d),
-                                    )
-                                })
-                                .collect();
+                        let mut animated_end: Vec<RenderRow> = sticker_instances_for_render(&state)
+                            .iter()
+                            .map(|inst| {
+                                (
+                                    round_key(inst.position_4d),
+                                    color_key(inst.color),
+                                    basis_axis_set(inst.basis),
+                                    round_key(inst.face_normal_4d),
+                                )
+                            })
+                            .collect();
                         let mut static_post: Vec<RenderRow> =
                             generate_sticker_instances(&post_move)
                                 .iter()
