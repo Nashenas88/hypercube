@@ -14,17 +14,11 @@ struct CameraUniform {
     view_proj: mat4x4<f32>,
 };
 
-struct FaceDataUniform {
-    face_centers: array<vec4<f32>, 8>,
-}
-
 // Instance data for each sticker
 struct StickerInstance {
     position_4d: vec4<f32>,
     color: vec4<f32>,
     basis: array<vec4<f32>, 3>,
-    face_id: u32,
-    _padding: array<u32, 3>,
     face_normal_4d: vec4<f32>,
 }
 
@@ -35,9 +29,6 @@ var<uniform> transform: Transform4D;
 var<uniform> camera: CameraUniform;
 
 @group(0) @binding(2)
-var<uniform> face_data: FaceDataUniform;
-
-@group(0) @binding(3)
 var<storage, read> instances: array<StickerInstance>;
 
 struct VertexOutput {

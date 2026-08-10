@@ -201,8 +201,6 @@ fn sticker_instances_for_render(state: &HypercubeShaderState) -> Vec<StickerInst
                 position_4d,
                 color: nalgebra::Vector4::from(color).into(),
                 basis,
-                face_id: facet.face_id as u32,
-                _padding: [0; 3],
                 face_normal_4d,
             }
         })

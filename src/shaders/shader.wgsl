@@ -28,10 +28,6 @@ struct LightUniform {
     _padding3: f32,
 };
 
-struct FaceDataUniform {
-    face_centers: array<vec4<f32>, 8>,
-}
-
 struct HighlightingUniform {
     hovered_sticker_index: u32,
     highlight_intensity: f32,
@@ -45,8 +41,6 @@ struct StickerInstance {
     position_4d: vec4<f32>,
     color: vec4<f32>,
     basis: array<vec4<f32>, 3>,
-    face_id: u32,
-    _padding: array<u32, 3>,
     face_normal_4d: vec4<f32>,
 }
 
@@ -60,12 +54,9 @@ var<uniform> camera: CameraUniform;
 var<uniform> light: LightUniform;
 
 @group(0) @binding(3)
-var<uniform> face_data: FaceDataUniform;
-
-@group(0) @binding(4)
 var<storage, read> instances: array<StickerInstance>;
 
-@group(0) @binding(5)
+@group(0) @binding(4)
 var<uniform> highlighting: HighlightingUniform;
 
 struct VertexOutput {
@@ -192,23 +183,13 @@ fn vs_main(
         transform.viewer_distance,
     );
 
-    var corrected_vertex = local_vertex;
-    let face_id = instance.face_id;
-
-    // The axis permutations for faces 1, 3, 4, 6 result in a reflection
-    // (a change of handedness). We must flip one axis of the local vertex
-    // to counteract this and preserve the correct winding order.
-    // if (face_id == 0u || face_id == 1u || face_id == 3u || face_id == 4u || face_id == 6u) {
-    //     corrected_vertex.x = -corrected_vertex.x;
-    // }
-    
     // Generate vertex in 4D space around sticker center by embedding the
     // local cube offset along the instance's own (possibly mid-rotation)
     // basis vectors, rather than a fixed world axis.
     var vertex_4d = sticker_center_4d
-        + corrected_vertex.x * instance.basis[0]
-        + corrected_vertex.y * instance.basis[1]
-        + corrected_vertex.z * instance.basis[2];
+        + local_vertex.x * instance.basis[0]
+        + local_vertex.y * instance.basis[1]
+        + local_vertex.z * instance.basis[2];
 
     // Apply 4D rotation
     let rotated_vertex_4d = transform.rotation_matrix * vertex_4d;

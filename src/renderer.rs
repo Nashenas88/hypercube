@@ -12,7 +12,7 @@ use wgpu::util::DeviceExt;
 
 use crate::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
-use crate::geometry::{CUBE_VERTICES, FACE_CENTERS, VERTEX_NORMAL_INDICES};
+use crate::geometry::{CUBE_VERTICES, VERTEX_NORMAL_INDICES};
 use crate::math::{BASE_STICKER_SIZE, VIEWER_DISTANCE};
 use crate::piece::{Hypercube, StickerInstance, generate_sticker_instances};
 use crate::shader_widget::UiControls;
@@ -107,14 +107,6 @@ pub(crate) struct LightUniform {
     /// Ambient light color
     ambient: [f32; 3],
     _padding3: f32,
-}
-
-/// Face data uniform - contains face centers and fixed dimensions for all 8 faces
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct FaceDataUniform {
-    /// Face centers for all 8 faces (`vec4<f32>`)
-    face_centers: [[f32; 4]; 8],
 }
 
 /// Highlighting uniform data for sticker hover effects
@@ -387,16 +379,6 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Create face data uniform from constants
-        let face_data_uniform = FaceDataUniform {
-            face_centers: FACE_CENTERS.map(|v| [v.x, v.y, v.z, v.w]),
-        };
-        let face_data_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Face Data Buffer"),
-            contents: bytemuck::cast_slice(&[face_data_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
         // Create initial highlighting uniform (no sticker highlighted)
         let highlighting_uniform = HighlightingUniform {
             hovered_sticker_index: u32::MAX, // No sticker highlighted
@@ -492,7 +474,7 @@ impl Renderer {
                 label: Some("Skybox Bind Group Layout"),
             });
 
-        // Main shader bind group layout (transform, camera, light, face_data, normals, instances)
+        // Main shader bind group layout (transform, camera, light, instances, highlighting)
         let main_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -530,16 +512,6 @@ impl Renderer {
                         binding: 3,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
@@ -547,7 +519,7 @@ impl Renderer {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 5,
+                        binding: 4,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -560,7 +532,7 @@ impl Renderer {
                 label: Some("Main Bind Group Layout"),
             });
 
-        // Normal shader bind group layout (transform, camera, face_data, instances)
+        // Normal shader bind group layout (transform, camera, instances)
         let normal_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -588,16 +560,6 @@ impl Renderer {
                         binding: 2,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
@@ -608,7 +570,7 @@ impl Renderer {
                 label: Some("Normal Bind Group Layout"),
             });
 
-        // Debug shaders bind group layout (transform, camera, face_data, instances)
+        // Debug shaders bind group layout (transform, camera, instances)
         let debug_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -634,16 +596,6 @@ impl Renderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -715,14 +667,10 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: face_data_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
                     resource: instance_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 5,
+                    binding: 4,
                     resource: highlighting_buffer.as_entire_binding(),
                 },
             ],
@@ -742,10 +690,6 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: face_data_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
                     resource: instance_buffer.as_entire_binding(),
                 },
             ],
@@ -765,10 +709,6 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: face_data_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
                     resource: instance_buffer.as_entire_binding(),
                 },
             ],

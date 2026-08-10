@@ -52,15 +52,9 @@ pub(crate) struct StickerInstance {
     /// The 3 world-space basis vectors (one per local mesh axis) the vertex
     /// shader embeds the sticker's local cube offsets along.
     pub(crate) basis: [[f32; 4]; 3],
-    /// Face ID (0-7) for this sticker
-    pub(crate) face_id: u32,
-    /// Padding for alignment
-    pub(crate) _padding: [u32; 3],
     /// The sticker's actual outward-facing 4D unit normal, used for 4D face
-    /// culling. Unlike `face_id` (the facet's *rest* face membership, used
-    /// only for the face-spread positioning offset), this tracks the
-    /// facet's true current orientation, so it sweeps continuously during a
-    /// move animation instead of snapping at the end.
+    /// culling. Tracks the facet's true current orientation, so it sweeps
+    /// continuously during a move animation instead of snapping at the end.
     pub(crate) face_normal_4d: [f32; 4],
 }
 
@@ -276,8 +270,6 @@ pub(crate) fn generate_sticker_instances(hypercube: &Hypercube) -> Vec<StickerIn
                 position_4d: facet.position_4d,
                 color: nalgebra::Vector4::from(color).into(),
                 basis: facet.basis,
-                face_id: facet.face_id as u32,
-                _padding: [0; 3],
                 face_normal_4d: FACE_CENTERS[facet.face_id].into(),
             }
         })
@@ -389,7 +381,6 @@ mod tests {
             let expected: [f32; 4] = nalgebra::Vector4::from(expected_color).into();
             assert_eq!(instance.color, expected);
             assert_eq!(instance.position_4d, facet.position_4d);
-            assert_eq!(instance.face_id, facet.face_id as u32);
         }
     }
 }
