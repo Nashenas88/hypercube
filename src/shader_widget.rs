@@ -559,9 +559,15 @@ impl HypercubeShaderProgram {
                     // Apply mouse movement to camera or 4D rotation
                     if state.mouse_pressed {
                         if state.shift_pressed {
-                            // 4D rotation
-                            state.rotation_4d =
-                                process_4d_rotation(&state.rotation_4d, delta_x, delta_y);
+                            // 4D rotation, camera-relative
+                            let (right, up) = state.camera.right_and_up();
+                            state.rotation_4d = process_4d_rotation(
+                                &state.rotation_4d,
+                                delta_x,
+                                delta_y,
+                                right,
+                                up,
+                            );
                         } else {
                             // 3D camera rotation
                             state

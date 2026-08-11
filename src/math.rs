@@ -24,13 +24,16 @@ pub(crate) const GRID_EXTENT: f32 = 2.0 / 3.0;
 ///
 /// This rotation affects the X and W coordinates while leaving Y and Z unchanged.
 /// In 4D space, there are 6 possible rotation planes; this is one of them.
+/// Only used as the hand-written reference `plane_rotation_matches_xw_special_case`
+/// checks the general `create_4d_plane_rotation` formula against.
 ///
 /// # Arguments
 /// * `angle` - Rotation angle in radians
 ///
 /// # Returns
 /// A 4x4 rotation matrix for the XW plane
-pub(crate) fn create_4d_rotation_xw(angle: f32) -> Matrix4<f32> {
+#[cfg(test)]
+fn create_4d_rotation_xw(angle: f32) -> Matrix4<f32> {
     let cos_x = angle.cos();
     let sin_x = angle.sin();
     Matrix4::new(
@@ -38,30 +41,21 @@ pub(crate) fn create_4d_rotation_xw(angle: f32) -> Matrix4<f32> {
     )
 }
 
-/// Creates a 4D rotation matrix around the YW plane.
-///
-/// This rotation affects the Y and W coordinates while leaving X and Z unchanged.
-/// Combined with XW rotation, this allows intuitive 4D navigation.
-///
-/// # Arguments
-/// * `angle` - Rotation angle in radians
-pub(crate) fn create_4d_rotation_yw(angle: f32) -> Matrix4<f32> {
-    let cos_y = angle.cos();
-    let sin_y = angle.sin();
-    Matrix4::new(
-        1.0, 0.0, 0.0, 0.0, 0.0, cos_y, 0.0, -sin_y, 0.0, 0.0, 1.0, 0.0, 0.0, sin_y, 0.0, cos_y,
-    )
-}
-
 /// Processes mouse input to create incremental 4D rotation.
 ///
-/// Converts mouse movement into 4D rotation by combining XW and YW plane rotations.
+/// Converts mouse movement into 4D rotation by rotating the planes spanned by
+/// the camera's current right/up directions (lifted into 4D with `w = 0`) and
+/// the W axis, so a drag rotates whatever the camera currently sees into or
+/// out of the hidden 4th dimension - rather than always rotating the same
+/// fixed world-space planes regardless of the camera's current orientation.
 /// The rotations are applied incrementally to the existing rotation matrix.
 ///
 /// # Arguments
 /// * `current_rotation` - The current 4D rotation matrix
 /// * `delta_x` - Horizontal mouse movement delta
 /// * `delta_y` - Vertical mouse movement delta
+/// * `camera_right` - World-space right direction of the current camera view
+/// * `camera_up` - World-space up direction of the current camera view
 ///
 /// # Returns
 /// Updated 4D rotation matrix incorporating the mouse movement
@@ -69,14 +63,23 @@ pub(crate) fn process_4d_rotation(
     current_rotation: &Matrix4<f32>,
     delta_x: f32,
     delta_y: f32,
+    camera_right: Vector3<f32>,
+    camera_up: Vector3<f32>,
 ) -> Matrix4<f32> {
-    let angle_x = -delta_x * MOUSE_SENSITIVITY * 0.01;
+    // Screen Y grows downward, so "drag up" is a negative delta_y that must
+    // flip sign to read as a positive rotation; screen X already grows
+    // rightward in the same sense as `camera_right`, so it doesn't.
+    let angle_x = delta_x * MOUSE_SENSITIVITY * 0.01;
     let angle_y = -delta_y * MOUSE_SENSITIVITY * 0.01;
 
-    let rotation_xw = create_4d_rotation_xw(angle_x);
-    let rotation_yw = create_4d_rotation_yw(angle_y);
+    let w_axis = Vector4::new(0.0, 0.0, 0.0, 1.0);
+    let right_4d = Vector4::new(camera_right.x, camera_right.y, camera_right.z, 0.0);
+    let up_4d = Vector4::new(camera_up.x, camera_up.y, camera_up.z, 0.0);
 
-    rotation_yw * rotation_xw * current_rotation
+    let rotation_h = create_4d_plane_rotation(right_4d, w_axis, angle_x);
+    let rotation_v = create_4d_plane_rotation(up_4d, w_axis, angle_y);
+
+    rotation_v * rotation_h * current_rotation
 }
 
 /// Transform a 4D position to 3D world space using perspective projection.
@@ -209,8 +212,8 @@ pub(crate) fn project_cube_point(
 }
 
 /// Rotates within the plane spanned by orthonormal `u` and `v` by `angle`,
-/// leaving their orthogonal complement fixed. `create_4d_rotation_xw`/`_yw`
-/// are the special cases where `u`, `v` are standard basis vectors.
+/// leaving their orthogonal complement fixed. `create_4d_rotation_xw` is the
+/// special case where `u`, `v` are standard basis vectors.
 pub(crate) fn create_4d_plane_rotation(
     u: Vector4<f32>,
     v: Vector4<f32>,
@@ -288,6 +291,17 @@ mod tests {
         );
     }
 
+    /// Reference implementation kept only to check `create_4d_plane_rotation`
+    /// against, now that `process_4d_rotation` derives its planes from the
+    /// camera instead of always using world Y/W.
+    fn create_4d_rotation_yw(angle: f32) -> Matrix4<f32> {
+        let cos_y = angle.cos();
+        let sin_y = angle.sin();
+        Matrix4::new(
+            1.0, 0.0, 0.0, 0.0, 0.0, cos_y, 0.0, -sin_y, 0.0, 0.0, 1.0, 0.0, 0.0, sin_y, 0.0, cos_y,
+        )
+    }
+
     #[test]
     fn plane_rotation_matches_xw_special_case() {
         let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
@@ -300,6 +314,38 @@ mod tests {
                 "angle {angle}: {general:?} != {special:?}"
             );
         }
+    }
+
+    #[test]
+    fn process_4d_rotation_matches_xw_yw_for_world_aligned_camera() {
+        let current = Matrix4::identity();
+        let right = Vector3::new(1.0, 0.0, 0.0);
+        let up = Vector3::new(0.0, 1.0, 0.0);
+        let (delta_x, delta_y) = (12.0, -7.0);
+
+        let actual = process_4d_rotation(&current, delta_x, delta_y, right, up);
+
+        let angle_x = delta_x * MOUSE_SENSITIVITY * 0.01;
+        let angle_y = -delta_y * MOUSE_SENSITIVITY * 0.01;
+        let expected = create_4d_rotation_yw(angle_y) * create_4d_rotation_xw(angle_x) * current;
+
+        assert!((actual - expected).norm() < EPSILON);
+    }
+
+    #[test]
+    fn process_4d_rotation_follows_camera_basis() {
+        // A camera basis rotated 90 degrees around Y: "right" is world -Z
+        // instead of world +X. A horizontal drag should now rotate the ZW
+        // plane rather than XW.
+        let current = Matrix4::identity();
+        let right = Vector3::new(0.0, 0.0, -1.0);
+        let up = Vector3::new(0.0, 1.0, 0.0);
+
+        let actual = process_4d_rotation(&current, 12.0, 0.0, right, up);
+
+        // XW should be untouched; ZW should carry the rotation instead.
+        assert!((actual[(0, 3)]).abs() < EPSILON);
+        assert!((actual[(2, 3)]).abs() > EPSILON);
     }
 
     #[test]
