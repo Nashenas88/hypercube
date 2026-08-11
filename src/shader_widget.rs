@@ -19,7 +19,7 @@ use crate::math::{
     GRID_EXTENT, VIEWER_DISTANCE, create_4d_plane_rotation, process_4d_rotation,
     project_cube_point, shortest_arc_plane,
 };
-use crate::moves::{base_angle, rotate_local_position};
+use crate::moves::{base_angle, clockwise_sign, rotate_local_position};
 use crate::piece::{
     FACET_TABLE, Hypercube, Piece, StickerInstance, free_axes, generate_sticker_instances,
 };
@@ -258,6 +258,7 @@ impl shader::Primitive for HypercubePrimitive {
             self.ui_controls.face_gap,
         );
         pipeline.update_camera(queue, &self.camera, &self.projection);
+        pipeline.update_light(queue, &self.camera);
         pipeline.update_indices(queue, &self.cached_indices);
         pipeline.update_highlighting(queue, self.hovered_sticker);
         pipeline.update_debug_instances(queue, &self.debug_instances);
@@ -735,8 +736,11 @@ impl HypercubeShaderProgram {
 
     /// Applies the move triggered by clicking the given facet, if any -
     /// non-actionable facets (cell-centers, the invisible center) are a
-    /// no-op. Direction follows the clicked facet's own signed local
-    /// coordinates, which is inherently viewer-relative; Shift reverses it.
+    /// no-op. A plain click always turns clockwise as viewed from beyond the
+    /// clicked facet, looking back in along its own rotation axis
+    /// (`moves::clockwise_sign`) - independent of the puzzle's current
+    /// orientation or camera position. Shift reverses it to
+    /// counterclockwise.
     fn handle_facet_click(&self, state: &mut HypercubeShaderState, sticker_index: usize) {
         let facet = &FACET_TABLE[sticker_index];
         if !facet.is_actionable {
@@ -745,10 +749,12 @@ impl HypercubeShaderProgram {
 
         let local_nonzero_count = facet.local_coords.iter().filter(|c| **c != 0).count();
         let magnitude = base_angle(local_nonzero_count);
+
+        let sign = clockwise_sign(facet);
         let angle = if state.shift_pressed {
-            -magnitude
+            -sign * magnitude
         } else {
-            magnitude
+            sign * magnitude
         };
 
         let pre_move_pieces = state.hypercube.pieces.clone();
@@ -1237,5 +1243,83 @@ mod tests {
         assert!(state.hypercube.is_solved());
         assert!(state.animating_move.is_none());
         assert_eq!(state.reset_generation, 1);
+    }
+}
+
+#[cfg(test)]
+mod clockwise_sign_tests {
+    use super::*;
+    use crate::math::project_4d_to_3d;
+    use crate::moves::clockwise_sign;
+
+    /// For every actionable facet, `moves::clockwise_sign` must agree with
+    /// an oracle built independently of the cofactor formula it uses
+    /// internally: two probes `p1`, `p2 = axis x p1` (perpendicular to the
+    /// rotation axis) have true rendered velocities `v1`, `v2` under a small
+    /// rotation, and `v1 x v2` is the true spin axis, measured with no axis
+    /// transform formula at all - just how two points actually move.
+    ///
+    /// Clockwise (as viewed from beyond the facet, looking back in) means
+    /// that true spin axis points away from a viewer standing further out
+    /// along the same ray the facet sits on - the direction given by
+    /// transforming `local_coords` as an ordinary vector, not a pseudovector.
+    #[test]
+    fn clockwise_sign_matches_velocity_oracle() {
+        let rotation_4d = Matrix4::identity();
+
+        for facet in FACET_TABLE.iter().filter(|f| f.is_actionable) {
+            let position_4d = Vector4::from(facet.position_4d);
+            let base = project_4d_to_3d(position_4d, &rotation_4d, VIEWER_DISTANCE);
+
+            const EPSILON: f32 = 1e-3;
+            let tangent = |axis: usize| -> Vector3<f32> {
+                let mut offset_4d = position_4d;
+                offset_4d[axis] += EPSILON;
+                (project_4d_to_3d(offset_4d, &rotation_4d, VIEWER_DISTANCE) - base) / EPSILON
+            };
+            let local_coords = facet.local_coords.map(|c| c as f32);
+            let d = facet.free_axes.map(tangent);
+            let ordinary_direction =
+                d[0] * local_coords[0] + d[1] * local_coords[1] + d[2] * local_coords[2];
+
+            let axis_unit =
+                Vector3::new(local_coords[0], local_coords[1], local_coords[2]).normalize();
+            let candidate = if axis_unit.x.abs() < 0.9 {
+                Vector3::x()
+            } else {
+                Vector3::y()
+            };
+            let p1 = (candidate - axis_unit * candidate.dot(&axis_unit)).normalize();
+            let p2 = axis_unit.cross(&p1).normalize();
+
+            const ANGLE_EPSILON: f32 = 1e-5;
+            let velocity = |p: Vector3<f32>| -> Vector3<f32> {
+                let pre =
+                    project_cube_point(p, position_4d, facet.axis, &rotation_4d, VIEWER_DISTANCE);
+                let rotated = rotate_local_position(facet.local_coords, ANGLE_EPSILON, p.into());
+                let post = project_cube_point(
+                    Vector3::from(rotated),
+                    position_4d,
+                    facet.axis,
+                    &rotation_4d,
+                    VIEWER_DISTANCE,
+                );
+                (post - pre) / ANGLE_EPSILON
+            };
+            let ground_truth_axis = velocity(p1).cross(&velocity(p2));
+
+            let expected_sign = if ground_truth_axis.dot(&ordinary_direction) > 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            let actual_sign = clockwise_sign(facet);
+            assert_eq!(
+                actual_sign, expected_sign,
+                "facet piece_slot={} axis={} side_sign={} local_coords={:?}: \
+                 clockwise_sign returned {actual_sign}, oracle expected {expected_sign}",
+                facet.piece_slot, facet.axis, facet.side_sign, facet.local_coords
+            );
+        }
     }
 }

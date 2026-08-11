@@ -9,9 +9,10 @@
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
-use nalgebra::{Rotation3, Unit, Vector3};
+use nalgebra::{Matrix4, Rotation3, Unit, Vector3, Vector4};
 
-use crate::piece::{Hypercube, Piece, free_axes, index_of};
+use crate::math::{VIEWER_DISTANCE, project_4d_to_3d};
+use crate::piece::{FacetGeometry, Hypercube, Piece, free_axes, index_of};
 
 /// Rounds a continuous 3D rotation matrix (about `local_coords`, by `angle`)
 /// to an exact signed permutation: `new[row] = sign[row] * old[perm[row]]`.
@@ -82,6 +83,66 @@ pub(crate) fn base_angle(local_nonzero_count: usize) -> f32 {
         2 => PI,
         3 => TAU / 3.0,
         n => unreachable!("non-actionable or malformed local_coords: {n} nonzero"),
+    }
+}
+
+/// Sign to apply to a click's rotation magnitude so it turns clockwise when
+/// viewed from beyond the clicked facet, looking back in toward the
+/// rotation's own center - i.e. along the ray from the cell's center
+/// (`local_coords = (0,0,0)`) through the facet's own position, which is a
+/// positive multiple of `local_coords` itself (`FacetGeometry`'s doc: "this
+/// piece's position restricted to `free_axes`"). That viewing ray is exactly
+/// the rotation axis `discrete_rotation`/`rotate_local_position` use, so
+/// this is the one case where clockwise is never ambiguous: every off-axis
+/// point traces a clean circle around the view direction, with no
+/// flip/tumble regardless of `local_coords`, `axis`, or `side_sign`.
+///
+/// The sign still depends on the facet: `local_coords` and the rotation
+/// live in an abstract 3D frame (the ordered `free_axes` basis), and what a
+/// viewer actually sees is that frame's image under `math::project_4d_to_3d`,
+/// a nonlinear map (from the perspective divide) whose local Jacobian can be
+/// orientation-*reversing*, flipping which direction reads as clockwise,
+/// depending on which axis is fixed and the sign of the piece's position on
+/// it.
+///
+/// Concretely, with `d[0], d[1], d[2]` the images (via finite difference, at
+/// the identity 4D rotation - a fixed reference frame) of the three
+/// `free_axes` basis directions:
+///
+/// - `visible_axis` transforms `local_coords` as a *pseudovector* (the
+///   cofactor-matrix construction `local_coords[0]*(d[1]×d[2]) +
+///   local_coords[1]*(d[2]×d[0]) + local_coords[2]*(d[0]×d[1])`), giving the
+///   true rendered spin axis.
+/// - `ordinary_direction` transforms the *same* `local_coords` as an
+///   ordinary vector (`local_coords[0]*d[0] + local_coords[1]*d[1] +
+///   local_coords[2]*d[2]`), giving the direction toward a viewer standing
+///   further out along the same ray.
+///
+/// These coincide when the local map is orientation-preserving and diverge
+/// when it isn't: `visible_axis` pointing toward that viewer means a
+/// positive angle reads counterclockwise (so clockwise needs `-1.0`);
+/// pointing away means it already reads clockwise (`1.0`).
+pub(crate) fn clockwise_sign(facet: &FacetGeometry) -> f32 {
+    const EPSILON: f32 = 1e-3;
+    let rotation_4d = Matrix4::identity();
+    let position_4d = Vector4::from(facet.position_4d);
+    let base = project_4d_to_3d(position_4d, &rotation_4d, VIEWER_DISTANCE);
+    let tangent = |axis: usize| -> Vector3<f32> {
+        let mut offset_4d = position_4d;
+        offset_4d[axis] += EPSILON;
+        (project_4d_to_3d(offset_4d, &rotation_4d, VIEWER_DISTANCE) - base) / EPSILON
+    };
+    let local_coords = facet.local_coords.map(|c| c as f32);
+    let d = facet.free_axes.map(tangent);
+    let visible_axis = d[1].cross(&d[2]) * local_coords[0]
+        + d[2].cross(&d[0]) * local_coords[1]
+        + d[0].cross(&d[1]) * local_coords[2];
+    let ordinary_direction =
+        d[0] * local_coords[0] + d[1] * local_coords[1] + d[2] * local_coords[2];
+    if visible_axis.dot(&ordinary_direction) > 0.0 {
+        -1.0
+    } else {
+        1.0
     }
 }
 
