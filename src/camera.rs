@@ -13,6 +13,12 @@ const ZOOM_SENSITIVITY: f32 = 1.0;
 const MIN_DISTANCE: f32 = 5.0;
 /// Maximum camera distance from target
 const MAX_DISTANCE: f32 = 50.0;
+/// Rightward offset weight for the camera-attached light, relative to the
+/// forward (headlight) direction.
+const LIGHT_RIGHT_WEIGHT: f32 = 0.4;
+/// Upward offset weight for the camera-attached light, relative to the
+/// forward (headlight) direction.
+const LIGHT_UP_WEIGHT: f32 = 0.5;
 
 /// 3D camera representing the viewer's position and orientation in space.
 ///
@@ -58,6 +64,20 @@ impl Camera {
         let right = Vector3::new(view[(0, 0)], view[(0, 1)], view[(0, 2)]);
         let up = Vector3::new(view[(1, 0)], view[(1, 1)], view[(1, 2)]);
         (right, up)
+    }
+
+    /// Light-travel direction (light source toward surface) for a light
+    /// attached to the camera, offset toward the top-right of the view.
+    ///
+    /// Dominated by the forward (headlight) direction so the visible side of
+    /// the model is always lit, tilted by [`LIGHT_RIGHT_WEIGHT`] /
+    /// [`LIGHT_UP_WEIGHT`] so faces angled away from that offset still fall
+    /// into shadow. Matches the sign convention of `LightUniform.direction`
+    /// (shading uses `light_dir = normalize(-light.direction)`).
+    pub(crate) fn top_right_light_direction(&self) -> Vector3<f32> {
+        let forward = (self.target - self.eye).normalize();
+        let (right, up) = self.right_and_up();
+        (forward - LIGHT_RIGHT_WEIGHT * right - LIGHT_UP_WEIGHT * up).normalize()
     }
 }
 
@@ -268,6 +288,31 @@ mod tests {
         let (right, up) = camera_at(15.0, 90.0, 0.0).right_and_up();
         assert!((right - Vector3::new(0.0, 0.0, -1.0)).norm() < 1e-3);
         assert!((up - Vector3::new(0.0, 1.0, 0.0)).norm() < 1e-4);
+    }
+
+    #[test]
+    fn top_right_light_direction_at_default_orientation() {
+        let direction = camera_at(15.0, 0.0, 0.0).top_right_light_direction();
+        let expected = Vector3::new(-LIGHT_RIGHT_WEIGHT, -LIGHT_UP_WEIGHT, -1.0).normalize();
+        assert!((direction - expected).norm() < 1e-4);
+        assert!((direction.norm() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn top_right_light_direction_rotates_with_yaw() {
+        let camera = camera_at(15.0, 90.0, 0.0);
+        let (right, up) = camera.right_and_up();
+        let forward = (camera.target - camera.eye).normalize();
+        let expected = (forward - LIGHT_RIGHT_WEIGHT * right - LIGHT_UP_WEIGHT * up).normalize();
+
+        let direction = camera.top_right_light_direction();
+        assert!((direction - expected).norm() < 1e-4);
+    }
+
+    #[test]
+    fn top_right_light_direction_is_unit_length_under_pitch() {
+        let direction = camera_at(15.0, 0.0, 45.0).top_right_light_direction();
+        assert!((direction.norm() - 1.0).abs() < 1e-5);
     }
 
     #[test]

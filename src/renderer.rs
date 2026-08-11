@@ -59,6 +59,10 @@ pub(crate) struct Renderer {
     highlighting_uniform: HighlightingUniform,
     /// GPU buffer containing highlighting data
     highlighting_buffer: wgpu::Buffer,
+    /// CPU-side lighting uniform data
+    light_uniform: LightUniform,
+    /// GPU buffer containing lighting data
+    light_buffer: wgpu::Buffer,
     /// GPU buffer for debug instance data (vertex attributes)
     debug_instance_buffer: wgpu::Buffer,
     /// Bind group for main shader (transform, camera, light, normals, instances)
@@ -341,10 +345,11 @@ impl Renderer {
     ) -> Self {
         let camera_uniform = CameraUniform::new();
 
-        // Create light uniform with sun-like directional light
+        // Initial seed direction; overwritten every frame by `Renderer::update_light`
+        // once a camera-attached light direction is available.
         let light_dir = nalgebra::Vector3::new(0.5, -1.0, 0.3).normalize();
         let light_uniform = LightUniform {
-            direction: [light_dir.x, light_dir.y, light_dir.z], // Sun coming from upper right
+            direction: [light_dir.x, light_dir.y, light_dir.z],
             _padding1: 0.0,
             color: [1.0, 0.95, 0.8], // Warm sunlight color
             _padding2: 0.0,
@@ -1140,6 +1145,8 @@ impl Renderer {
             camera_buffer,
             highlighting_uniform,
             highlighting_buffer,
+            light_uniform,
+            light_buffer,
             debug_instance_buffer,
             main_bind_group,
             normal_bind_group,
@@ -1207,6 +1214,16 @@ impl Renderer {
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
+        );
+    }
+
+    /// Updates the light direction to track the camera, offset top-right.
+    pub(crate) fn update_light(&mut self, queue: &Queue, camera: &Camera) {
+        self.light_uniform.direction = camera.top_right_light_direction().into();
+        queue.write_buffer(
+            &self.light_buffer,
+            0,
+            bytemuck::cast_slice(&[self.light_uniform]),
         );
     }
 
