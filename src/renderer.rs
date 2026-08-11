@@ -4,10 +4,12 @@
 //! render pipeline setup, and per-frame rendering of the hypercube instances.
 
 use core::f32;
+use std::borrow::Cow;
 
 use iced::wgpu::{self, CommandEncoder, Device, Queue, TextureFormat, TextureView};
 use iced::widget::shader;
 use iced::{Rectangle, Size};
+use naga_oil::compose::{ComposableModuleDescriptor, Composer, NagaModuleDescriptor};
 use wgpu::util::DeviceExt;
 
 use crate::RenderMode;
@@ -731,9 +733,30 @@ impl Renderer {
             label: Some("Debug AABB Bind Group"),
         });
 
+        let mut composer = Composer::default();
+        composer
+            .add_composable_module(ComposableModuleDescriptor {
+                source: include_str!("shaders/math4d.wgsl"),
+                file_path: "shaders/math4d.wgsl",
+                ..Default::default()
+            })
+            .expect("shaders/math4d.wgsl failed to compose");
+        let mut compose_shader =
+            |source: &str, file_path: &str| match composer.make_naga_module(NagaModuleDescriptor {
+                source,
+                file_path,
+                ..Default::default()
+            }) {
+                Ok(module) => module,
+                Err(err) => panic!("{}", err.emit_to_string(&composer)),
+            };
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader.wgsl").into()),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
+                include_str!("shaders/shader.wgsl"),
+                "shaders/shader.wgsl",
+            ))),
         });
 
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -888,7 +911,10 @@ impl Renderer {
         // Create normal visualization shader and pipeline
         let normal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Normal Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/normal_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
+                include_str!("shaders/normal_shader.wgsl"),
+                "shaders/normal_shader.wgsl",
+            ))),
         });
 
         let normal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -948,7 +974,10 @@ impl Renderer {
         // Create depth visualization shader and pipeline
         let depth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Depth Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/depth_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
+                include_str!("shaders/depth_shader.wgsl"),
+                "shaders/depth_shader.wgsl",
+            ))),
         });
 
         let depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1008,7 +1037,10 @@ impl Renderer {
         // Create debug AABB shader and pipeline for transparent rendering
         let debug_aabb_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Debug AABB Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/debug_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
+                include_str!("shaders/debug_shader.wgsl"),
+                "shaders/debug_shader.wgsl",
+            ))),
         });
 
         let debug_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

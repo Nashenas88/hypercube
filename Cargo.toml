@@ -14,3 +14,16 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
 directories = "6.0.0"
+# Pinned to 0.20 (not a caret range) because it's the last naga_oil release
+# depending on naga 27, matching the version pulled in transitively via
+# wgpu 27 / iced 0.14. Later naga_oil releases require naga 30+.
+naga_oil = "=0.20.0"
+# Direct dependency solely to turn on the "naga-ir" feature (needed for
+# ShaderSource::Naga, produced by naga_oil's Composer) via Cargo's feature
+# unification; iced_wgpu already depends on this same wgpu 27 with
+# default-features off, so mirror that here to avoid pulling in extra
+# default features project-wide.
+wgpu = { version = "27.0", default-features = false, features = [
+    "wgsl",
+    "naga-ir",
+] }

@@ -1,15 +1,11 @@
 // Debug shader for transparent AABB rendering
 // Uses instanced rendering with storage buffer for debug instances
+#import math4d::CameraUniform
 
 // Debug instance data
 struct DebugInstance {
     transform: mat4x4<f32>,
     color: vec4<f32>,
-}
-
-// Camera uniform
-struct CameraUniform {
-    view_proj: mat4x4<f32>,
 }
 
 // Vertex shader output

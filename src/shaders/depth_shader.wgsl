@@ -1,26 +1,6 @@
 // Depth visualization shader using instanced rendering
 // Displays depth values as grayscale colors for debugging
-
-// Transform uniform structure
-struct Transform4D {
-    rotation_matrix: mat4x4<f32>,
-    viewer_distance: f32,
-    sticker_scale: f32,
-    face_gap: f32,
-    _padding: f32,
-}
-
-struct CameraUniform {
-    view_proj: mat4x4<f32>,
-};
-
-// Instance data for each sticker
-struct StickerInstance {
-    position_4d: vec4<f32>,
-    color: vec4<f32>,
-    basis: array<vec4<f32>, 3>,
-    face_normal_4d: vec4<f32>,
-}
+#import math4d::{Transform4D, CameraUniform, StickerInstance, project_4d_to_3d, is_face_visible, face_push_offset_3d}
 
 @group(0) @binding(0)
 var<uniform> transform: Transform4D;
@@ -34,38 +14,6 @@ var<storage, read> instances: array<StickerInstance>;
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) depth: f32,
-}
-
-// Shared math4d functions
-
-
-fn project_4d_to_3d(point_4d: vec4<f32>, viewer_distance: f32) -> vec3<f32> {
-    let w_distance = viewer_distance - point_4d.w;
-    let scale = viewer_distance / w_distance;
-    return vec3<f32>(point_4d.x * scale, point_4d.y * scale, point_4d.z * scale);
-}
-
-fn is_face_visible(face_center_4d: vec4<f32>, rotation_matrix: mat4x4<f32>, viewer_distance: f32) -> bool {
-    let rotated_face_center = rotation_matrix * face_center_4d;
-    let viewer_position = vec4<f32>(0.0, 0.0, 0.0, viewer_distance);
-    let to_viewer = viewer_position - rotated_face_center;
-    let dot_product = dot(rotated_face_center, to_viewer);
-    return dot_product < 0.0;
-}
-
-// The outward push for a face, projected into 3D: `face_normal_4d` rotated
-// and projected like any other point. Pushing already-projected geometry
-// by this offset (rather than scaling a 4D anchor before projection) can
-// never cross the perspective divide's `viewer_distance - w = 0`
-// singularity. Deliberately not normalized to a fixed length:
-// `face_normal_4d` is always a 4D unit vector, so this projected vector's
-// own length already shrinks smoothly toward zero exactly when a face's
-// piece renders near the center of the screen - normalizing would force
-// that near-zero (direction-unstable) vector back up to full length,
-// snapping the piece to a full-size displacement in a swinging direction
-// instead of tapering out smoothly.
-fn face_push_offset_3d(face_normal_4d: vec4<f32>, rotation_matrix: mat4x4<f32>, viewer_distance: f32) -> vec3<f32> {
-    return project_4d_to_3d(rotation_matrix * face_normal_4d, viewer_distance);
 }
 
 @vertex
