@@ -46,6 +46,19 @@ impl Camera {
         view[(2, 3)] = 0.0;
         view
     }
+
+    /// World-space right and up directions of the camera's current view.
+    ///
+    /// For a right-handed look-at view matrix, row 0 is the world-space
+    /// direction that maps to camera-space +X (right) and row 1 is the one
+    /// that maps to camera-space +Y (up) - the rotation submatrix's rows are
+    /// the world-space axes it maps to the camera's local axes.
+    pub(crate) fn right_and_up(&self) -> (Vector3<f32>, Vector3<f32>) {
+        let view = self.build_view_matrix();
+        let right = Vector3::new(view[(0, 0)], view[(0, 1)], view[(0, 2)]);
+        let up = Vector3::new(view[(1, 0)], view[(1, 1)], view[(1, 2)]);
+        (right, up)
+    }
 }
 
 /// Orbital camera controller for smooth navigation around a target point.
@@ -237,6 +250,24 @@ mod tests {
             }
         }
         cosines
+    }
+
+    #[test]
+    fn right_and_up_match_world_axes_at_default_orientation() {
+        let (right, up) = camera_at(15.0, 0.0, 0.0).right_and_up();
+        assert!((right - Vector3::new(1.0, 0.0, 0.0)).norm() < 1e-4);
+        assert!((up - Vector3::new(0.0, 1.0, 0.0)).norm() < 1e-4);
+    }
+
+    #[test]
+    fn right_and_up_rotate_with_yaw() {
+        // At yaw=90 degrees the camera sits on +X looking back toward the
+        // origin, so world -Z is now on-screen right, distinguishing this
+        // from a row/column or handedness mixup that the default-orientation
+        // case (a no-op either way) can't catch.
+        let (right, up) = camera_at(15.0, 90.0, 0.0).right_and_up();
+        assert!((right - Vector3::new(0.0, 0.0, -1.0)).norm() < 1e-3);
+        assert!((up - Vector3::new(0.0, 1.0, 0.0)).norm() < 1e-4);
     }
 
     #[test]
