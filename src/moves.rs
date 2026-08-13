@@ -161,16 +161,15 @@ impl Hypercube {
         let axes = free_axes(side_axis);
         let (perm, sign) = discrete_rotation(local_coords, angle);
 
-        let affected: Vec<usize> = self
+        let affected = self
             .pieces
             .iter()
             .enumerate()
             .filter(|(_, p)| p.position[side_axis] == side_sign)
-            .map(|(i, _)| i)
-            .collect();
-        debug_assert_eq!(affected.len(), 27);
+            .map(|(i, _)| i);
+        debug_assert_eq!(affected.clone().count(), 27);
 
-        let snapshot: Vec<Piece> = affected.iter().map(|&i| self.pieces[i]).collect();
+        let snapshot: Vec<Piece> = affected.map(|i| self.pieces[i]).collect();
 
         for old in &snapshot {
             let mut new_position = old.position;
