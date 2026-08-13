@@ -65,6 +65,21 @@ struct AnimatingFocus {
     duration: Duration,
 }
 
+/// An in-progress reveal/hide flourish: sweeps sticker scale, face gap, and
+/// camera yaw from their values when the toggle button was pressed toward
+/// the reveal's (or hide's) target values, all driven by the same `elapsed`/
+/// `duration`/`ease` progress.
+struct AnimatingReveal {
+    start_scale: f32,
+    target_scale: f32,
+    start_gap: f32,
+    target_gap: f32,
+    start_yaw: f32,
+    target_yaw: f32,
+    elapsed: Duration,
+    duration: Duration,
+}
+
 /// Smoothstep ease: slow-fast-slow, applied to the normalized \[0,1\] progress.
 fn ease(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
@@ -76,6 +91,22 @@ const CLICK_DRAG_THRESHOLD_PX: f32 = 4.0;
 /// Max gap between two qualifying clicks on the same face for them to count
 /// as a double-click.
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
+
+/// Duration of the reveal/hide flourish (camera spin + scale/gap animation),
+/// independent of `animation_duration_ms` which is tuned for quick move/focus
+/// animations rather than a two-revolution camera spin.
+pub(crate) const REVEAL_ANIMATION_DURATION: Duration = Duration::from_millis(2500);
+/// Camera yaw delta applied by a single reveal or hide flourish. A multiple
+/// of 360 degrees, so the camera always visually ends up where it started.
+const REVEAL_YAW_SPIN_DEGREES: f32 = 720.0;
+/// Sticker scale/face gap in the app's raw (slider) domain before a reveal.
+/// Shared with `app.rs::HypercubeApp::new()` as the single source of truth.
+pub(crate) const PRIMARY_STICKER_SCALE: f32 = 0.02;
+pub(crate) const PRIMARY_FACE_GAP: f32 = 0.0;
+/// Sticker scale/face gap in the app's raw (slider) domain a reveal animates
+/// toward.
+const SECONDARY_STICKER_SCALE: f32 = 0.1;
+const SECONDARY_FACE_GAP: f32 = 1.0;
 
 /// Builds the GPU instance list for the current frame. Piece state is
 /// already final (`apply_move` commits atomically) - while a move is
@@ -295,6 +326,14 @@ pub(crate) struct HypercubeShaderState {
     hypercube: Hypercube,
     animating_move: Option<AnimatingMove>,
     animating_focus: Option<AnimatingFocus>,
+    animating_reveal: Option<AnimatingReveal>,
+    /// Live sticker scale/face gap while a reveal/hide flourish is playing,
+    /// consulted by `draw()`/`update_hover` in preference to
+    /// `HypercubeShaderProgram`'s own fields. Self-corrects back to `None`
+    /// once `HypercubeApp` has caught up to the animation's final value (see
+    /// `Program::update`), so it never masks a later manual slider drag.
+    reveal_scale_override: Option<f32>,
+    reveal_gap_override: Option<f32>,
     /// Position and hovered sticker (if any) recorded when the rotate button
     /// was last pressed, used at release time to tell a click from a drag.
     rotate_press: Option<(Point, Option<usize>)>,
@@ -303,6 +342,7 @@ pub(crate) struct HypercubeShaderState {
     pending_face_click: Option<(Instant, usize)>,
     last_redraw_instant: Option<Instant>,
     reset_generation: u64,
+    reveal_generation: u64,
 }
 
 /// The shader program that handles 4D hypercube rendering
@@ -314,10 +354,13 @@ pub(crate) struct HypercubeShaderProgram {
     rotate_button: RotateButton,
     animation_duration_ms: u32,
     reset_generation: u64,
+    reveal_generation: u64,
+    revealed_target: bool,
 }
 
 impl HypercubeShaderProgram {
     /// Create a new shader program with the given parameters
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         sticker_scale: f32,
         face_gap: f32,
@@ -326,6 +369,8 @@ impl HypercubeShaderProgram {
         rotate_button: RotateButton,
         animation_duration_ms: u32,
         reset_generation: u64,
+        reveal_generation: u64,
+        revealed_target: bool,
     ) -> Self {
         Self {
             sticker_scale,
@@ -335,6 +380,8 @@ impl HypercubeShaderProgram {
             rotate_button,
             animation_duration_ms,
             reset_generation,
+            reveal_generation,
+            revealed_target,
         }
     }
 }
@@ -363,6 +410,49 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             return Some(Action::request_redraw());
         }
 
+        // Once `HypercubeApp` has caught up to a completed reveal/hide
+        // flourish's final value (via `Message::RevealAnimationComplete`),
+        // the fresh `self` built from it matches the override's stored
+        // target - clear it so future manual slider drags aren't masked.
+        if let Some(target) = state.reveal_scale_override
+            && self.sticker_scale == target
+        {
+            state.reveal_scale_override = None;
+        }
+        if let Some(target) = state.reveal_gap_override
+            && self.face_gap == target
+        {
+            state.reveal_gap_override = None;
+        }
+
+        if self.reveal_generation != state.reveal_generation {
+            state.animating_move = None;
+            state.animating_focus = None;
+
+            let (target_scale_raw, target_gap) = if self.revealed_target {
+                (SECONDARY_STICKER_SCALE, SECONDARY_FACE_GAP)
+            } else {
+                (PRIMARY_STICKER_SCALE, PRIMARY_FACE_GAP)
+            };
+            let start_yaw = state.camera_controller.yaw;
+
+            state.animating_reveal = Some(AnimatingReveal {
+                start_scale: self.sticker_scale,
+                target_scale: 1.0 - target_scale_raw,
+                start_gap: self.face_gap,
+                target_gap,
+                start_yaw,
+                target_yaw: start_yaw + REVEAL_YAW_SPIN_DEGREES,
+                elapsed: Duration::ZERO,
+                duration: REVEAL_ANIMATION_DURATION,
+            });
+            state.reveal_scale_override = Some(self.sticker_scale);
+            state.reveal_gap_override = Some(self.face_gap);
+            state.reveal_generation = self.reveal_generation;
+            state.last_redraw_instant = None;
+            return Some(Action::request_redraw());
+        }
+
         // Update camera each frame
         state.camera_controller.update_camera(&mut state.camera);
 
@@ -373,6 +463,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 
         // Check if 4D rotation changed and recalculate indices
         let mut rotation_changed = false;
+        let mut reveal_completed_message: Option<Message> = None;
 
         let status = match event {
             Event::Mouse(mouse_event) => {
@@ -392,8 +483,12 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 
                 let move_tick = Self::advance_animation(state, delta);
                 let focus_tick = Self::advance_focus_animation(state, delta);
+                let reveal_tick = Self::advance_reveal_animation(state, delta);
 
-                if state.animating_move.is_none() && state.animating_focus.is_none() {
+                if state.animating_move.is_none()
+                    && state.animating_focus.is_none()
+                    && state.animating_reveal.is_none()
+                {
                     state.last_redraw_instant = None;
                 } else {
                     state.last_redraw_instant = Some(*now);
@@ -407,16 +502,31 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 }
 
                 if matches!(
-                    (&move_tick, &focus_tick),
-                    (AnimationTick::Completed, _) | (_, AnimationTick::Completed)
+                    (&move_tick, &focus_tick, &reveal_tick),
+                    (AnimationTick::Completed, _, _)
+                        | (_, AnimationTick::Completed, _)
+                        | (_, _, AnimationTick::Completed)
                 ) && !state.mouse_pressed
                     && let Some(position) = cursor.position_in(bounds)
                 {
                     self.update_hover(state, position, bounds);
                 }
 
+                if matches!(reveal_tick, AnimationTick::Completed) {
+                    let (final_scale, final_gap) = if self.revealed_target {
+                        (SECONDARY_STICKER_SCALE, SECONDARY_FACE_GAP)
+                    } else {
+                        (PRIMARY_STICKER_SCALE, PRIMARY_FACE_GAP)
+                    };
+                    reveal_completed_message = Some(Message::RevealAnimationComplete {
+                        final_scale,
+                        final_gap,
+                    });
+                }
+
                 if matches!(move_tick, AnimationTick::Ignored)
                     && matches!(focus_tick, AnimationTick::Ignored)
+                    && matches!(reveal_tick, AnimationTick::Ignored)
                 {
                     event::Status::Ignored
                 } else {
@@ -429,6 +539,10 @@ impl shader::Program<Message> for HypercubeShaderProgram {
         // Recalculate indices if rotation changed
         if rotation_changed {
             state.cached_indices = Self::calculate_indices(&state.rotation_4d);
+        }
+
+        if let Some(message) = reveal_completed_message {
+            return Some(Action::publish(message));
         }
 
         match status {
@@ -448,8 +562,8 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             projection: state.projection,
             rotation_4d: state.rotation_4d,
             ui_controls: UiControls {
-                sticker_scale: self.sticker_scale,
-                face_gap: self.face_gap,
+                sticker_scale: state.reveal_scale_override.unwrap_or(self.sticker_scale),
+                face_gap: state.reveal_gap_override.unwrap_or(self.face_gap),
                 render_mode: self.render_mode,
             },
             cached_indices: state.cached_indices.clone(),
@@ -591,6 +705,7 @@ impl HypercubeShaderProgram {
             mouse::Event::ButtonPressed(button) => {
                 if let Some(position) = cursor.position_in(bounds)
                     && *button == self.rotate_button.to_mouse_button()
+                    && state.animating_reveal.is_none()
                 {
                     // A fresh press always takes precedence over an
                     // in-progress auto-centering animation, so a deliberate
@@ -607,6 +722,7 @@ impl HypercubeShaderProgram {
                     && *button == self.rotate_button.click_button()
                     && state.animating_move.is_none()
                     && state.animating_focus.is_none()
+                    && state.animating_reveal.is_none()
                     && let Some(sticker_index) = state.hovered_sticker
                 {
                     self.handle_facet_click(state, sticker_index);
@@ -659,12 +775,14 @@ impl HypercubeShaderProgram {
     /// `debug_instances` on `state` with the result.
     fn update_hover(&self, state: &mut HypercubeShaderState, position: Point, bounds: Rectangle) {
         let mouse_ray = calculate_mouse_ray(position, bounds, &state.camera, &state.projection);
+        let sticker_scale = state.reveal_scale_override.unwrap_or(self.sticker_scale);
+        let face_gap = state.reveal_gap_override.unwrap_or(self.face_gap);
 
         let (hovered_sticker, debug_instances) = find_intersected_sticker(
             &mouse_ray,
             state,
-            self.sticker_scale,
-            self.face_gap,
+            sticker_scale,
+            face_gap,
             VIEWER_DISTANCE,
             self.aabb_mode,
         );
@@ -823,6 +941,49 @@ impl HypercubeShaderProgram {
         AnimationTick::Running
     }
 
+    /// Advances an in-progress reveal/hide flourish (see `AnimatingReveal`)
+    /// by `delta`. Drives `state.camera_controller.yaw` directly - picked up
+    /// automatically by the unconditional `update_camera` call each tick -
+    /// and updates the scale/gap overrides `draw()`/`update_hover` consult.
+    /// On completion the overrides are left set to the exact target rather
+    /// than cleared, so `Program::update`'s reconciliation check can drop
+    /// them once `HypercubeApp` has caught up via the published completion
+    /// message, avoiding a one-frame flash back to the pre-animation value.
+    fn advance_reveal_animation(
+        state: &mut HypercubeShaderState,
+        delta: Duration,
+    ) -> AnimationTick {
+        let Some(animating) = state.animating_reveal.as_mut() else {
+            return AnimationTick::Ignored;
+        };
+
+        animating.elapsed += delta;
+
+        let t = if animating.duration.is_zero() {
+            1.0
+        } else {
+            (animating.elapsed.as_secs_f32() / animating.duration.as_secs_f32()).clamp(0.0, 1.0)
+        };
+        let eased = ease(t);
+
+        state.reveal_scale_override =
+            Some(animating.start_scale + (animating.target_scale - animating.start_scale) * eased);
+        state.reveal_gap_override =
+            Some(animating.start_gap + (animating.target_gap - animating.start_gap) * eased);
+        state.camera_controller.yaw =
+            animating.start_yaw + (animating.target_yaw - animating.start_yaw) * eased;
+
+        if animating.elapsed >= animating.duration {
+            state.reveal_scale_override = Some(animating.target_scale);
+            state.reveal_gap_override = Some(animating.target_gap);
+            state.camera_controller.yaw = animating.target_yaw;
+            state.animating_reveal = None;
+            return AnimationTick::Completed;
+        }
+
+        AnimationTick::Running
+    }
+
     /// Handle keyboard events for additional controls
     fn handle_keyboard_event(
         &self,
@@ -888,10 +1049,14 @@ impl Default for HypercubeShaderState {
             hypercube: Hypercube::solved(),
             animating_move: None,
             animating_focus: None,
+            animating_reveal: None,
+            reveal_scale_override: None,
+            reveal_gap_override: None,
             rotate_press: None,
             pending_face_click: None,
             last_redraw_instant: None,
             reset_generation: 0,
+            reveal_generation: 0,
         }
     }
 }
@@ -1229,6 +1394,8 @@ mod tests {
             RotateButton::default(),
             250,
             1,
+            0,
+            false,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -1243,6 +1410,315 @@ mod tests {
         assert!(state.hypercube.is_solved());
         assert!(state.animating_move.is_none());
         assert_eq!(state.reset_generation, 1);
+    }
+
+    /// At `t=0` a reveal animation's overrides/yaw must exactly reproduce
+    /// its start values; once `elapsed` reaches `duration`, they must snap
+    /// exactly to the target values and the animation must report Completed
+    /// and clear itself.
+    #[test]
+    fn advance_reveal_animation_interpolates_and_completes() {
+        let mut state = HypercubeShaderState {
+            animating_reveal: Some(AnimatingReveal {
+                start_scale: 0.9,
+                target_scale: 0.98,
+                start_gap: 0.0,
+                target_gap: 1.0,
+                start_yaw: 10.0,
+                target_yaw: 10.0 + REVEAL_YAW_SPIN_DEGREES,
+                elapsed: Duration::ZERO,
+                duration: Duration::from_millis(1000),
+            }),
+            ..Default::default()
+        };
+
+        let tick = HypercubeShaderProgram::advance_reveal_animation(&mut state, Duration::ZERO);
+        assert!(matches!(tick, AnimationTick::Running));
+        assert_eq!(state.reveal_scale_override, Some(0.9));
+        assert_eq!(state.reveal_gap_override, Some(0.0));
+        assert_eq!(state.camera_controller.yaw, 10.0);
+
+        let tick = HypercubeShaderProgram::advance_reveal_animation(
+            &mut state,
+            Duration::from_millis(2000),
+        );
+        assert!(matches!(tick, AnimationTick::Completed));
+        assert_eq!(state.reveal_scale_override, Some(0.98));
+        assert_eq!(state.reveal_gap_override, Some(1.0));
+        assert_eq!(state.camera_controller.yaw, 10.0 + REVEAL_YAW_SPIN_DEGREES);
+        assert!(state.animating_reveal.is_none());
+    }
+
+    /// A bumped `reveal_generation` with `revealed_target: true` must start
+    /// an `AnimatingReveal` toward the secondary defaults from the program's
+    /// current values, cancel any in-progress move/focus animation, and sync
+    /// `state.reveal_generation`.
+    #[test]
+    fn reveal_generation_mismatch_starts_reveal_animation_and_cancels_others() {
+        let mut state = HypercubeShaderState::default();
+        assert_eq!(state.reveal_generation, 0);
+
+        let facet = FACET_TABLE
+            .iter()
+            .find(|f| f.is_actionable)
+            .expect("at least one actionable facet exists");
+        let nonzero = facet.local_coords.iter().filter(|c| **c != 0).count();
+        let angle = base_angle(nonzero);
+        let pre_move_pieces = state.hypercube.pieces.clone();
+        state.animating_move = Some(AnimatingMove {
+            side_axis: facet.axis,
+            side_sign: facet.side_sign,
+            local_coords: facet.local_coords,
+            angle,
+            pre_move_pieces,
+            elapsed: Duration::ZERO,
+            duration: Duration::from_millis(250),
+        });
+        state.animating_focus = Some(AnimatingFocus {
+            start_rotation: Matrix4::identity(),
+            plane: (
+                Vector4::new(1.0, 0.0, 0.0, 0.0),
+                Vector4::new(0.0, 1.0, 0.0, 0.0),
+            ),
+            total_angle: 1.0,
+            elapsed: Duration::ZERO,
+            duration: Duration::from_millis(250),
+        });
+        state.camera_controller.yaw = 42.0;
+
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            RenderMode::Standard,
+            AABBMode::None,
+            RotateButton::default(),
+            250,
+            0,
+            1,
+            true,
+        );
+
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let action = program.update(
+            &mut state,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+
+        assert!(action.is_some(), "starting a reveal must request a redraw");
+        assert!(state.animating_move.is_none());
+        assert!(state.animating_focus.is_none());
+        let animating = state
+            .animating_reveal
+            .as_ref()
+            .expect("reveal animation should have started");
+        assert_eq!(animating.start_scale, 0.9);
+        assert_eq!(animating.start_gap, 0.0);
+        assert_eq!(animating.start_yaw, 42.0);
+        assert_eq!(animating.target_yaw, 42.0 + REVEAL_YAW_SPIN_DEGREES);
+        assert_eq!(animating.target_scale, 1.0 - SECONDARY_STICKER_SCALE);
+        assert_eq!(animating.target_gap, SECONDARY_FACE_GAP);
+        assert_eq!(state.reveal_generation, 1);
+    }
+
+    /// With `revealed_target: false` (hiding), the animation must target the
+    /// primary defaults instead of the secondary ones.
+    #[test]
+    fn reveal_generation_mismatch_targets_primary_defaults_when_hiding() {
+        let mut state = HypercubeShaderState::default();
+        let program = HypercubeShaderProgram::new(
+            1.0 - SECONDARY_STICKER_SCALE,
+            SECONDARY_FACE_GAP,
+            RenderMode::Standard,
+            AABBMode::None,
+            RotateButton::default(),
+            250,
+            0,
+            1,
+            false,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        program.update(
+            &mut state,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+
+        let animating = state
+            .animating_reveal
+            .as_ref()
+            .expect("reveal animation should have started");
+        assert_eq!(animating.target_scale, 1.0 - PRIMARY_STICKER_SCALE);
+        assert_eq!(animating.target_gap, PRIMARY_FACE_GAP);
+    }
+
+    /// The reveal overrides must stay put until the program's own
+    /// sticker_scale/face_gap (i.e. `HypercubeApp`, once it has processed
+    /// `RevealAnimationComplete`) match the stored target, then clear so a
+    /// later manual slider drag isn't masked.
+    #[test]
+    fn reveal_override_clears_once_program_value_catches_up() {
+        let mut state = HypercubeShaderState {
+            reveal_scale_override: Some(0.9),
+            reveal_gap_override: Some(1.0),
+            ..Default::default()
+        };
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+
+        let stale_program = HypercubeShaderProgram::new(
+            0.5,
+            0.0,
+            RenderMode::Standard,
+            AABBMode::None,
+            RotateButton::default(),
+            250,
+            0,
+            0,
+            false,
+        );
+        stale_program.update(
+            &mut state,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+        assert_eq!(state.reveal_scale_override, Some(0.9));
+        assert_eq!(state.reveal_gap_override, Some(1.0));
+
+        let caught_up_program = HypercubeShaderProgram::new(
+            0.9,
+            1.0,
+            RenderMode::Standard,
+            AABBMode::None,
+            RotateButton::default(),
+            250,
+            0,
+            0,
+            false,
+        );
+        caught_up_program.update(
+            &mut state,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+        assert_eq!(state.reveal_scale_override, None);
+        assert_eq!(state.reveal_gap_override, None);
+    }
+
+    /// Once a reveal animation completes, `Program::update` must publish
+    /// `Message::RevealAnimationComplete` carrying the raw-domain constants
+    /// directly (not back-derived from the render-domain target), since a
+    /// float round-trip through `1.0 - x` isn't guaranteed to reproduce the
+    /// exact constant the override-reconciliation `==` check needs.
+    #[test]
+    fn reveal_completion_publishes_message_with_raw_domain_constants() {
+        let mut state = HypercubeShaderState {
+            animating_reveal: Some(AnimatingReveal {
+                start_scale: 1.0 - PRIMARY_STICKER_SCALE,
+                target_scale: 1.0 - SECONDARY_STICKER_SCALE,
+                start_gap: PRIMARY_FACE_GAP,
+                target_gap: SECONDARY_FACE_GAP,
+                start_yaw: 0.0,
+                target_yaw: REVEAL_YAW_SPIN_DEGREES,
+                elapsed: REVEAL_ANIMATION_DURATION + Duration::from_millis(100),
+                duration: REVEAL_ANIMATION_DURATION,
+            }),
+            ..Default::default()
+        };
+        let program = HypercubeShaderProgram::new(
+            1.0 - PRIMARY_STICKER_SCALE,
+            PRIMARY_FACE_GAP,
+            RenderMode::Standard,
+            AABBMode::None,
+            RotateButton::default(),
+            250,
+            0,
+            0,
+            true,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let action = program.update(
+            &mut state,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+
+        let (message, ..) = action
+            .expect("a completed reveal must produce an action")
+            .into_inner();
+        match message.expect("a completed reveal must publish a message") {
+            Message::RevealAnimationComplete {
+                final_scale,
+                final_gap,
+            } => {
+                assert_eq!(final_scale, SECONDARY_STICKER_SCALE);
+                assert_eq!(final_gap, SECONDARY_FACE_GAP);
+            }
+            other => panic!("expected RevealAnimationComplete, got {other:?}"),
+        }
+    }
+
+    /// Camera-drag orbit start and facet turn-clicks must both be ignored
+    /// while a reveal/hide flourish is playing, per the "locked cutscene"
+    /// requirement.
+    #[test]
+    fn mouse_input_is_ignored_while_reveal_animation_plays() {
+        let mut state = HypercubeShaderState {
+            animating_reveal: Some(AnimatingReveal {
+                start_scale: 0.9,
+                target_scale: 0.98,
+                start_gap: 0.0,
+                target_gap: 1.0,
+                start_yaw: 0.0,
+                target_yaw: REVEAL_YAW_SPIN_DEGREES,
+                elapsed: Duration::ZERO,
+                duration: REVEAL_ANIMATION_DURATION,
+            }),
+            ..Default::default()
+        };
+        let rotate_button = RotateButton::default();
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            RenderMode::Standard,
+            AABBMode::None,
+            rotate_button,
+            250,
+            0,
+            0,
+            true,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
+
+        program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(rotate_button.to_mouse_button())),
+            bounds,
+            cursor,
+        );
+        assert!(
+            !state.mouse_pressed,
+            "camera drag must not start during the reveal flourish"
+        );
+        assert!(state.rotate_press.is_none());
+
+        state.hovered_sticker = Some(0);
+        let pieces_before = state.hypercube.pieces.clone();
+        program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(rotate_button.click_button())),
+            bounds,
+            cursor,
+        );
+        assert_eq!(
+            state.hypercube.pieces, pieces_before,
+            "facet turn must not apply during the reveal flourish"
+        );
     }
 }
 

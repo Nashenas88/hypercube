@@ -11,7 +11,7 @@ A 4D Rubik's-cube visualizer built in Rust with `iced` 0.14 (wgpu + advanced fea
 - Build: `cargo build`
 - Run: `cargo run`
 - Test all: `cargo test`
-- Test one: `cargo test <test_name>` (all tests are inline `#[cfg(test)] mod tests` blocks — no `tests/` directory — in `camera.rs`, `piece.rs`, `math.rs`, `moves.rs`, `shader_widget.rs`)
+- Test one: `cargo test <test_name>` (all tests are inline `#[cfg(test)] mod tests` blocks — no `tests/` directory — in `app.rs`, `camera.rs`, `piece.rs`, `math.rs`, `moves.rs`, `shader_widget.rs`)
 - Format: `cargo fmt`
 - Lint: `cargo clippy --all-targets`
 
@@ -21,8 +21,9 @@ No CI config, justfile, or Makefile exists — the commands above are the full l
 
 UI, 3D/4D logic, and GPU rendering are deliberately kept in separate layers:
 
-- `main.rs` — `iced::application` entry point. `HypercubeApp` holds only UI-control state (scale/gap sliders, render mode, settings). Builds a left control panel plus a right `Shader::new(HypercubeShaderProgram)` viewport. Contains no 3D/4D logic.
-- `shader_widget.rs` — the custom iced `shader::Program`/`Primitive` that owns essentially all rendering and interaction state, independent of `HypercubeApp`. `HypercubeShaderProgram` (per-frame config), `HypercubeShaderState` (persistent: camera, 4D rotation matrix, hover/click/double-click bookkeeping, animation state, the `Hypercube` puzzle state), `HypercubePrimitive` (per-draw snapshot). Mouse/keyboard events are handled here; a `RotateButton` setting assigns one mouse button to camera orbit (+Shift for 4D rotation) and the other to puzzle turn-clicks, so the two never conflict. A turn-click's direction is resolved by `moves::clockwise_sign` to always turn clockwise as viewed along the clicked facet's own rotation axis; Shift reverses it to counterclockwise. Double-click on a face triggers a "center this face" animation via `math::shortest_arc_plane`.
+- `main.rs` — thin `iced::application` entry point; wires `app::HypercubeApp::new/update/view` together. Contains no UI or 3D/4D logic itself.
+- `app.rs` — `HypercubeApp` holds only UI-control state (scale/gap sliders, render mode, settings, the reveal toggle's runtime state). Builds a left control panel plus a right `Shader::new(HypercubeShaderProgram)` viewport. Contains no 3D/4D logic. The sticker-scale/face-gap sliders are hidden behind a "Reveal"/"Hide" toggle button: pressing it bumps a `reveal_generation` counter (same one-shot generation-counter pattern `reset_generation` uses to reach `HypercubeShaderState`) and flips `revealed` immediately, while `reveal_animating` disables the button and hides the sliders until `shader_widget.rs` publishes `Message::RevealAnimationComplete` back once the flourish settles.
+- `shader_widget.rs` — the custom iced `shader::Program`/`Primitive` that owns essentially all rendering and interaction state, independent of `HypercubeApp`. `HypercubeShaderProgram` (per-frame config), `HypercubeShaderState` (persistent: camera, 4D rotation matrix, hover/click/double-click bookkeeping, animation state, the `Hypercube` puzzle state), `HypercubePrimitive` (per-draw snapshot). Mouse/keyboard events are handled here; a `RotateButton` setting assigns one mouse button to camera orbit (+Shift for 4D rotation) and the other to puzzle turn-clicks, so the two never conflict. A turn-click's direction is resolved by `moves::clockwise_sign` to always turn clockwise as viewed along the clicked facet's own rotation axis; Shift reverses it to counterclockwise. Double-click on a face triggers a "center this face" animation via `math::shortest_arc_plane`. A reveal/hide flourish (`AnimatingReveal`) spins the camera 720° in yaw while sticker scale/face gap sweep toward secondary/primary defaults, driven by the same `RedrawRequested`-tick loop as the move/focus animations; camera-drag and turn-click input are ignored while it plays.
 - `renderer.rs` — owns all wgpu resources (buffers, pipelines for standard/normal/depth/debug/sky, textures). Draws all 216 sticker facets with one instanced draw call per pipeline from a single static cube mesh.
 - `camera.rs` — 3D orbit camera (`Camera`, `CameraController`, `Projection`).
 - `math.rs` — CPU-side 4D rotation matrices for the 6 rotation planes, generic `create_4d_plane_rotation`, 4D→3D perspective projection (`project_cube_point`).
@@ -33,7 +34,7 @@ UI, 3D/4D logic, and GPU rendering are deliberately kept in separate layers:
 - `settings.rs` — `AppSettings` persisted via `serde`/`toml`/`directories`.
 - `shaders/*.wgsl` — WGSL shaders sharing `Transform4D` (`rotation_matrix`, `viewer_distance`, `sticker_scale`, `face_gap`), `CameraUniform`, and `StickerInstance` structs plus 4D math functions, all defined once in `math4d.wgsl` and pulled into each pipeline shader via `naga_oil`'s `#import` (composed in `renderer.rs` through a `naga_oil::compose::Composer`, since WGSL itself has no import mechanism).
 
-**Render/interaction flow:** `main.rs` → `HypercubeApp::view()` embeds the `Shader` widget → iced calls `HypercubeShaderProgram::update()` per event (mutates `HypercubeShaderState`) → `draw()` builds a `HypercubePrimitive` snapshot → iced calls `Primitive::prepare()` (uploads buffers via `Renderer::update_*`) then `Primitive::render()` (`Renderer::render()` / `render_debug_aabb()` encode the actual wgpu render passes).
+**Render/interaction flow:** `main.rs` → `app.rs`'s `HypercubeApp::view()` embeds the `Shader` widget → iced calls `HypercubeShaderProgram::update()` per event (mutates `HypercubeShaderState`) → `draw()` builds a `HypercubePrimitive` snapshot → iced calls `Primitive::prepare()` (uploads buffers via `Renderer::update_*`) then `Primitive::render()` (`Renderer::render()` / `render_debug_aabb()` encode the actual wgpu render passes).
 
 
 ## Guidance

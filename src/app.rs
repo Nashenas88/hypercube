@@ -6,7 +6,7 @@ use iced::widget::{Button, Checkbox, Column, PickList, Row, Shader, Slider};
 use iced::{Element, Length, Task};
 
 use crate::settings::{self, ANIMATION_DURATION_MS_RANGE, AppSettings, RotateButton};
-use crate::shader_widget::HypercubeShaderProgram;
+use crate::shader_widget::{HypercubeShaderProgram, PRIMARY_FACE_GAP, PRIMARY_STICKER_SCALE};
 
 /// Rendering modes for visualization
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +78,26 @@ fn tooltip_delay(is_adjusting: bool) -> Duration {
     }
 }
 
+/// Label for the reveal/hide toggle button. `revealed` flips the instant the
+/// button is pressed (so the shader program picks up the new target that
+/// same frame), so the label alone can't read `revealed` directly while
+/// `reveal_animating` is still true or it would flip early - it keeps
+/// reporting the pre-press state until the flourish settles.
+fn reveal_button_label(revealed: bool, reveal_animating: bool) -> &'static str {
+    match (revealed, reveal_animating) {
+        (true, false) => "Hide",
+        (false, false) => "Reveal",
+        (true, true) => "Reveal",
+        (false, true) => "Hide",
+    }
+}
+
+/// Whether the sticker-scale/face-gap sliders should be shown: only once a
+/// reveal has settled, hidden again the instant a hide flourish starts.
+fn sliders_visible(revealed: bool, reveal_animating: bool) -> bool {
+    revealed && !reveal_animating
+}
+
 /// Main application state - handles UI controls only
 #[derive(Debug)]
 pub(crate) struct HypercubeApp {
@@ -91,6 +111,14 @@ pub(crate) struct HypercubeApp {
     sticker_scale_adjusting: bool,
     face_gap_adjusting: bool,
     animation_duration_adjusting: bool,
+    /// Target reveal state. Flips immediately on `ToggleReveal` (so the
+    /// shader program picks up the new direction that same frame), not only
+    /// once the flourish settles.
+    revealed: bool,
+    reveal_generation: u64,
+    /// True from a `ToggleReveal` press until `RevealAnimationComplete`
+    /// arrives; gates the button (disabled) and the sliders (hidden).
+    reveal_animating: bool,
 }
 
 /// Messages that the application can receive
@@ -107,14 +135,16 @@ pub(crate) enum Message {
     AnimationDuration(u32),
     AnimationDurationReleased,
     Reset,
+    ToggleReveal,
+    RevealAnimationComplete { final_scale: f32, final_gap: f32 },
 }
 
 impl HypercubeApp {
     /// Create a new application instance
     pub(crate) fn new() -> Self {
         Self {
-            sticker_scale: 0.02, // Default from existing code
-            face_gap: 0.0,
+            sticker_scale: PRIMARY_STICKER_SCALE,
+            face_gap: PRIMARY_FACE_GAP,
             render_mode: RenderMode::Standard,
             aabb_mode: AABBMode::None,
             debug_mode: false,
@@ -123,6 +153,9 @@ impl HypercubeApp {
             sticker_scale_adjusting: false,
             face_gap_adjusting: false,
             animation_duration_adjusting: false,
+            revealed: false,
+            reveal_generation: 0,
+            reveal_animating: false,
         }
     }
 
@@ -171,6 +204,19 @@ impl HypercubeApp {
             }
             Message::Reset => {
                 self.reset_generation = self.reset_generation.wrapping_add(1);
+            }
+            Message::ToggleReveal => {
+                self.revealed = !self.revealed;
+                self.reveal_generation = self.reveal_generation.wrapping_add(1);
+                self.reveal_animating = true;
+            }
+            Message::RevealAnimationComplete {
+                final_scale,
+                final_gap,
+            } => {
+                self.sticker_scale = final_scale;
+                self.face_gap = final_gap;
+                self.reveal_animating = false;
             }
         }
 
@@ -232,64 +278,72 @@ impl HypercubeApp {
                 );
         }
 
-        controls = controls
-            .push(
-                Column::new()
-                    .spacing(5)
-                    .push(iced::widget::text("Sticker Scale"))
-                    .push(
-                        iced::widget::tooltip(
-                            Slider::new(0.0..=0.9, self.sticker_scale, Message::StickerScale)
-                                .step(0.01f32)
-                                .width(250)
-                                .on_release(Message::StickerScaleReleased),
-                            iced::widget::text(format_sticker_scale(self.sticker_scale)),
-                            iced::widget::tooltip::Position::FollowCursor,
-                        )
-                        .delay(tooltip_delay(self.sticker_scale_adjusting))
-                        .style(iced::widget::container::rounded_box),
-                    ),
-            )
-            .push(
-                Column::new()
-                    .spacing(5)
-                    .push(iced::widget::text("Face Gap"))
-                    .push(
-                        iced::widget::tooltip(
-                            Slider::new(0.0..=1.5, self.face_gap, Message::FaceGap)
-                                .step(0.01f32)
-                                .width(250)
-                                .on_release(Message::FaceGapReleased),
-                            iced::widget::text(format_face_gap(self.face_gap)),
-                            iced::widget::tooltip::Position::FollowCursor,
-                        )
-                        .delay(tooltip_delay(self.face_gap_adjusting))
-                        .style(iced::widget::container::rounded_box),
-                    ),
-            )
-            .push(
-                Column::new()
-                    .spacing(5)
-                    .push(iced::widget::text("Animation Duration (ms)"))
-                    .push(
-                        iced::widget::tooltip(
-                            Slider::new(
-                                ANIMATION_DURATION_MS_RANGE,
-                                self.settings.animation_duration_ms,
-                                Message::AnimationDuration,
+        controls = controls.push(
+            Button::new(reveal_button_label(self.revealed, self.reveal_animating))
+                .on_press_maybe((!self.reveal_animating).then_some(Message::ToggleReveal)),
+        );
+
+        if sliders_visible(self.revealed, self.reveal_animating) {
+            controls = controls
+                .push(
+                    Column::new()
+                        .spacing(5)
+                        .push(iced::widget::text("Sticker Scale"))
+                        .push(
+                            iced::widget::tooltip(
+                                Slider::new(0.0..=0.9, self.sticker_scale, Message::StickerScale)
+                                    .step(0.01f32)
+                                    .width(250)
+                                    .on_release(Message::StickerScaleReleased),
+                                iced::widget::text(format_sticker_scale(self.sticker_scale)),
+                                iced::widget::tooltip::Position::FollowCursor,
                             )
-                            .step(10u32)
-                            .width(250)
-                            .on_release(Message::AnimationDurationReleased),
-                            iced::widget::text(format_animation_duration(
-                                self.settings.animation_duration_ms,
-                            )),
-                            iced::widget::tooltip::Position::FollowCursor,
+                            .delay(tooltip_delay(self.sticker_scale_adjusting))
+                            .style(iced::widget::container::rounded_box),
+                        ),
+                )
+                .push(
+                    Column::new()
+                        .spacing(5)
+                        .push(iced::widget::text("Face Gap"))
+                        .push(
+                            iced::widget::tooltip(
+                                Slider::new(0.0..=1.5, self.face_gap, Message::FaceGap)
+                                    .step(0.01f32)
+                                    .width(250)
+                                    .on_release(Message::FaceGapReleased),
+                                iced::widget::text(format_face_gap(self.face_gap)),
+                                iced::widget::tooltip::Position::FollowCursor,
+                            )
+                            .delay(tooltip_delay(self.face_gap_adjusting))
+                            .style(iced::widget::container::rounded_box),
+                        ),
+                );
+        }
+
+        controls = controls.push(
+            Column::new()
+                .spacing(5)
+                .push(iced::widget::text("Animation Duration (ms)"))
+                .push(
+                    iced::widget::tooltip(
+                        Slider::new(
+                            ANIMATION_DURATION_MS_RANGE,
+                            self.settings.animation_duration_ms,
+                            Message::AnimationDuration,
                         )
-                        .delay(tooltip_delay(self.animation_duration_adjusting))
-                        .style(iced::widget::container::rounded_box),
-                    ),
-            );
+                        .step(10u32)
+                        .width(250)
+                        .on_release(Message::AnimationDurationReleased),
+                        iced::widget::text(format_animation_duration(
+                            self.settings.animation_duration_ms,
+                        )),
+                        iced::widget::tooltip::Position::FollowCursor,
+                    )
+                    .delay(tooltip_delay(self.animation_duration_adjusting))
+                    .style(iced::widget::container::rounded_box),
+                ),
+        );
 
         // Right pane with 3D viewport
         let viewport = Shader::new(HypercubeShaderProgram::new(
@@ -301,6 +355,8 @@ impl HypercubeApp {
             self.settings.rotate_button,
             self.settings.animation_duration_ms,
             self.reset_generation,
+            self.reveal_generation,
+            self.revealed,
         ))
         .width(Length::Fill)
         .height(Length::Fill);
@@ -353,5 +409,27 @@ mod tests {
     #[test]
     fn tooltip_delay_is_nonzero_while_idle() {
         assert_eq!(tooltip_delay(false), Duration::from_millis(400));
+    }
+
+    #[test]
+    fn reveal_button_label_reads_settled_state_while_idle() {
+        assert_eq!(reveal_button_label(false, false), "Reveal");
+        assert_eq!(reveal_button_label(true, false), "Hide");
+    }
+
+    #[test]
+    fn reveal_button_label_keeps_pre_press_text_while_animating() {
+        // revealed already flipped to the target, but the flourish hasn't
+        // settled yet - label should still read the state being left.
+        assert_eq!(reveal_button_label(true, true), "Reveal");
+        assert_eq!(reveal_button_label(false, true), "Hide");
+    }
+
+    #[test]
+    fn sliders_visible_only_once_revealed_and_settled() {
+        assert!(!sliders_visible(false, false));
+        assert!(!sliders_visible(true, true));
+        assert!(!sliders_visible(false, true));
+        assert!(sliders_visible(true, false));
     }
 }
