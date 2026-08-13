@@ -20,6 +20,9 @@ const LIGHT_RIGHT_WEIGHT: f32 = 0.4;
 /// forward (headlight) direction.
 const LIGHT_UP_WEIGHT: f32 = 0.5;
 
+const INITIAL_YAW: f32 = -45.0;
+const INITIAL_PITCH: f32 = 15.0;
+
 /// 3D camera representing the viewer's position and orientation in space.
 ///
 /// Uses a standard look-at camera model with eye position, target point, and up vector.
@@ -102,8 +105,8 @@ impl CameraController {
     pub(crate) fn new(distance: f32) -> Self {
         Self {
             distance,
-            yaw: 0.0,
-            pitch: 0.0,
+            yaw: INITIAL_YAW,
+            pitch: INITIAL_PITCH,
         }
     }
 
