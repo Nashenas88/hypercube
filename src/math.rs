@@ -219,7 +219,7 @@ pub(crate) fn create_4d_plane_rotation(
     v: Vector4<f32>,
     angle: f32,
 ) -> Matrix4<f32> {
-    let (cos, sin) = (angle.cos(), angle.sin());
+    let (sin, cos) = angle.sin_cos();
     let outer_uu = u * u.transpose();
     let outer_vv = v * v.transpose();
     let outer_vu = v * u.transpose();
