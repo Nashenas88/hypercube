@@ -7,7 +7,7 @@
 use iced::{Point, Rectangle};
 use nalgebra::{Matrix4, Point3, Vector3, Vector4};
 
-use crate::AABBMode;
+use crate::app::AABBMode;
 use crate::camera::{Camera, Projection};
 use crate::geometry::NORMAL_TO_BASE_INDICES;
 use crate::math::{

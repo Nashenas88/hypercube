@@ -11,6 +11,7 @@ use iced::widget::{Action, shader};
 use iced::{Event, Point, Rectangle, event, mouse};
 use nalgebra::{Matrix4, Vector3, Vector4};
 
+use crate::app::{AABBMode, Message, RenderMode};
 use crate::camera::{Camera, CameraController, Projection};
 use crate::geometry::{
     BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES, VERTEX_NORMAL_INDICES,
@@ -26,7 +27,6 @@ use crate::piece::{
 use crate::ray_casting::{calculate_mouse_ray, find_intersected_sticker};
 use crate::renderer::{DebugInstanceWithDistance, Renderer};
 use crate::settings::RotateButton;
-use crate::{AABBMode, Message, RenderMode};
 
 /// An in-progress move's animation: piece state has already been committed
 /// atomically by `apply_move`; this only drives the visual sweep from the

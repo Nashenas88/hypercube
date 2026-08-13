@@ -12,7 +12,7 @@ use iced::{Rectangle, Size};
 use naga_oil::compose::{ComposableModuleDescriptor, Composer, NagaModuleDescriptor};
 use wgpu::util::DeviceExt;
 
-use crate::RenderMode;
+use crate::app::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
 use crate::geometry::{CUBE_VERTICES, VERTEX_NORMAL_INDICES};
 use crate::math::{BASE_STICKER_SIZE, VIEWER_DISTANCE};
