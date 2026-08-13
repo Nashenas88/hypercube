@@ -113,8 +113,8 @@ impl HypercubeApp {
     /// Create a new application instance
     pub(crate) fn new() -> Self {
         Self {
-            sticker_scale: 0.5, // Default from existing code
-            face_gap: 0.4,
+            sticker_scale: 0.02, // Default from existing code
+            face_gap: 0.0,
             render_mode: RenderMode::Standard,
             aabb_mode: AABBMode::None,
             debug_mode: false,
