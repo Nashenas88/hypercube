@@ -37,7 +37,7 @@ pub(crate) enum Color {
     Orange,
     // Two more for the 4D aspect
     Purple,
-    Brown,
+    Cyan,
 }
 
 impl From<Color> for Vector4<f32> {
@@ -50,14 +50,22 @@ impl From<Color> for Vector4<f32> {
     /// * `color` - The color enum value to convert
     fn from(color: Color) -> Self {
         match color {
-            Color::White => Vector4::new(1.0, 1.0, 1.0, 1.0),
-            Color::Yellow => Vector4::new(1.0, 1.0, 0.0, 1.0),
-            Color::Blue => Vector4::new(0.1, 0.1, 1.0, 1.0),
-            Color::Green => Vector4::new(0.0, 1.0, 0.0, 1.0),
-            Color::Red => Vector4::new(1.0, 0.0, 0.0, 1.0),
-            Color::Orange => Vector4::new(1.0, 0.5, 0.0, 1.0),
-            Color::Purple => Vector4::new(0.0, 0.5, 1.0, 1.0),
-            Color::Brown => Vector4::new(0.5, 0.25, 0.0, 1.0),
+            // center
+            Color::Cyan => Vector4::new(0.0, 1.0, 1.0, 1.0),    // #00FFFF
+            // left
+            Color::Green => Vector4::new(0.0, 1.0, 0.0, 1.0),   // #00FF00
+            // bottom
+            Color::Yellow => Vector4::new(1.0, 1.0, 0.0, 1.0),  // #FFFF00
+            // front
+            Color::Red => Vector4::new(1.0, 0.0, 0.0, 1.0),     // #FF0000
+            // back
+            Color::Orange => Vector4::new(1.0, 0.65, 0.0, 1.0), // #FFA500
+            // top
+            Color::White => Vector4::new(1.0, 1.0, 1.0, 1.0),   // #FFFFFF
+            // right
+            Color::Blue => Vector4::new(0.1, 0.1, 1.0, 1.0),    // #1A1AFF
+            // void
+            Color::Purple => Vector4::new(0.5, 0.0, 1.0, 1.0),  // #8000FF
         }
     }
 }

@@ -26,6 +26,7 @@ impl Piece {
     /// Number of nonzero axes in `position`, i.e. how many stickers this
     /// piece has: 0 = invisible center, 1 = cell-center, 2 = face, 3 = edge,
     /// 4 = corner.
+    #[cfg(test)]
     pub(crate) fn facet_count(&self) -> u8 {
         self.position.iter().filter(|c| **c != 0).count() as u8
     }
@@ -60,14 +61,22 @@ pub(crate) struct StickerInstance {
 
 /// Colors for the 8 sides of the puzzle, indexed by `face_id_for`.
 const COLORS: [Color; 8] = [
-    Color::White,
-    Color::Yellow,
-    Color::Blue,
+    // center
+    Color::Cyan,
+    // left
     Color::Green,
+    // bottom
+    Color::Yellow,
+    // front
     Color::Red,
+    // back
     Color::Orange,
+    // top
+    Color::White,
+    // right
+    Color::Blue,
+    // void
     Color::Purple,
-    Color::Brown,
 ];
 
 /// Maps a (axis, sign) side to one of the 8 face ids, reproducing the same
@@ -158,6 +167,7 @@ impl Hypercube {
 
     /// True iff every piece's colors match its position's home-side colors,
     /// i.e. no piece has ever been moved out of its solved orientation.
+    #[cfg(test)]
     pub(crate) fn is_solved(&self) -> bool {
         self.pieces.iter().all(|p| {
             (0..4).all(|axis| match (p.position[axis], p.colors[axis]) {
@@ -324,7 +334,7 @@ mod tests {
         let mut cube = Hypercube::solved();
         // Manually desync one piece's color from its home side.
         let slot = index_of([1, 1, 1, 1]);
-        cube.pieces[slot].colors[0] = Some(Color::Brown);
+        cube.pieces[slot].colors[0] = Some(Color::Cyan);
         assert!(!cube.is_solved());
     }
 
