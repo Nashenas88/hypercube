@@ -48,6 +48,7 @@ impl From<Color> for Vector4<f32> {
     ///
     /// # Arguments
     /// * `color` - The color enum value to convert
+    #[rustfmt::skip]
     fn from(color: Color) -> Self {
         match color {
             // center
