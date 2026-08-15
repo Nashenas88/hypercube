@@ -1,5 +1,8 @@
 /target
 /logs
+perf.data
+perf.data.old
+perf-baseline.data
 .vscode/
 CLAUDE.local.md
 .claude/settings.local.md
