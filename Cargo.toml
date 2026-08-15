@@ -27,3 +27,13 @@ wgpu = { version = "27.0", default-features = false, features = [
     "wgsl",
     "naga-ir",
 ] }
+
+[profile.release]
+debug=true
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
+[[bench]]
+name = "instances"
+harness = false

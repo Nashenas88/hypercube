@@ -115,7 +115,7 @@ const SECONDARY_FACE_GAP: f32 = 1.5;
 /// exact same rotation formula `apply_move` used, so the last animated
 /// frame always lines up perfectly with the static post-move render it
 /// hands off to.
-fn sticker_instances_for_render(state: &HypercubeShaderState) -> Vec<StickerInstance> {
+pub fn sticker_instances_for_render(state: &HypercubeShaderState) -> Vec<StickerInstance> {
     let Some(animating) = &state.animating_move else {
         return generate_sticker_instances(&state.hypercube);
     };
@@ -312,7 +312,7 @@ impl shader::Primitive for HypercubePrimitive {
 }
 
 /// Internal state managed by the shader widget
-pub(crate) struct HypercubeShaderState {
+pub struct HypercubeShaderState {
     pub(crate) camera: Camera,
     camera_controller: CameraController,
     projection: Projection,
@@ -346,7 +346,7 @@ pub(crate) struct HypercubeShaderState {
 }
 
 /// The shader program that handles 4D hypercube rendering
-pub(crate) struct HypercubeShaderProgram {
+pub struct HypercubeShaderProgram {
     sticker_scale: f32,
     face_gap: f32,
     render_mode: RenderMode,
@@ -579,7 +579,7 @@ impl HypercubeShaderProgram {
     /// 4D transformation and 3D projection. Shading normals are computed
     /// directly in the vertex shader from each instance's own basis instead
     /// (see `compute_world_normal` in shader.wgsl/normal_shader.wgsl).
-    fn calculate_indices(rotation_4d: &nalgebra::Matrix4<f32>) -> Vec<u16> {
+    pub fn calculate_indices(rotation_4d: &nalgebra::Matrix4<f32>) -> Vec<u16> {
         let mut indices = Vec::with_capacity(288); // 36 indices * 8 4d faces
 
         for (face_idx, (face_center_4d, fixed_dim)) in

@@ -10,11 +10,11 @@ mod camera;
 mod geometry;
 mod math;
 mod moves;
-mod piece;
+pub mod piece;
 mod ray_casting;
 mod renderer;
 mod settings;
-mod shader_widget;
+pub mod shader_widget;
 
 /// Entry point for the hypercube visualization application
 pub fn run() -> iced::Result {

@@ -45,7 +45,7 @@ pub(crate) struct Hypercube {
 /// looks up each facet's live color from a `Hypercube`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct StickerInstance {
+pub struct StickerInstance {
     /// 4D position of the sticker
     pub(crate) position_4d: [f32; 4],
     /// RGBA color of the sticker
