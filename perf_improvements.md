@@ -1,20 +1,67 @@
 # Rendering performance improvements
 
-Findings from a review of the render hot path (2026-08-09), written up for a
-later session. Nothing here is implemented yet.
-
-Context: these were found while fixing the sticker-normal desync, which moved
-normal computation out of a static 48-entry uniform table and into
-`compute_world_normal` in the vertex shader, derived per-instance from
-`instance.basis`. That change removed the `NormalsUniform` /  `cached_normals`
-system entirely; `calculate_normals_and_indices` became `calculate_indices`.
-
-Line numbers are from that commit and will drift — grep for the quoted code.
+Findings from a review of the render hot path. Nothing here is implemented
+yet. Line numbers drift — grep for the quoted code.
 
 **Suggested order:** #1 and #3 first (safe, independent, high value), then #2
 (contained shader edit), then #5 last. #5 is the real payoff but is the only
 restructure, and doing it after #1 means the winding-correction heuristic gets
 exercised for the first time before you build on it. #4 is subsumed by #5.
+
+---
+
+## How to collect perf numbers
+
+There's no benchmarking or profiling infrastructure in the project yet (no
+`criterion`, no FPS counter, no GPU timestamp queries) and redraws are
+event-driven, not continuous — the app renders nothing at true idle (see
+`Event::Window(RedrawRequested)` handling in `src/shader_widget.rs`). "Leave
+it idle and watch the FPS" is not a usable baseline here. A real measurement
+needs a workload and a way to read the result.
+
+1. **Always measure `--release`.** `cargo build --release` /
+   `cargo run --release`. Debug-build timings aren't representative of
+   anything in this doc.
+
+2. **Use a reproducible, self-driving workload.** The Reveal/Hide flourish
+   (`AnimatingReveal`, a fixed-duration 720° yaw spin — see the reveal
+   button in the UI) keeps requesting redraws on its own for its whole
+   duration with no mouse input needed, so it's the natural repeatable
+   benchmark scenario: same duration and frame count every run, no
+   human-input variance between samples. Repeatedly triggering a move
+   animation works too. Avoid ad hoc mouse-dragging as your measured
+   workload — it's not reproducible run to run.
+
+3. **Two complementary techniques:**
+   - **Coarse wall-clock frame timing**, good for before/after deltas on
+     #1, #2, and #4: temporarily add an `Instant`-based rolling frame-time
+     average logged via `log::info!` (matching the existing
+     `log::debug!`/`log::warn!` calls already in `calculate_indices`), run
+     with `RUST_LOG=info cargo run --release`, and diff the average over one
+     full reveal-animation run before vs. after the change. This is
+     temporary local instrumentation, not something to commit, and it
+     measures CPU submission time, not pure GPU time.
+   - **GPU ground truth via an external frame-capture profiler** (RenderDoc
+     on the Vulkan backend, or a platform equivalent) — the only way to
+     directly confirm the invocation-count claims in this doc, e.g. item
+     #1's 62,208 vs. 7,776 vertex shader invocations, or item #5's up to 8
+     separate draws. Wall-clock frame time alone conflates GPU cost with CPU
+     submission time, vsync capping, and OS scheduler noise.
+
+4. **Controls:** same window size and same puzzle state at the start of each
+   run (solved cube, no pending move) so instance/vertex counts match across
+   runs; take several samples (e.g. 5 full reveal runs) and compare the
+   median, not one run — 216 instances is small enough that scheduler/driver
+   noise can dominate a single sample; measure on the lowest-spec hardware
+   you actually care about, since a modern desktop GPU may hide all of this
+   under vsync.
+
+5. **#3 needs a different measurement.** It's CPU/upload-bound, not
+   GPU-bound, so the GPU-profiler technique above won't show it at all. Its
+   win is clearest by comparing CPU time spent in `draw()`/
+   `Primitive::prepare()` between a plain camera-drag (rotation changes, but
+   `Hypercube` state and animation don't) before and after adding dirty
+   flags.
 
 ---
 
@@ -52,8 +99,7 @@ Because every instance receives every chunk, the winding correction computed in
 reaches the instances it was computed for**. Fixing this draw call is what
 makes that correction start mattering, which may change how culling looks.
 
-Note the heuristic it uses is itself suspect and was deliberately left alone
-during the normals fix:
+The heuristic it uses is itself suspect:
 
 ```rust
 let centroid = transformed_vertices.iter().sum::<Vector3<f32>>() / 8.0;
@@ -81,12 +127,27 @@ and `draw_indexed(0..36, 0, 0..216)`.
 
 **Impact: medium. Confidence: safe, contained.**
 
-`src/shaders/shader.wgsl` (and the identical copy in `normal_shader.wgsl`).
-Per vertex, `vs_main` currently performs 6 `mat4x4 * vec4` multiplies:
+The shared 4D math (`Transform4D`, `is_face_visible`, `compute_world_normal`,
+`face_push_offset_3d`) lives once in `src/shaders/math4d.wgsl` and is pulled
+into `shader.wgsl`, `normal_shader.wgsl`, and `depth_shader.wgsl` via naga_oil
+`#import` — so a fix here only needs to happen in one place.
+
+Per vertex, `vs_main` performs **7** `mat4x4 * vec4` multiplies:
 
 - 4 inside `compute_world_normal` (`p0`, `pi`, `pj`, `pk`)
 - 1 for the vertex position (`transform.rotation_matrix * vertex_4d`)
 - 1 in `is_face_visible`
+- 1 in `face_push_offset_3d`
+
+### A literal duplicate, not just a hoist opportunity
+
+`is_face_visible(instance.face_normal_4d, ...)` and
+`face_push_offset_3d(instance.face_normal_4d, ...)` are both called from
+`vs_main` with the exact same `instance.face_normal_4d` input, and each
+computes `rotation_matrix * face_normal_4d` internally — the same
+multiplication, done twice, every vertex. Hoist once:
+`let rotated_face_normal = transform.rotation_matrix * instance.face_normal_4d;`
+and pass it to both call sites.
 
 By linearity, `R * (center + basis[i]) == R*center + R*basis[i]`. Hoisting
 `R*center` and the three `R*basis[i]` once per vertex serves **both** the
@@ -110,17 +171,18 @@ let rotated_vertex_4d = rc + v.x * rb0 + v.y * rb1 + v.z * rb2;
 memory on most drivers. Rewriting the six switch arms to select directly among
 the three hoisted `vec4` locals eliminates the dynamic indexing entirely.
 
-### Rejected alternative — do not do this
+### CPU-side pre-rotation — open question, not a clean win
 
 Pre-rotating `basis` and the sticker center **on the CPU** and storing them in
-the instance buffer looks attractive (216 instances vs 7,776 vertices) but does
-not work cleanly: `sticker_center_4d` is derived in-shader from
-`transform.face_spacing`, a live UI slider. Moving it CPU-side couples the CPU
-to slider state and pulls the face-spread math out of the shader — precisely
-where `sticker_instances_for_render`'s animation compensation assumes it lives
-(see the long comment about subtracting the shader's fixed unrotated
-contribution back out). `is_face_visible` would still need `R * face_center_4d`
-regardless.
+the instance buffer looks attractive (216 instances vs 7,776 vertices), but
+`is_face_visible` and `face_push_offset_3d` both need `R * (a live
+per-instance vector)` and would stay GPU-side regardless. More importantly,
+`rotation_4d` changes every frame during a drag, so CPU-side pre-rotation
+would mean re-deriving and re-uploading all 216 instances' rotated
+basis/center on every dragged frame — directly in tension with #3's goal of
+*not* re-uploading instances when only the camera/rotation moves. Worth
+evaluating that tradeoff before committing to it; the shader-side hoist above
+gets most of the benefit without it.
 
 ---
 
@@ -188,11 +250,18 @@ and you break hit-testing, not just highlighting.
 
 ### The unlock
 
-`StickerInstance` (`src/piece.rs`) already carries `_padding: [u32; 3]` — **12
-free bytes**. Spend 4 of them on a `facet_index: u32`, have the shader compare
-*that* against `highlighting.hovered_sticker_index` instead of
-`instance_index`, and the instance buffer becomes free to reorder at zero size
-cost.
+`StickerInstance` (`src/piece.rs`) is fully packed at 96 bytes
+(`position_4d` 16 + `color` 16 + `basis` 48 + `face_normal_4d` 16) — no spare
+bytes. Adding a `facet_index: u32` grows the struct: 96 → 100 bytes of actual
+data, which `#[repr(C)]`/`bytemuck::Pod` vec4 alignment will most likely round
+back up to 112. That's a ~17% bump in per-instance GPU upload bandwidth
+(216 × 96 B ≈ 21 KB → 216 × 112 B ≈ 24 KB) to buy the reorder — almost
+certainly worth it once #1/#4 land (16× less vertex work dwarfs a few KB of
+instance upload), but worth accounting for rather than assuming it's free.
+
+The mechanism: spend a `u32` on `facet_index`, have the shader compare *that*
+against `highlighting.hovered_sticker_index` instead of `instance_index`, and
+the instance buffer becomes free to reorder.
 
 Then:
 
@@ -220,3 +289,7 @@ only **4 distinct values** — `unit_vectors(free_axes(axis))` for `axis` in
 bandwidth. It conflicts with animation, though: mid-turn instances carry
 arbitrary rotated bases, so it needs a flag or a separate path. Probably not
 worth it unless the instance upload shows up in a profile after #3.
+
+This competes with #5 for the same struct bytes — neither is free. If both
+ever land, do this one first and let #5's `facet_index` reuse the bandwidth
+this frees up instead of growing the struct further.
