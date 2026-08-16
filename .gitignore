@@ -2,8 +2,7 @@
 /logs
 perf.data
 perf.data.old
-perf-baseline.data
-perf-postfix.data
+perf-*.data
 .vscode/
 CLAUDE.local.md
 .claude/settings.local.md

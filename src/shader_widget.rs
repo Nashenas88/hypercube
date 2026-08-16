@@ -4,6 +4,7 @@
 //! logic, camera controls, and 4D transformations. It follows Option C architecture
 //! where the shader widget manages its own state independently.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::wgpu;
@@ -262,10 +263,12 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) projection: Projection,
     pub(crate) rotation_4d: Matrix4<f32>,
     pub(crate) ui_controls: UiControls,
-    pub(crate) cached_indices: Vec<u16>,
+    pub(crate) cached_indices: Arc<[u16]>,
+    pub(crate) indices_generation: u64,
     pub(crate) hovered_sticker: Option<usize>,
     pub(crate) debug_instances: Vec<DebugInstanceWithDistance>,
-    pub(crate) sticker_instances: Vec<StickerInstance>,
+    pub(crate) sticker_instances: Arc<[StickerInstance]>,
+    pub(crate) sticker_generation: u64,
 }
 
 impl shader::Primitive for HypercubePrimitive {
@@ -290,10 +293,10 @@ impl shader::Primitive for HypercubePrimitive {
         );
         pipeline.update_camera(queue, &self.camera, &self.projection);
         pipeline.update_light(queue, &self.camera);
-        pipeline.update_indices(queue, &self.cached_indices);
+        pipeline.update_indices(queue, &self.cached_indices, self.indices_generation);
         pipeline.update_highlighting(queue, self.hovered_sticker);
         pipeline.update_debug_instances(queue, &self.debug_instances);
-        pipeline.update_sticker_instances(queue, &self.sticker_instances);
+        pipeline.update_sticker_instances(queue, &self.sticker_instances, self.sticker_generation);
         pipeline.set_render_mode(self.ui_controls.render_mode);
     }
 
@@ -320,7 +323,15 @@ pub struct HypercubeShaderState {
     mouse_pressed: bool,
     last_mouse_pos: Option<Point>,
     shift_pressed: bool,
-    cached_indices: Vec<u16>,
+    cached_indices: Arc<[u16]>,
+    /// Bumped every time `cached_indices` is replaced; carried on
+    /// `HypercubePrimitive` so `Renderer` can skip re-uploading the index
+    /// buffer to the GPU when it hasn't actually changed since last frame.
+    indices_generation: u64,
+    cached_sticker_instances: Arc<[StickerInstance]>,
+    /// Bumped every time `cached_sticker_instances` is replaced; same
+    /// upload-skipping purpose as `indices_generation`.
+    sticker_generation: u64,
     hovered_sticker: Option<usize>,
     debug_instances: Vec<DebugInstanceWithDistance>,
     hypercube: Hypercube,
@@ -343,6 +354,23 @@ pub struct HypercubeShaderState {
     last_redraw_instant: Option<Instant>,
     reset_generation: u64,
     reveal_generation: u64,
+}
+
+impl HypercubeShaderState {
+    /// Replaces `cached_indices` and bumps `indices_generation`, so
+    /// `Renderer::update_indices` can tell this frame's data apart from
+    /// what's already on the GPU.
+    fn set_cached_indices(&mut self, indices: Vec<u16>) {
+        self.cached_indices = indices.into();
+        self.indices_generation += 1;
+    }
+
+    /// Replaces `cached_sticker_instances` and bumps `sticker_generation`,
+    /// mirroring `set_cached_indices`.
+    fn set_cached_sticker_instances(&mut self, instances: Vec<StickerInstance>) {
+        self.cached_sticker_instances = instances.into();
+        self.sticker_generation += 1;
+    }
 }
 
 /// The shader program that handles 4D hypercube rendering
@@ -407,6 +435,8 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.hovered_sticker = None;
             state.debug_instances.clear();
             state.reset_generation = self.reset_generation;
+            let instances = sticker_instances_for_render(state);
+            state.set_cached_sticker_instances(instances);
             return Some(Action::request_redraw());
         }
 
@@ -450,6 +480,8 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.reveal_gap_override = Some(self.face_gap);
             state.reveal_generation = self.reveal_generation;
             state.last_redraw_instant = None;
+            let instances = sticker_instances_for_render(state);
+            state.set_cached_sticker_instances(instances);
             return Some(Action::request_redraw());
         }
 
@@ -463,14 +495,23 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 
         // Check if 4D rotation changed and recalculate indices
         let mut rotation_changed = false;
+        // Whether `sticker_instances_for_render` needs to run again this
+        // tick: true whenever a move animation started, ended, or is still
+        // in progress (its swept position changes every tick), false when
+        // `animating_move` was and still is absent.
+        let mut regenerate_stickers = false;
         let mut reveal_completed_message: Option<Message> = None;
 
         let status = match event {
             Event::Mouse(mouse_event) => {
                 let old_rotation = state.rotation_4d;
+                let was_animating = state.animating_move.is_some();
                 let result = self.handle_mouse_event(state, mouse_event, bounds, cursor);
                 if state.rotation_4d != old_rotation {
                     rotation_changed = true;
+                }
+                if was_animating || state.animating_move.is_some() {
+                    regenerate_stickers = true;
                 }
                 result
             }
@@ -481,9 +522,14 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                     .map(|last| now.duration_since(last))
                     .unwrap_or_default();
 
+                let was_animating = state.animating_move.is_some();
                 let move_tick = Self::advance_animation(state, delta);
                 let focus_tick = Self::advance_focus_animation(state, delta);
                 let reveal_tick = Self::advance_reveal_animation(state, delta);
+
+                if was_animating || state.animating_move.is_some() {
+                    regenerate_stickers = true;
+                }
 
                 if state.animating_move.is_none()
                     && state.animating_focus.is_none()
@@ -538,7 +584,11 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 
         // Recalculate indices if rotation changed
         if rotation_changed {
-            state.cached_indices = Self::calculate_indices(&state.rotation_4d);
+            state.set_cached_indices(Self::calculate_indices(&state.rotation_4d));
+        }
+        if regenerate_stickers {
+            let instances = sticker_instances_for_render(state);
+            state.set_cached_sticker_instances(instances);
         }
 
         if let Some(message) = reveal_completed_message {
@@ -567,9 +617,11 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 render_mode: self.render_mode,
             },
             cached_indices: state.cached_indices.clone(),
+            indices_generation: state.indices_generation,
             hovered_sticker: state.hovered_sticker,
             debug_instances: state.debug_instances.clone(),
-            sticker_instances: sticker_instances_for_render(state),
+            sticker_instances: state.cached_sticker_instances.clone(),
+            sticker_generation: state.sticker_generation,
         }
     }
 }
@@ -1051,7 +1103,9 @@ impl Default for HypercubeShaderState {
         };
 
         let rotation_4d = nalgebra::Matrix4::identity();
-        let cached_indices = HypercubeShaderProgram::calculate_indices(&rotation_4d);
+        let cached_indices = HypercubeShaderProgram::calculate_indices(&rotation_4d).into();
+        let hypercube = Hypercube::solved();
+        let cached_sticker_instances = generate_sticker_instances(&hypercube).into();
 
         Self {
             camera,
@@ -1062,9 +1116,12 @@ impl Default for HypercubeShaderState {
             last_mouse_pos: None,
             shift_pressed: false,
             cached_indices,
+            indices_generation: 0,
+            cached_sticker_instances,
+            sticker_generation: 0,
             hovered_sticker: None,
             debug_instances: Vec::new(),
-            hypercube: Hypercube::solved(),
+            hypercube,
             animating_move: None,
             animating_focus: None,
             animating_reveal: None,
@@ -1417,6 +1474,7 @@ mod tests {
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let sticker_generation_before = state.sticker_generation;
         let action = program.update(
             &mut state,
             &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
@@ -1428,6 +1486,132 @@ mod tests {
         assert!(state.hypercube.is_solved());
         assert!(state.animating_move.is_none());
         assert_eq!(state.reset_generation, 1);
+        assert_eq!(
+            state.sticker_generation,
+            sticker_generation_before + 1,
+            "reset must regenerate cached sticker instances, not leave the \
+             pre-reset (mid-move) cache in place"
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(state.cached_sticker_instances.as_ref()),
+            bytemuck::cast_slice::<_, u8>(&generate_sticker_instances(&Hypercube::solved())),
+        );
+    }
+
+    /// A `RedrawRequested` tick with nothing animating and no input must not
+    /// regenerate or re-upload cached indices/sticker instances - the "camera
+    /// at rest" case #3's generation-counter dirty-flag mechanism exists to
+    /// skip.
+    #[test]
+    fn idle_redraw_does_not_bump_generations() {
+        let mut state = HypercubeShaderState::default();
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            RenderMode::Standard,
+            AABBMode::None,
+            RotateButton::default(),
+            250,
+            state.reset_generation,
+            state.reveal_generation,
+            false,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+
+        program.update(
+            &mut state,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+
+        assert_eq!(state.indices_generation, 0);
+        assert_eq!(state.sticker_generation, 0);
+    }
+
+    /// Clicking an actionable facet starts a move animation and must
+    /// regenerate (and bump the generation of) cached sticker instances -
+    /// otherwise the render would keep showing the pre-move snapshot.
+    #[test]
+    fn clicking_actionable_facet_bumps_sticker_generation() {
+        let mut state = HypercubeShaderState::default();
+        let sticker_index = FACET_TABLE
+            .iter()
+            .position(|f| f.is_actionable)
+            .expect("at least one actionable facet exists");
+        state.hovered_sticker = Some(sticker_index);
+        let sticker_generation_before = state.sticker_generation;
+
+        let rotate_button = RotateButton::default();
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            RenderMode::Standard,
+            AABBMode::None,
+            rotate_button,
+            250,
+            state.reset_generation,
+            state.reveal_generation,
+            false,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
+
+        program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(rotate_button.click_button())),
+            bounds,
+            cursor,
+        );
+
+        assert!(state.animating_move.is_some(), "click must start a move");
+        assert_eq!(state.sticker_generation, sticker_generation_before + 1);
+    }
+
+    /// A "center this face" animation tick rotates `rotation_4d` every frame
+    /// but never touches `Hypercube` state or `animating_move` - it must bump
+    /// `indices_generation` (the winding-corrected index buffer depends on
+    /// rotation) but leave `sticker_generation` untouched.
+    #[test]
+    fn focus_animation_tick_bumps_indices_generation_but_not_sticker_generation() {
+        let mut state = HypercubeShaderState {
+            animating_focus: Some(AnimatingFocus {
+                start_rotation: Matrix4::identity(),
+                plane: (
+                    Vector4::new(1.0, 0.0, 0.0, 0.0),
+                    Vector4::new(0.0, 1.0, 0.0, 0.0),
+                ),
+                total_angle: 90.0,
+                elapsed: Duration::ZERO,
+                duration: Duration::from_millis(250),
+            }),
+            ..Default::default()
+        };
+        let indices_generation_before = state.indices_generation;
+        let sticker_generation_before = state.sticker_generation;
+
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            RenderMode::Standard,
+            AABBMode::None,
+            RotateButton::default(),
+            250,
+            state.reset_generation,
+            state.reveal_generation,
+            false,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+
+        program.update(
+            &mut state,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+
+        assert_eq!(state.indices_generation, indices_generation_before + 1);
+        assert_eq!(state.sticker_generation, sticker_generation_before);
     }
 
     /// At `t=0` a reveal animation's overrides/yaw must exactly reproduce

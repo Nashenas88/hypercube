@@ -51,6 +51,13 @@ pub(crate) struct Renderer {
     instance_buffer: wgpu::Buffer,
     /// Index buffers for each 4D face
     face_index_buffer: wgpu::Buffer,
+    /// Generation of the indices last uploaded to `face_index_buffer`, so
+    /// `update_indices` can skip re-uploading unchanged data.
+    last_indices_generation: Option<u64>,
+    /// Generation of the sticker instances last uploaded to
+    /// `instance_buffer`, so `update_sticker_instances` can skip
+    /// re-uploading unchanged data.
+    last_sticker_generation: Option<u64>,
     /// CPU-side camera uniform data
     camera_uniform: CameraUniform,
     /// GPU buffer containing camera matrices
@@ -1139,6 +1146,8 @@ impl Renderer {
             current_render_mode: ui_controls.render_mode,
             vertex_buffer,
             face_index_buffer,
+            last_indices_generation: None,
+            last_sticker_generation: None,
             num_stickers,
             instance_buffer,
             camera_uniform,
@@ -1263,16 +1272,30 @@ impl Renderer {
         );
     }
 
-    pub(crate) fn update_indices(&mut self, queue: &Queue, indices: &[u16]) {
+    /// Uploads `indices` to the GPU only if `generation` differs from the
+    /// last generation uploaded, skipping the `write_buffer` call when the
+    /// caller's cached indices haven't actually changed since last frame.
+    pub(crate) fn update_indices(&mut self, queue: &Queue, indices: &[u16], generation: u64) {
+        if self.last_indices_generation == Some(generation) {
+            return;
+        }
         queue.write_buffer(&self.face_index_buffer, 0, bytemuck::cast_slice(indices));
+        self.last_indices_generation = Some(generation);
     }
 
+    /// Uploads `instances` to the GPU only if `generation` differs from the
+    /// last generation uploaded, mirroring `update_indices`.
     pub(crate) fn update_sticker_instances(
         &mut self,
         queue: &Queue,
         instances: &[StickerInstance],
+        generation: u64,
     ) {
+        if self.last_sticker_generation == Some(generation) {
+            return;
+        }
         queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
+        self.last_sticker_generation = Some(generation);
     }
 
     /// Updates the highlighting uniform buffer with the currently hovered sticker.

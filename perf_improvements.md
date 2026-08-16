@@ -5,14 +5,15 @@ the quoted code.
 
 **Status:** #1 is implemented (see §1) — it turned out to require pulling
 forward the core of #5's instance reorder, not the standalone fix originally
-sketched below. #2, #3, and the bonus item are still open; #3 has criterion
-benchmarks in `benches/instances.rs` but no fix yet. #4 (skip invisible-face
+sketched below. #3's index/sticker-instance regeneration and GPU upload are
+now generation-gated (see §3) — its `update_debug_instances` row is still
+open. #2, #4, and the bonus item are still open. #4 (skip invisible-face
 draws) is still open — the per-face draw loop #1 added is exactly where it
 would plug in.
 
-**Suggested order (for what's left):** #3 next (safe, independent), then #2
-(contained shader edit), then #4 (now cheap given #1's per-face draws already
-exist).
+**Suggested order (for what's left):** finish #3's remaining
+`update_debug_instances` row (safe, independent), then #2 (contained shader
+edit), then #4 (now cheap given #1's per-face draws already exist).
 
 ---
 
@@ -65,9 +66,12 @@ needs a workload and a way to read the result.
 5. **#3 needs a different measurement.** It's CPU/upload-bound, not
    GPU-bound, so the GPU-profiler technique above won't show it at all. Its
    win is clearest by comparing CPU time spent in `draw()`/
-   `Primitive::prepare()` between a plain camera-drag (rotation changes, but
-   `Hypercube` state and animation don't) before and after adding dirty
-   flags.
+   `Primitive::prepare()` before and after adding dirty flags, for a workload
+   where `Hypercube` state and `animating_move` don't change — a plain
+   camera-drag is the intuitive example, but per item 2 above it isn't
+   reproducible run to run; the reveal/hide flourish (scale/gap/yaw sweep,
+   no `Hypercube`/`animating_move` change either) is the reproducible
+   stand-in, and it's what the `gpu-capture-hooks` feature already drives.
 
 ---
 
@@ -202,26 +206,38 @@ gets most of the benefit without it.
 
 ## 3. Per-frame allocations and uploads that rarely change
 
-**Impact: medium. Confidence: verified. No design risk.**
+**Impact: medium. Confidence: verified. Status: mostly fixed.**
 
-All of these run every frame regardless of whether anything changed:
+All of these used to run every frame regardless of whether anything changed:
 
-| Location | Waste |
-|---|---|
-| `src/shader_widget.rs`, `draw()` | `state.cached_indices.clone()` — 576 B; only changes when `rotation_changed` |
-| `src/renderer.rs`, `update_indices` | re-uploads all 288 indices every frame, same story |
-| `src/renderer.rs`, `update_debug_instances` | allocates a fresh `Vec<DebugInstance>` per frame to strip the `distance` field |
-| `src/shader_widget.rs`, `draw()` | `sticker_instances_for_render` allocates 216 × 96 B ≈ 21 KB every frame |
-| `src/renderer.rs`, `update_sticker_instances` | re-uploads that full ~21 KB every frame |
+| Location | Waste | Status |
+|---|---|---|
+| `src/shader_widget.rs`, `draw()` | `state.cached_indices.clone()` — 576 B; only changes when `rotation_changed` | Fixed — `cached_indices` is now `Arc<[u16]>`, so this clone is a refcount bump |
+| `src/renderer.rs`, `update_indices` | re-uploads all 288 indices every frame, same story | Fixed — generation-gated, skips `queue.write_buffer` when unchanged |
+| `src/renderer.rs`, `update_debug_instances` | allocates a fresh `Vec<DebugInstance>` per frame to strip the `distance` field | Open |
+| `src/shader_widget.rs`, `draw()` | `sticker_instances_for_render` allocates 216 × 96 B ≈ 21 KB every frame | Fixed — regeneration only happens when a move is animating or `Hypercube` state changed; `draw()`'s per-frame copy is now an `Arc<[StickerInstance]>` refcount bump |
+| `src/renderer.rs`, `update_sticker_instances` | re-uploads that full ~21 KB every frame | Fixed — generation-gated, same mechanism as `update_indices` |
 
-The instance buffer is the valuable one. When idle (no animation, no move
+The instance buffer was the valuable one. When idle (no animation, no move
 committed) the instance data is bit-identical frame to frame — only
 `hovered_sticker` changes, and that already lives in its own uniform.
 
-Fix: dirty flags. Regenerate/upload sticker instances only when
-`animating_move.is_some()` or the `Hypercube` state changed; upload indices
-only when `rotation_changed`; keep a reusable scratch `Vec` (or store debug
-instances in GPU-ready form) for the debug AABB path.
+### Fix
+
+Generation counters, matching the project's existing `reset_generation`/
+`reveal_generation` pattern. `HypercubeShaderState` tags `cached_indices`
+and `cached_sticker_instances` (both `Arc<[T]>`) with `indices_generation`/
+`sticker_generation`, bumped only when the underlying data is actually
+recomputed (indices: `rotation_changed`; instances: a move animation
+started, ended, or is still in progress, or the `Hypercube` state changed
+via reset). The generation is carried on `HypercubePrimitive` and compared
+against `Renderer`'s `last_indices_generation`/`last_sticker_generation` in
+`update_indices`/`update_sticker_instances`, which skip the
+`queue.write_buffer` call when nothing changed since the last upload.
+
+Still open: `update_debug_instances`'s fresh `Vec<DebugInstance>` per frame
+— a reusable scratch `Vec` on `Renderer`, `clear()`+`extend()`-ed each frame
+instead of reallocated, closes this out.
 
 ---
 
