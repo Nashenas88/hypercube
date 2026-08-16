@@ -31,6 +31,12 @@ wgpu = { version = "27.0", default-features = false, features = [
 [profile.release]
 debug=true
 
+[features]
+# Non-interactive reveal-flourish loop plus auto-exit, so `perf record -p
+# <pid>` or a RenderDoc capture has a fixed, reproducible GPU workload to
+# attach to instead of relying on manual clicking. See CLAUDE.md.
+gpu-capture-hooks = []
+
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 

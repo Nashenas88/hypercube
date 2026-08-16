@@ -17,6 +17,11 @@ A 4D Rubik's-cube visualizer built in Rust with `iced` 0.14 (wgpu + advanced fea
 
 No CI config, justfile, or Makefile exists — the commands above are the full local dev loop.
 
+### Performance measurement
+
+- `cargo bench` — criterion benchmarks (`benches/instances.rs`) for the deterministic CPU-only per-frame allocation sites named in `perf_improvements.md` item #3 (`HypercubeShaderProgram::calculate_indices`, `sticker_instances_for_render`), run against `HypercubeShaderState::default()`.
+- `cargo run --release --features gpu-capture-hooks` — for GPU-bound measurement (`perf`, RenderDoc): the `gpu-capture-hooks` feature makes the app kick off 5 back-to-back reveal/hide flourishes on boot and then call `iced::exit()`, giving a profiler attached to the running process (e.g. `perf record -p <pid>`) a fixed, reproducible workload instead of relying on manual clicking.
+
 ## Architecture
 
 UI, 3D/4D logic, and GPU rendering are deliberately kept in separate layers:

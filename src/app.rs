@@ -119,6 +119,34 @@ pub(crate) struct HypercubeApp {
     /// True from a `ToggleReveal` press until `RevealAnimationComplete`
     /// arrives; gates the button (disabled) and the sliders (hidden).
     reveal_animating: bool,
+    /// Remaining scripted reveal/hide flourishes after the one the boot task
+    /// already kicked off. See [`next_reveal_loop_action`].
+    #[cfg(feature = "gpu-capture-hooks")]
+    reveal_loop_remaining: u32,
+}
+
+/// Number of scripted flourishes still to run, after the one the boot task
+/// already kicked off, so `--features gpu-capture-hooks` totals 5 runs.
+#[cfg(feature = "gpu-capture-hooks")]
+const REVEAL_LOOP_REPEATS: u32 = 4;
+
+/// What to do when a scripted reveal/hide flourish completes under
+/// `--features gpu-capture-hooks`: keep cycling, or exit once the fixed
+/// number of runs (see [`REVEAL_LOOP_REPEATS`]) has played.
+#[cfg(feature = "gpu-capture-hooks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevealLoopAction {
+    Repeat,
+    Exit,
+}
+
+#[cfg(feature = "gpu-capture-hooks")]
+fn next_reveal_loop_action(remaining: u32) -> RevealLoopAction {
+    if remaining > 0 {
+        RevealLoopAction::Repeat
+    } else {
+        RevealLoopAction::Exit
+    }
 }
 
 /// Messages that the application can receive
@@ -140,8 +168,7 @@ pub(crate) enum Message {
 }
 
 impl HypercubeApp {
-    /// Create a new application instance
-    pub(crate) fn new() -> Self {
+    fn new_inner() -> Self {
         Self {
             sticker_scale: PRIMARY_STICKER_SCALE,
             face_gap: PRIMARY_FACE_GAP,
@@ -156,7 +183,23 @@ impl HypercubeApp {
             revealed: false,
             reveal_generation: 0,
             reveal_animating: false,
+            #[cfg(feature = "gpu-capture-hooks")]
+            reveal_loop_remaining: REVEAL_LOOP_REPEATS,
         }
+    }
+
+    /// Create a new application instance
+    #[cfg(not(feature = "gpu-capture-hooks"))]
+    pub(crate) fn new() -> Self {
+        Self::new_inner()
+    }
+
+    /// Create a new application instance and kick off the scripted
+    /// reveal/hide loop immediately, so a profiler attached to the process
+    /// has a fixed, reproducible GPU workload without manual clicking.
+    #[cfg(feature = "gpu-capture-hooks")]
+    pub(crate) fn new() -> (Self, Task<Message>) {
+        (Self::new_inner(), Task::done(Message::ToggleReveal))
     }
 
     /// Get the title of the application
@@ -217,6 +260,17 @@ impl HypercubeApp {
                 self.sticker_scale = final_scale;
                 self.face_gap = final_gap;
                 self.reveal_animating = false;
+
+                #[cfg(feature = "gpu-capture-hooks")]
+                {
+                    return match next_reveal_loop_action(self.reveal_loop_remaining) {
+                        RevealLoopAction::Repeat => {
+                            self.reveal_loop_remaining -= 1;
+                            Task::done(Message::ToggleReveal)
+                        }
+                        RevealLoopAction::Exit => iced::exit(),
+                    };
+                }
             }
         }
 
@@ -431,5 +485,13 @@ mod tests {
         assert!(!sliders_visible(true, true));
         assert!(!sliders_visible(false, true));
         assert!(sliders_visible(true, false));
+    }
+
+    #[cfg(feature = "gpu-capture-hooks")]
+    #[test]
+    fn next_reveal_loop_action_repeats_until_remaining_is_exhausted() {
+        assert_eq!(next_reveal_loop_action(4), RevealLoopAction::Repeat);
+        assert_eq!(next_reveal_loop_action(1), RevealLoopAction::Repeat);
+        assert_eq!(next_reveal_loop_action(0), RevealLoopAction::Exit);
     }
 }
