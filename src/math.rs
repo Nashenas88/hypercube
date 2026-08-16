@@ -276,6 +276,12 @@ pub(crate) fn is_face_visible(
     dot_product < 0.0
 }
 
+/// Which of the 8 4D faces (`FACE_CENTERS` indices) are currently facing
+/// the viewer.
+pub(crate) fn visible_faces(rotation_4d: &Matrix4<f32>, viewer_distance: f32) -> [bool; 8] {
+    std::array::from_fn(|face_id| is_face_visible(face_id, rotation_4d, viewer_distance))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +388,24 @@ mod tests {
         let rotation = create_4d_plane_rotation(u, v, 0.7);
         let identity = rotation * rotation.transpose();
         assert!((identity - Matrix4::identity()).norm() < EPSILON);
+    }
+
+    #[test]
+    fn visible_faces_matches_is_face_visible_per_face() {
+        let rotation = create_4d_rotation_xw(0.7);
+        let result = visible_faces(&rotation, VIEWER_DISTANCE);
+        for (face_id, &visible) in result.iter().enumerate() {
+            assert_eq!(
+                visible,
+                is_face_visible(face_id, &rotation, VIEWER_DISTANCE)
+            );
+        }
+    }
+
+    #[test]
+    fn visible_faces_at_identity_matches_known_visibility() {
+        let result = visible_faces(&Matrix4::identity(), VIEWER_DISTANCE);
+        assert!(result[0], "face 0 (W=-1) should be visible");
+        assert!(!result[7], "face 7 (W=+1) should be culled");
     }
 }

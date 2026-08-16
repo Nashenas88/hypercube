@@ -11,12 +11,13 @@ regeneration and GPU upload are generation-gated, and
 per frame. #2 is implemented (see §2): the per-vertex rotation matmuls in
 `vs_main` are hoisted and reused across the visibility test, normal, and
 position/push paths, and `compute_world_normal`'s dynamic array indexing is
-gone. #4 and the bonus item are still open. #4 (skip invisible-face draws)
-is still open — the per-face draw loop #1 added is exactly where it would
-plug in.
+gone. #4 is implemented (see §4): `Renderer::render()` skips the draw call
+for any `face_id` a CPU-side check marks invisible, outside a move
+animation (see §4's "Fix" for why animation needs the exception). Only the
+bonus item is still open.
 
-**Suggested order (for what's left):** #4 next (now cheap given #1's
-per-face draws already exist).
+**Suggested order (for what's left):** nothing planned — the bonus item
+(basis dedup) is low value and not currently requested.
 
 ---
 
@@ -262,28 +263,66 @@ no-op allocation-wise, since AABB debug mode is off by default and
 
 ---
 
-## 4. Only about half the tesseract faces are ever visible
+## 4. Only about half the tesseract faces are ever visible — FIXED
 
-**Impact: medium-high. Confidence: verified. Subsumed by #5.**
+**Impact: medium-high. Confidence: verified. Status: fixed**, by skipping
+the per-`face_id` `draw_indexed` call in `Renderer::render()` for faces a
+CPU-side check marks invisible — see "Fix" below for why this only applies
+outside a move animation.
 
 `is_face_visible` in the vertex shader culls by emitting off-screen vertices —
 the vertex shader still runs for every vertex of every culled instance.
 
-Visibility depends only on `face_id` and `rotation_4d`: **8 booleans per
-frame**. `find_intersected_sticker` in `src/ray_casting.rs` already computes
-exactly this set on the CPU (`for face_id in 0..8 { if is_face_visible(...) }`)
-and discards it.
+Visibility depends only on `face_id` and `rotation_4d` when nothing is
+mid-turn: **8 booleans per frame**. `find_intersected_sticker` in
+`src/ray_casting.rs` already computes exactly this set on the CPU (`for
+face_id in 0..8 { if is_face_visible(...) }`) for hit-testing.
 
-Skipping invisible faces' instances entirely removes both the vertex work and
-`is_face_visible` from the shader. Requires the reordering in #5.
+### Fix
+
+`math::visible_faces(rotation_4d, viewer_distance)` (`src/math.rs`) computes
+the 8 booleans by calling the existing `is_face_visible` once per `face_id`
+against the static `FACE_CENTERS[face_id]` direction. `Renderer::render()`
+(`src/renderer.rs`) takes this array and `continue`s past any invisible
+`face_id`'s draw call in its per-face loop, issuing no draw and no
+vertex-shader invocations for that face's 27 instances at all.
+
+This is only safe when no move is animating. `sticker_instances_for_render`
+(`src/shader_widget.rs`) rotates a moving-layer facet's `face_normal_4d`
+away from its static `face_id`'s `FACE_CENTERS` direction whenever
+`facet.axis` is one of the move's free axes — mid-turn, that facet's *live*
+orientation can disagree with the static check, so skipping its whole
+`face_id`'s draw call on the static check's say-so risks hiding a facet that
+should currently be visible (this broke visibly during manual testing:
+moving pieces into/out of the hidden view didn't render correctly). So
+`HypercubePrimitive::draw()` only supplies the real `visible_faces` array
+when `state.animating_move.is_none()`; while a move animates it passes `[true;
+8]` (skip nothing), falling back to exactly the pre-fix behavior for that
+window — the vertex shader's own `is_face_visible` (left unchanged, still
+present in `math4d.wgsl` and every `vs_main`) culls per-instance instead,
+using the accurate live `instance.face_normal_4d`. Unlike #2's
+`face_push_offset_3d`, `is_face_visible` was **not** removed from the
+shaders — it remains the correctness backstop for the animating case. A
+finer-grained version (still CPU-skipping the 2 `face_id`s on the move's own
+`side_axis`, which stay static even mid-turn, via `FIXED_DIMS`) was
+considered and rejected: the marginal win during a sub-second animation
+isn't worth the extra branch. A true per-piece (rather than per-`face_id`)
+CPU check was also considered and rejected — draws are issued per-`face_id`
+over a contiguous 27-instance range, so skipping individual instances within
+one would need either up to 216 separate draw calls (submission overhead
+would dwarf the savings) or a per-frame instance reorder during animation
+(which would desync the `FACET_TABLE`-index invariant hit-testing relies
+on).
+
+GPU-side confirmation of the invocation-count reduction needs RenderDoc (see
+§"How to collect perf numbers" item 3), same caveat as #2.
 
 ---
 
 ## 5. Group instances by `face_id` — unlocks #1 and #4 together
 
-**Impact: highest. Confidence: high. Status: core mechanism (steps 1-2
-below) done, cheaper than this section originally assumed — see "What
-actually happened."**
+**Impact: highest. Confidence: high. Status: all three steps done, cheaper
+than this section originally assumed — see "What actually happened."**
 
 ### The blocker (as originally assessed)
 
@@ -318,12 +357,13 @@ no bandwidth cost.
    comment).
 2. ~~Issue up to 8 draws, each over one instance range with its own 36-index
    chunk offset~~ — done in `Renderer::render()`. **Fixes #1.**
-3. Skip the ranges for faces `is_face_visible` rejects, so `is_face_visible`
-   can leave the vertex shader entirely — **still open, fixes #4**. The loop
-   this plugs into already exists in `Renderer::render()`.
+3. ~~Skip the ranges for faces `is_face_visible` rejects~~ — done, but only
+   outside a move animation (see §4's "Fix"); `is_face_visible` stays in the
+   vertex shader as the correctness backstop for the animating case rather
+   than leaving it entirely. **Fixes #4.**
 
-Step 3 alone (once done) is roughly another 2× less vertex work on top of
-#1's 8×.
+Step 3 is roughly another 2× less vertex work on top of #1's 8×, for every
+frame except the (short, infrequent) duration of a move animation.
 
 ---
 

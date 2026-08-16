@@ -1357,7 +1357,15 @@ impl Renderer {
     /// # Arguments
     /// * `camera` - Current camera state for view matrix
     /// * `projection` - Current projection parameters
-    pub(crate) fn render(&self, encoder: &mut CommandEncoder, target: &TextureView) {
+    /// * `visible_faces` - Per-`face_id` visibility (see `math::visible_faces`);
+    ///   faces marked invisible are skipped entirely, issuing no draw call
+    ///   and no vertex-shader invocations for their 27 instances.
+    pub(crate) fn render(
+        &self,
+        encoder: &mut CommandEncoder,
+        target: &TextureView,
+        visible_faces: &[bool; 8],
+    ) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Render Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1417,9 +1425,14 @@ impl Renderer {
         // feed every chunk to every instance, relying on backface culling to
         // silently discard the wrong ones (the bug perf_improvements.md #1
         // describes); slicing per face keeps culling meaningful instead.
+        // Faces `visible_faces` marks invisible skip the draw call entirely,
+        // rather than issuing it and relying on the vertex shader to cull.
         let indices_per_face = VERTEX_NORMAL_INDICES.len() as u32;
         let facets_per_face = self.num_stickers as u32 / 8;
         for face_id in 0..8u32 {
+            if !visible_faces[face_id as usize] {
+                continue;
+            }
             let index_start = face_id * indices_per_face;
             let instance_start = face_id * facets_per_face;
             render_pass.draw_indexed(

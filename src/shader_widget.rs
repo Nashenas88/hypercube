@@ -19,7 +19,7 @@ use crate::geometry::{
 };
 use crate::math::{
     GRID_EXTENT, VIEWER_DISTANCE, create_4d_plane_rotation, process_4d_rotation,
-    project_cube_point, shortest_arc_plane,
+    project_cube_point, shortest_arc_plane, visible_faces,
 };
 use crate::moves::{base_angle, clockwise_sign, rotate_local_position};
 use crate::piece::{
@@ -269,6 +269,7 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) debug_instances: Vec<DebugInstanceWithDistance>,
     pub(crate) sticker_instances: Arc<[StickerInstance]>,
     pub(crate) sticker_generation: u64,
+    pub(crate) visible_faces: [bool; 8],
 }
 
 impl shader::Primitive for HypercubePrimitive {
@@ -307,7 +308,7 @@ impl shader::Primitive for HypercubePrimitive {
         target: &wgpu::TextureView,
         _clip_bounds: &Rectangle<u32>,
     ) {
-        pipeline.render(encoder, target);
+        pipeline.render(encoder, target, &self.visible_faces);
 
         // Render transparent debug AABBs
         pipeline.render_debug_aabb(encoder, target, self.debug_instances.len() as u32);
@@ -622,6 +623,18 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             debug_instances: state.debug_instances.clone(),
             sticker_instances: state.cached_sticker_instances.clone(),
             sticker_generation: state.sticker_generation,
+            // A move animation can rotate a facet's `face_normal_4d` away
+            // from its static `face_id`'s `FACE_CENTERS` direction (see
+            // `sticker_instances_for_render`'s `facet_axis_is_free`
+            // branch), so the per-`face_id` visibility this is based on
+            // can't be trusted while one is in progress - fall back to
+            // drawing every face and let the vertex shader's own
+            // `is_face_visible` cull per-instance instead.
+            visible_faces: if state.animating_move.is_some() {
+                [true; 8]
+            } else {
+                visible_faces(&state.rotation_4d, VIEWER_DISTANCE)
+            },
         }
     }
 }
