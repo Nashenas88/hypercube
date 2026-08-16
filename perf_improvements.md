@@ -1,12 +1,18 @@
 # Rendering performance improvements
 
-Findings from a review of the render hot path. Nothing here is implemented
-yet. Line numbers drift — grep for the quoted code.
+Findings from a review of the render hot path. Line numbers drift — grep for
+the quoted code.
 
-**Suggested order:** #1 and #3 first (safe, independent, high value), then #2
-(contained shader edit), then #5 last. #5 is the real payoff but is the only
-restructure, and doing it after #1 means the winding-correction heuristic gets
-exercised for the first time before you build on it. #4 is subsumed by #5.
+**Status:** #1 is implemented (see §1) — it turned out to require pulling
+forward the core of #5's instance reorder, not the standalone fix originally
+sketched below. #2, #3, and the bonus item are still open; #3 has criterion
+benchmarks in `benches/instances.rs` but no fix yet. #4 (skip invisible-face
+draws) is still open — the per-face draw loop #1 added is exactly where it
+would plug in.
+
+**Suggested order (for what's left):** #3 next (safe, independent), then #2
+(contained shader edit), then #4 (now cheap given #1's per-face draws already
+exist).
 
 ---
 
@@ -65,11 +71,17 @@ needs a workload and a way to read the result.
 
 ---
 
-## 1. Every instance draws the cube 8 times (8× overdraw)
+## 1. Every instance draws the cube 8 times (8× overdraw) — FIXED
 
-**Impact: high. Confidence: verified.**
+**Impact: high. Confidence: verified. Status: fixed**, by grouping
+`FACET_TABLE` face-major and issuing 8 per-face draws — see "Fix" below.
+Confirmed via RenderDoc: 8 draws of `count=36, instancecount=27` each
+(was 1 draw of `count=288, instancecount=216`), same 7,776 total vertex
+invocations §5 predicted, correctly distributed this time. The rest of
+this section is kept for the diagnosis, which is still accurate background
+for §4 and the bonus item.
 
-`src/renderer.rs`, in `render()`:
+`src/renderer.rs`, in `render()` (before the fix):
 
 ```rust
 render_pass.draw_indexed(
@@ -112,14 +124,16 @@ from the world origin. The correct outward reference for a cube face is
 into the same hemisphere as the cube's offset from origin", which trips for
 roughly 3 of 6 local faces on every `face_id`. Tell-tale: the trip set changes
 as the 4D drag rotation changes, whereas a genuine chirality property would be
-rotation-invariant. Expect to revisit this once #1 makes it live.
+rotation-invariant. `calculate_indices` now uses `face_center - cube_center`
+directly (computed per local face from its 4 unique transformed corners).
 
 ### Fix
 
-Either issue per-face draws with the right index offset (see #5, which is the
-clean way to get there), or — if the per-face winding variants turn out to be
-unnecessary once normals are geometric — collapse to a single 36-index buffer
-and `draw_indexed(0..36, 0, 0..216)`.
+Per-face draws with the right index offset (see #5, whose reorder mechanism
+this needs — it turned out cheaper than §5 anticipated, see the note there).
+Collapsing to a single 36-index buffer (`draw_indexed(0..36, 0, 0..216)`)
+does **not** work: it bakes in face_id 0's winding for all 216 instances,
+correct for only the ~27 that belong to that face.
 
 ---
 
@@ -230,9 +244,11 @@ Skipping invisible faces' instances entirely removes both the vertex work and
 
 ## 5. Group instances by `face_id` — unlocks #1 and #4 together
 
-**Impact: highest. Confidence: high, but this is the one restructure.**
+**Impact: highest. Confidence: high. Status: core mechanism (steps 1-2
+below) done, cheaper than this section originally assumed — see "What
+actually happened."**
 
-### The blocker
+### The blocker (as originally assessed)
 
 Instance-buffer order is load-bearing. `find_intersected_sticker`
 (`src/ray_casting.rs`) returns a **positional index into `FACET_TABLE`**:
@@ -245,39 +261,32 @@ closest_sticker = if sticker.is_actionable { Some(sticker_index) } else { None }
 That value becomes `state.hovered_sticker` and is used for two things: the
 shader compares it against `@builtin(instance_index)` for the hover highlight,
 and the click handler in `src/shader_widget.rs` uses it as a `FACET_TABLE`
-index to decide which move to trigger. Reorder or filter the instance buffer
-and you break hit-testing, not just highlighting.
+index to decide which move to trigger. This section originally assumed
+reordering the instance buffer would desync it from `FACET_TABLE` and break
+hit-testing, and proposed spending a `facet_index: u32` field (96 → 112
+bytes/instance, ~17% more upload bandwidth) to bridge the two.
 
-### The unlock
+### What actually happened
 
-`StickerInstance` (`src/piece.rs`) is fully packed at 96 bytes
-(`position_4d` 16 + `color` 16 + `basis` 48 + `face_normal_4d` 16) — no spare
-bytes. Adding a `facet_index: u32` grows the struct: 96 → 100 bytes of actual
-data, which `#[repr(C)]`/`bytemuck::Pod` vec4 alignment will most likely round
-back up to 112. That's a ~17% bump in per-instance GPU upload bandwidth
-(216 × 96 B ≈ 21 KB → 216 × 112 B ≈ 24 KB) to buy the reorder — almost
-certainly worth it once #1/#4 land (16× less vertex work dwarfs a few KB of
-instance upload), but worth accounting for rather than assuming it's free.
+That assumption was wrong: `build_facet_table()` (`src/piece.rs`) was
+reordered face-major *at the source*, so `FACET_TABLE` itself — the one
+array every consumer (`generate_sticker_instances`, `find_intersected_sticker`,
+the tests) reads live — carries the new order. `sticker_index`,
+`@builtin(instance_index)`, and the render order all stay derived from the
+same table, so they never desync. No `facet_index` field, no shader change,
+no bandwidth cost.
 
-The mechanism: spend a `u32` on `facet_index`, have the shader compare *that*
-against `highlighting.hovered_sticker_index` instead of `instance_index`, and
-the instance buffer becomes free to reorder.
+1. ~~Sort instances by `face_id`~~ — done via `build_facet_table()`'s
+   iteration order (8 contiguous blocks of 27; see `FACET_TABLE`'s doc
+   comment).
+2. ~~Issue up to 8 draws, each over one instance range with its own 36-index
+   chunk offset~~ — done in `Renderer::render()`. **Fixes #1.**
+3. Skip the ranges for faces `is_face_visible` rejects, so `is_face_visible`
+   can leave the vertex shader entirely — **still open, fixes #4**. The loop
+   this plugs into already exists in `Renderer::render()`.
 
-Then:
-
-1. Sort instances by `face_id` (contiguous ranges, 8 groups).
-2. Issue up to 8 draws, each over one instance range with its own 36-index
-   chunk offset → fixes **#1**, and finally applies each face's winding
-   correction to the instances it was computed for.
-3. Skip the ranges for faces `is_face_visible` rejects → fixes **#4**, and
-   `is_face_visible` can leave the vertex shader entirely.
-
-Combined with #1 that is roughly **8× × 2 ≈ 16× less vertex work**.
-
-Watch out for: `Renderer::num_stickers` assumes one flat range; the hover
-comparison in both `shader.wgsl` and `normal_shader.wgsl` must change together;
-and the sort should be computed once (it is static — `FACET_TABLE` order and
-`face_id` are both fixed at startup), not per frame.
+Step 3 alone (once done) is roughly another 2× less vertex work on top of
+#1's 8×.
 
 ---
 

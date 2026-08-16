@@ -1380,12 +1380,25 @@ impl Renderer {
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.face_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
-        // Draw all cubes using instanced rendering (36 vertices per cube, num_stickers instances)
-        render_pass.draw_indexed(
-            0..VERTEX_NORMAL_INDICES.len() as u32 * 8,
-            0,
-            0..self.num_stickers as u32,
-        );
+        // One draw per 4D face: `face_index_buffer` holds 8 winding-corrected
+        // 36-index chunks (one per face_id, see `calculate_indices`), and
+        // `FACET_TABLE` (piece.rs) is built in matching face-major blocks of
+        // 27, so chunk N only ever reaches the instances it was computed
+        // for. A single draw over all 288 indices and 216 instances would
+        // feed every chunk to every instance, relying on backface culling to
+        // silently discard the wrong ones (the bug perf_improvements.md #1
+        // describes); slicing per face keeps culling meaningful instead.
+        let indices_per_face = VERTEX_NORMAL_INDICES.len() as u32;
+        let facets_per_face = self.num_stickers as u32 / 8;
+        for face_id in 0..8u32 {
+            let index_start = face_id * indices_per_face;
+            let instance_start = face_id * facets_per_face;
+            render_pass.draw_indexed(
+                index_start..index_start + indices_per_face,
+                0,
+                instance_start..instance_start + facets_per_face,
+            );
+        }
     }
 
     /// Renders transparent debug AABB visualization

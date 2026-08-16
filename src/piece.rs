@@ -97,6 +97,21 @@ pub(crate) fn face_id_for(axis: usize, sign: i8) -> usize {
     }
 }
 
+/// Inverse of `face_id_for`: `(axis, sign)` for each `face_id` 0..8.
+/// `build_facet_table` iterates faces in this order so `FACET_TABLE` comes
+/// out grouped into 8 contiguous per-`face_id` blocks of 27 —
+/// `renderer.rs`'s per-face draw calls depend on that grouping.
+const FACE_AXIS_SIGN: [(usize, i8); 8] = [
+    (3, -1),
+    (2, -1),
+    (1, -1),
+    (0, -1),
+    (0, 1),
+    (1, 1),
+    (2, 1),
+    (3, 1),
+];
+
 /// The color assigned to a given (axis, sign) side.
 pub(crate) fn side_color(axis: usize, sign: i8) -> Color {
     COLORS[face_id_for(axis, sign)]
@@ -236,22 +251,22 @@ fn unit_vectors(axes: [usize; 3]) -> [[f32; 4]; 3] {
 
 fn build_facet_table() -> [FacetGeometry; NUM_FACETS] {
     let mut table = Vec::with_capacity(NUM_FACETS);
-    for piece_slot in 0..81 {
-        let position = position_of(piece_slot);
-        let facet_count = position.iter().filter(|c| **c != 0).count();
-        for axis in 0..4 {
-            if position[axis] == 0 {
+    for (face_id, &(axis, sign)) in FACE_AXIS_SIGN.iter().enumerate() {
+        for piece_slot in 0..81 {
+            let position = position_of(piece_slot);
+            if position[axis] != sign {
                 continue;
             }
+            let facet_count = position.iter().filter(|c| **c != 0).count();
             let axes = free_axes(axis);
             table.push(FacetGeometry {
                 piece_slot,
                 axis,
-                face_id: face_id_for(axis, position[axis]),
+                face_id,
                 position_4d: facet_position_4d(position, axis),
                 basis: unit_vectors(axes),
                 is_actionable: facet_count >= 2,
-                side_sign: position[axis],
+                side_sign: sign,
                 free_axes: axes,
                 local_coords: [position[axes[0]], position[axes[1]], position[axes[2]]],
             });
@@ -265,6 +280,14 @@ fn build_facet_table() -> [FacetGeometry; NUM_FACETS] {
 /// Fixed, state-independent bijection from GPU instance index to facet
 /// geometry. Built once; the only thing that varies frame-to-frame is each
 /// facet's live color, looked up from a `Hypercube` in `generate_sticker_instances`.
+///
+/// Grouped into 8 contiguous blocks of 27, one per `face_id` (ascending
+/// `piece_slot` within each block) — `renderer.rs`'s per-face draw calls
+/// slice the instance buffer this way, so this grouping is load-bearing,
+/// not incidental. `ray_casting.rs`'s `find_intersected_sticker` and the
+/// GPU's `@builtin(instance_index)` both derive their notion of "sticker
+/// index" from this same live order, so they stay in sync automatically
+/// with whatever order this table is built in.
 pub(crate) static FACET_TABLE: LazyLock<[FacetGeometry; NUM_FACETS]> =
     LazyLock::new(build_facet_table);
 
@@ -361,6 +384,18 @@ mod tests {
     fn facet_table_has_216_entries() {
         assert_eq!(FACET_TABLE.len(), NUM_FACETS);
         assert_eq!(NUM_FACETS, 216);
+    }
+
+    #[test]
+    fn facet_table_is_grouped_into_8_contiguous_face_id_blocks_of_27() {
+        const FACETS_PER_FACE: usize = NUM_FACETS / 8;
+        for (face_id, block) in FACET_TABLE.chunks(FACETS_PER_FACE).enumerate() {
+            assert_eq!(block.len(), FACETS_PER_FACE);
+            assert!(
+                block.iter().all(|facet| facet.face_id == face_id),
+                "block {face_id} contains a facet from another face_id"
+            );
+        }
     }
 
     #[test]

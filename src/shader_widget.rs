@@ -606,17 +606,25 @@ impl HypercubeShaderProgram {
                 transformed_vertices.push(vertex_3d);
             }
 
-            // Calculate one normal per cube face (6 faces)
-            for (triangle_idx, mut triangle_indices) in VERTEX_NORMAL_INDICES
-                .as_chunks::<3>()
+            let cube_center = transformed_vertices.iter().sum::<Vector3<f32>>() / 8.0;
+
+            // Calculate one normal per cube face (6 faces), each spanning two
+            // triangles (6 index slots); the two triangles of a face always
+            // share a winding decision since they lie on the same plane.
+            for (local_face_idx, mut face_indices) in VERTEX_NORMAL_INDICES
+                .as_chunks::<6>()
                 .0
                 .iter()
                 .copied()
                 .enumerate()
             {
-                let v0 = transformed_vertices[NORMAL_TO_BASE_INDICES[triangle_indices[0] as usize]];
-                let v1 = transformed_vertices[NORMAL_TO_BASE_INDICES[triangle_indices[1] as usize]];
-                let v2 = transformed_vertices[NORMAL_TO_BASE_INDICES[triangle_indices[2] as usize]];
+                let corner = |slot: usize| {
+                    transformed_vertices[NORMAL_TO_BASE_INDICES[face_indices[slot] as usize]]
+                };
+
+                let v0 = corner(0);
+                let v1 = corner(1);
+                let v2 = corner(2);
 
                 // Calculate triangle normal using cross product
                 let edge1 = v1 - v0;
@@ -630,21 +638,31 @@ impl HypercubeShaderProgram {
                 } else {
                     // Degenerate triangle, use a default normal
                     log::warn!(
-                        "Degenerate triangle detected for 4D face {face_idx} triangle {triangle_idx}: vertices {v0:?}, {v1:?}, {v2:?}"
+                        "Degenerate triangle detected for 4D face {face_idx} cube face {local_face_idx}: vertices {v0:?}, {v1:?}, {v2:?}"
                     );
                     normal = Vector3::new(0.0, 0.0, 1.0);
                 }
 
-                // Check winding order: normal should point outward from cube center
-                let centroid = transformed_vertices.iter().sum::<Vector3<f32>>() / 8.0;
-                if normal.dot(&centroid) < 0.0 {
+                // Check winding order: the normal should point away from the
+                // cube's own center toward this face's own center, not
+                // toward/away from the world origin (the cube's center is at
+                // an arbitrary offset from the origin, so that comparison is
+                // unrelated to winding).
+                //
+                // A face's 4 unique corners sit at slots 0, 1, 2, 4 of its
+                // 6-slot index chunk (slots 3 and 5 repeat slots 2 and 0 to
+                // close the second triangle) — see VERTEX_NORMAL_INDICES /
+                // NORMAL_TO_BASE_INDICES.
+                let face_center = (corner(0) + corner(1) + corner(2) + corner(4)) / 4.0;
+                if normal.dot(&(face_center - cube_center)) < 0.0 {
                     log::debug!(
-                        "Bad winding order detected for 4D face {face_idx} cube face {triangle_idx}: normal {normal:?} points inward, flipping"
+                        "Bad winding order detected for 4D face {face_idx} cube face {local_face_idx}: normal {normal:?} points inward, flipping"
                     );
-                    triangle_indices.swap(1, 2);
+                    face_indices.swap(1, 2);
+                    face_indices.swap(4, 5);
                 }
 
-                indices.extend(triangle_indices);
+                indices.extend(face_indices);
             }
         }
 
