@@ -72,6 +72,9 @@ pub(crate) struct Renderer {
     light_buffer: wgpu::Buffer,
     /// GPU buffer for debug instance data (vertex attributes)
     debug_instance_buffer: wgpu::Buffer,
+    /// Reused across frames by `update_debug_instances` to avoid allocating
+    /// a fresh `Vec` every frame for what's usually empty.
+    debug_scratch: Vec<DebugInstance>,
     /// Bind group for main shader (transform, camera, light, normals, instances)
     main_bind_group: wgpu::BindGroup,
     /// Bind group for normal shader (transform, camera, normals, instances)
@@ -1157,6 +1160,7 @@ impl Renderer {
             light_uniform,
             light_buffer,
             debug_instance_buffer,
+            debug_scratch: Vec::new(),
             main_bind_group,
             normal_bind_group,
             debug_bind_group,
@@ -1330,16 +1334,18 @@ impl Renderer {
         debug_instances: &[DebugInstanceWithDistance],
     ) {
         // Extract GPU data from debug instances (already sorted back-to-front)
-        let gpu_instances: Vec<DebugInstance> = debug_instances
-            .iter()
-            .map(|instance| instance.gpu_data)
-            .collect();
+        // into a scratch buffer reused across frames, instead of allocating a
+        // fresh Vec every frame for what's usually empty (AABB debug mode is
+        // off by default).
+        self.debug_scratch.clear();
+        self.debug_scratch
+            .extend(debug_instances.iter().map(|instance| instance.gpu_data));
 
         // Write to GPU buffer
         queue.write_buffer(
             &self.debug_instance_buffer,
             0,
-            bytemuck::cast_slice(&gpu_instances),
+            bytemuck::cast_slice(&self.debug_scratch),
         );
     }
 

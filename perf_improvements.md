@@ -5,15 +5,15 @@ the quoted code.
 
 **Status:** #1 is implemented (see §1) — it turned out to require pulling
 forward the core of #5's instance reorder, not the standalone fix originally
-sketched below. #3's index/sticker-instance regeneration and GPU upload are
-now generation-gated (see §3) — its `update_debug_instances` row is still
-open. #2, #4, and the bonus item are still open. #4 (skip invisible-face
-draws) is still open — the per-face draw loop #1 added is exactly where it
-would plug in.
+sketched below. #3 is implemented (see §3): index/sticker-instance
+regeneration and GPU upload are generation-gated, and
+`update_debug_instances` reuses a scratch buffer instead of allocating one
+per frame. #2, #4, and the bonus item are still open. #4 (skip
+invisible-face draws) is still open — the per-face draw loop #1 added is
+exactly where it would plug in.
 
-**Suggested order (for what's left):** finish #3's remaining
-`update_debug_instances` row (safe, independent), then #2 (contained shader
-edit), then #4 (now cheap given #1's per-face draws already exist).
+**Suggested order (for what's left):** #2 next (contained shader edit),
+then #4 (now cheap given #1's per-face draws already exist).
 
 ---
 
@@ -206,7 +206,7 @@ gets most of the benefit without it.
 
 ## 3. Per-frame allocations and uploads that rarely change
 
-**Impact: medium. Confidence: verified. Status: mostly fixed.**
+**Impact: medium. Confidence: verified. Status: fixed.**
 
 All of these used to run every frame regardless of whether anything changed:
 
@@ -214,7 +214,7 @@ All of these used to run every frame regardless of whether anything changed:
 |---|---|---|
 | `src/shader_widget.rs`, `draw()` | `state.cached_indices.clone()` — 576 B; only changes when `rotation_changed` | Fixed — `cached_indices` is now `Arc<[u16]>`, so this clone is a refcount bump |
 | `src/renderer.rs`, `update_indices` | re-uploads all 288 indices every frame, same story | Fixed — generation-gated, skips `queue.write_buffer` when unchanged |
-| `src/renderer.rs`, `update_debug_instances` | allocates a fresh `Vec<DebugInstance>` per frame to strip the `distance` field | Open |
+| `src/renderer.rs`, `update_debug_instances` | allocates a fresh `Vec<DebugInstance>` per frame to strip the `distance` field | Fixed — reuses a scratch `Vec` on `Renderer`, `clear()`+`extend()`-ed each frame instead of reallocated |
 | `src/shader_widget.rs`, `draw()` | `sticker_instances_for_render` allocates 216 × 96 B ≈ 21 KB every frame | Fixed — regeneration only happens when a move is animating or `Hypercube` state changed; `draw()`'s per-frame copy is now an `Arc<[StickerInstance]>` refcount bump |
 | `src/renderer.rs`, `update_sticker_instances` | re-uploads that full ~21 KB every frame | Fixed — generation-gated, same mechanism as `update_indices` |
 
@@ -235,9 +235,11 @@ against `Renderer`'s `last_indices_generation`/`last_sticker_generation` in
 `update_indices`/`update_sticker_instances`, which skip the
 `queue.write_buffer` call when nothing changed since the last upload.
 
-Still open: `update_debug_instances`'s fresh `Vec<DebugInstance>` per frame
-— a reusable scratch `Vec` on `Renderer`, `clear()`+`extend()`-ed each frame
-instead of reallocated, closes this out.
+`update_debug_instances` uses the same reuse-instead-of-reallocate idea:
+its `Vec<DebugInstance>` scratch buffer lives on `Renderer` and is
+`clear()`+`extend()`-ed each frame rather than allocated fresh — usually a
+no-op allocation-wise, since AABB debug mode is off by default and
+`debug_instances` is empty.
 
 ---
 
