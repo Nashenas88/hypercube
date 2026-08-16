@@ -8,12 +8,15 @@ forward the core of #5's instance reorder, not the standalone fix originally
 sketched below. #3 is implemented (see §3): index/sticker-instance
 regeneration and GPU upload are generation-gated, and
 `update_debug_instances` reuses a scratch buffer instead of allocating one
-per frame. #2, #4, and the bonus item are still open. #4 (skip
-invisible-face draws) is still open — the per-face draw loop #1 added is
-exactly where it would plug in.
+per frame. #2 is implemented (see §2): the per-vertex rotation matmuls in
+`vs_main` are hoisted and reused across the visibility test, normal, and
+position/push paths, and `compute_world_normal`'s dynamic array indexing is
+gone. #4 and the bonus item are still open. #4 (skip invisible-face draws)
+is still open — the per-face draw loop #1 added is exactly where it would
+plug in.
 
-**Suggested order (for what's left):** #2 next (contained shader edit),
-then #4 (now cheap given #1's per-face draws already exist).
+**Suggested order (for what's left):** #4 next (now cheap given #1's
+per-face draws already exist).
 
 ---
 
@@ -141,35 +144,40 @@ correct for only the ~27 that belong to that face.
 
 ---
 
-## 2. Hoist the 4D rotation out of the per-vertex normal math
+## 2. Hoist the 4D rotation out of the per-vertex normal math — FIXED
 
-**Impact: medium. Confidence: safe, contained.**
+**Impact: medium. Confidence: verified. Status: fixed**, by hoisting the
+rotated face normal, sticker center, and basis vectors once per vertex in
+`vs_main`, in `src/shaders/math4d.wgsl`/`shader.wgsl`/`normal_shader.wgsl`/
+`depth_shader.wgsl`.
 
-The shared 4D math (`Transform4D`, `is_face_visible`, `compute_world_normal`,
-`face_push_offset_3d`) lives once in `src/shaders/math4d.wgsl` and is pulled
-into `shader.wgsl`, `normal_shader.wgsl`, and `depth_shader.wgsl` via naga_oil
-`#import` — so a fix here only needs to happen in one place.
+The shared 4D math (`Transform4D`, `is_face_visible`, `compute_world_normal`)
+lives once in `src/shaders/math4d.wgsl` and is pulled into `shader.wgsl`,
+`normal_shader.wgsl`, and `depth_shader.wgsl` via naga_oil `#import`.
 
-Per vertex, `vs_main` performs **7** `mat4x4 * vec4` multiplies:
+Before the fix, `vs_main` performed **7** `mat4x4 * vec4` multiplies for a
+visible vertex:
 
 - 4 inside `compute_world_normal` (`p0`, `pi`, `pj`, `pk`)
 - 1 for the vertex position (`transform.rotation_matrix * vertex_4d`)
 - 1 in `is_face_visible`
-- 1 in `face_push_offset_3d`
+- 1 in the face-gap push (previously `face_push_offset_3d`)
 
-### A literal duplicate, not just a hoist opportunity
+### Fix
 
-`is_face_visible(instance.face_normal_4d, ...)` and
-`face_push_offset_3d(instance.face_normal_4d, ...)` are both called from
-`vs_main` with the exact same `instance.face_normal_4d` input, and each
-computes `rotation_matrix * face_normal_4d` internally — the same
-multiplication, done twice, every vertex. Hoist once:
+`is_face_visible` and the face-gap push both used the same
+`instance.face_normal_4d` rotated separately — the same multiplication done
+twice, every vertex. `vs_main` now rotates it once:
 `let rotated_face_normal = transform.rotation_matrix * instance.face_normal_4d;`
-and pass it to both call sites.
+and passes the result to `is_face_visible`, then reuses it for the push.
+That rotation happens *before* the visibility check's early-out, so a
+culled vertex still pays only this one multiply, same as before the fix —
+the win is entirely on the visible path.
 
-By linearity, `R * (center + basis[i]) == R*center + R*basis[i]`. Hoisting
-`R*center` and the three `R*basis[i]` once per vertex serves **both** the
-normal and the position path:
+By linearity, `R * (center + basis[i]) == R*center + R*basis[i]`, so `vs_main`
+also hoists `R*center` and the three `R*basis[i]` once per visible vertex,
+after the visibility check, and reuses them for both the normal and the
+position path:
 
 ```wgsl
 let rc  = transform.rotation_matrix * sticker_center_4d;
@@ -182,25 +190,36 @@ let rotated_vertex_4d = rc + v.x * rb0 + v.y * rb1 + v.z * rb2;
 // normal: p0 = proj(rc), pi = proj(rc + rb_i), etc.
 ```
 
-### The bigger win hiding in there
+`compute_world_normal` took `sticker_center_4d`/`basis`/`rotation_matrix` and
+did the rotation internally with a **runtime**-indexed `basis[i]` (forces the
+array into scratch memory on most drivers); it now takes the four hoisted,
+already-rotated `rc`/`rb0`/`rb1`/`rb2` directly, and its `switch` selects
+among the three `rb*` locals instead of indexing an array, eliminating the
+dynamic indexing entirely.
 
-`compute_world_normal` indexes `basis[i]` with a **runtime** `i` produced by its
-`switch`. Dynamic indexing of an `array<vec4<f32>, 3>` forces it into scratch
-memory on most drivers. Rewriting the six switch arms to select directly among
-the three hoisted `vec4` locals eliminates the dynamic indexing entirely.
+A visible vertex now performs **5** `mat4x4 * vec4` multiplies
+(`rotated_face_normal`, `rc`, `rb0`, `rb1`, `rb2`), each reused across the
+visibility test, normal, position, and push — down from 7, with no separate
+multiply duplicated across call sites. `face_push_offset_3d` became a
+one-line wrapper around `project_4d_to_3d` once its rotation moved to the
+caller, so it was removed and its call sites inlined; its "deliberately not
+normalized" doc comment moved to the push call site in each shader.
 
-### CPU-side pre-rotation — open question, not a clean win
+GPU-side confirmation of the invocation-count reduction needs RenderDoc (see
+§"How to collect perf numbers" item 3); this is vertex-shader work, so the
+`perf`/CPU-sampling technique used for #3 doesn't show it.
+
+### CPU-side pre-rotation — considered, not pursued
 
 Pre-rotating `basis` and the sticker center **on the CPU** and storing them in
-the instance buffer looks attractive (216 instances vs 7,776 vertices), but
-`is_face_visible` and `face_push_offset_3d` both need `R * (a live
-per-instance vector)` and would stay GPU-side regardless. More importantly,
-`rotation_4d` changes every frame during a drag, so CPU-side pre-rotation
-would mean re-deriving and re-uploading all 216 instances' rotated
-basis/center on every dragged frame — directly in tension with #3's goal of
-*not* re-uploading instances when only the camera/rotation moves. Worth
-evaluating that tradeoff before committing to it; the shader-side hoist above
-gets most of the benefit without it.
+the instance buffer looked attractive (216 instances vs 7,776 vertices), but
+`is_face_visible` and the face-gap push both need `R * (a live per-instance
+vector)` and would stay GPU-side regardless. More importantly, `rotation_4d`
+changes every frame during a drag, so CPU-side pre-rotation would mean
+re-deriving and re-uploading all 216 instances' rotated basis/center on every
+dragged frame — directly in tension with #3's goal of *not* re-uploading
+instances when only the camera/rotation moves. The shader-side hoist above
+gets the benefit without that tradeoff.
 
 ---
 
