@@ -27,6 +27,7 @@ wgpu = { version = "27.0", default-features = false, features = [
     "wgsl",
     "naga-ir",
 ] }
+fastrand = "2.5.0"
 
 [profile.release]
 debug=true

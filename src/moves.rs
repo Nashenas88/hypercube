@@ -12,7 +12,7 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use nalgebra::{Matrix4, Rotation3, Unit, Vector3, Vector4};
 
 use crate::math::{VIEWER_DISTANCE, project_4d_to_3d};
-use crate::piece::{FacetGeometry, Hypercube, Piece, free_axes, index_of};
+use crate::piece::{FACET_TABLE, FacetGeometry, Hypercube, Piece, free_axes, index_of};
 
 /// Rounds a continuous 3D rotation matrix (about `local_coords`, by `angle`)
 /// to an exact signed permutation: `new[row] = sign[row] * old[perm[row]]`.
@@ -146,6 +146,25 @@ pub(crate) fn clockwise_sign(facet: &FacetGeometry) -> f32 {
     }
 }
 
+/// Picks a uniformly random actionable facet from `FACET_TABLE` and derives
+/// a legal move from it: `(side_axis, side_sign, local_coords, angle)`, with
+/// `angle`'s magnitude from `base_angle` and a random sign. Unlike
+/// `clockwise_sign`, which picks a sign to match what a viewer would call
+/// clockwise, a random move has no visual referent to match, so this stays
+/// pure puzzle logic with no dependency on `math::project_4d_to_3d`.
+pub(crate) fn random_move(rng: &mut fastrand::Rng) -> (usize, i8, [i8; 3], f32) {
+    let actionable: Vec<&FacetGeometry> = FACET_TABLE.iter().filter(|f| f.is_actionable).collect();
+    let facet = actionable[rng.usize(..actionable.len())];
+    let nonzero = facet.local_coords.iter().filter(|c| **c != 0).count();
+    let sign = if rng.bool() { 1.0 } else { -1.0 };
+    (
+        facet.axis,
+        facet.side_sign,
+        facet.local_coords,
+        base_angle(nonzero) * sign,
+    )
+}
+
 impl Hypercube {
     /// Applies a move: `side_axis`/`side_sign` select the 27-piece affected
     /// side; `local_coords` is the clicked piece's local position (the
@@ -184,6 +203,15 @@ impl Hypercube {
                 position: new_position,
                 colors: new_colors,
             };
+        }
+    }
+
+    /// Applies `count` random legal moves in sequence, instantly (no
+    /// animation) - used by the 1/2/3-random-move and Scramble UI actions.
+    pub(crate) fn apply_random_moves(&mut self, count: u32, rng: &mut fastrand::Rng) {
+        for _ in 0..count {
+            let (side_axis, side_sign, local_coords, angle) = random_move(rng);
+            self.apply_move(side_axis, side_sign, local_coords, angle);
         }
     }
 }
@@ -415,6 +443,46 @@ mod tests {
             };
             apply_click(&mut cube, local_coords, inverse_direction);
         }
+        assert_eq!(cube, solved);
+    }
+
+    #[test]
+    fn random_move_always_targets_an_actionable_facet() {
+        let mut rng = fastrand::Rng::with_seed(1);
+        for _ in 0..200 {
+            let (_, _, local_coords, _) = random_move(&mut rng);
+            let nonzero = local_coords.iter().filter(|c| **c != 0).count();
+            assert!((1..=3).contains(&nonzero));
+        }
+    }
+
+    #[test]
+    fn apply_random_moves_with_seed_is_reproducible() {
+        let mut rng_a = fastrand::Rng::with_seed(42);
+        let mut rng_b = fastrand::Rng::with_seed(42);
+        let mut cube_a = Hypercube::solved();
+        let mut cube_b = Hypercube::solved();
+        cube_a.apply_random_moves(10, &mut rng_a);
+        cube_b.apply_random_moves(10, &mut rng_b);
+        assert_eq!(cube_a, cube_b);
+    }
+
+    #[test]
+    fn apply_random_moves_preserves_facet_count_invariant() {
+        let mut cube = Hypercube::solved();
+        let expected = total_facet_count(&cube);
+        let mut rng = fastrand::Rng::with_seed(7);
+        cube.apply_random_moves(30, &mut rng);
+        assert_eq!(total_facet_count(&cube), expected);
+        assert!(colors_position_invariant_holds(&cube));
+    }
+
+    #[test]
+    fn apply_random_moves_zero_is_a_no_op() {
+        let solved = Hypercube::solved();
+        let mut cube = solved.clone();
+        let mut rng = fastrand::Rng::with_seed(3);
+        cube.apply_random_moves(0, &mut rng);
         assert_eq!(cube, solved);
     }
 }
