@@ -1,0 +1,3 @@
+# piece.rs
+
+Core domain model. `Piece { position: [i8;4], colors: [Option<Color>; 4] }`; `position` is a lattice point in `{-1,0,1}^4`, `colors[axis]` is set only for nonzero axes. `Hypercube` always holds exactly 81 pieces in a canonical order (`index_of`/`position_of`), so two states can be compared with `assert_eq!` directly — this piece-based model replaced an earlier sticker-based one. `FACET_TABLE` (216 entries, built face-major — 8 contiguous blocks of 27 sharing a `face_id`) and `generate_sticker_instances()` derive per-frame GPU instance data from piece state; the face-major grouping is load-bearing for `renderer.rs`'s per-face draws, not incidental.

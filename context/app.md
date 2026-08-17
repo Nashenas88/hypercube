@@ -1,0 +1,3 @@
+# app.rs
+
+`HypercubeApp` holds only UI-control state (scale/gap sliders, render mode, settings, the reveal toggle's runtime state). Builds a left control panel plus a right `Shader::new(HypercubeShaderProgram)` viewport. Contains no 3D/4D logic. The sticker-scale/face-gap sliders are hidden behind a "Reveal"/"Hide" toggle button: pressing it bumps a `reveal_generation` counter (same one-shot generation-counter pattern `reset_generation` uses to reach `HypercubeShaderState`) and flips `revealed` immediately, while `reveal_animating` disables the button and hides the sliders until `shader_widget.rs` publishes `Message::RevealAnimationComplete` back once the flourish settles.
