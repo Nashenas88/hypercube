@@ -354,6 +354,11 @@ pub struct HypercubeShaderState {
     pending_face_click: Option<(Instant, usize)>,
     last_redraw_instant: Option<Instant>,
     reset_generation: u64,
+    random_moves_generation: u64,
+    /// Seeded once at construction, reused across every random-move press so
+    /// results are reproducible from a fixed seed in tests but still vary
+    /// run-to-run in the live app (`Rng::new()` seeds from OS entropy).
+    rng: fastrand::Rng,
     reveal_generation: u64,
 }
 
@@ -383,6 +388,8 @@ pub struct HypercubeShaderProgram {
     rotate_button: RotateButton,
     animation_duration_ms: u32,
     reset_generation: u64,
+    random_moves_generation: u64,
+    random_move_count: u32,
     reveal_generation: u64,
     revealed_target: bool,
 }
@@ -398,6 +405,8 @@ impl HypercubeShaderProgram {
         rotate_button: RotateButton,
         animation_duration_ms: u32,
         reset_generation: u64,
+        random_moves_generation: u64,
+        random_move_count: u32,
         reveal_generation: u64,
         revealed_target: bool,
     ) -> Self {
@@ -409,6 +418,8 @@ impl HypercubeShaderProgram {
             rotate_button,
             animation_duration_ms,
             reset_generation,
+            random_moves_generation,
+            random_move_count,
             reveal_generation,
             revealed_target,
         }
@@ -436,6 +447,23 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.hovered_sticker = None;
             state.debug_instances.clear();
             state.reset_generation = self.reset_generation;
+            let instances = sticker_instances_for_render(state);
+            state.set_cached_sticker_instances(instances);
+            return Some(Action::request_redraw());
+        }
+
+        if self.random_moves_generation != state.random_moves_generation {
+            state
+                .hypercube
+                .apply_random_moves(self.random_move_count, &mut state.rng);
+            state.animating_move = None;
+            state.animating_focus = None;
+            state.rotate_press = None;
+            state.pending_face_click = None;
+            state.last_redraw_instant = None;
+            state.hovered_sticker = None;
+            state.debug_instances.clear();
+            state.random_moves_generation = self.random_moves_generation;
             let instances = sticker_instances_for_render(state);
             state.set_cached_sticker_instances(instances);
             return Some(Action::request_redraw());
@@ -1144,6 +1172,8 @@ impl Default for HypercubeShaderState {
             pending_face_click: None,
             last_redraw_instant: None,
             reset_generation: 0,
+            random_moves_generation: 0,
+            rng: fastrand::Rng::new(),
             reveal_generation: 0,
         }
     }
@@ -1483,6 +1513,8 @@ mod tests {
             250,
             1,
             0,
+            0,
+            0,
             false,
         );
 
@@ -1511,6 +1543,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn random_moves_generation_mismatch_applies_moves_and_cancels_animation() {
+        let mut state = HypercubeShaderState {
+            rng: fastrand::Rng::with_seed(1),
+            ..Default::default()
+        };
+        assert_eq!(state.random_moves_generation, 0);
+
+        let mut expected = Hypercube::solved();
+        expected.apply_random_moves(3, &mut fastrand::Rng::with_seed(1));
+
+        let program = HypercubeShaderProgram::new(
+            0.5,
+            2.0,
+            RenderMode::Standard,
+            AABBMode::None,
+            RotateButton::default(),
+            250,
+            0,
+            1,
+            3,
+            0,
+            false,
+        );
+
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let sticker_generation_before = state.sticker_generation;
+        let action = program.update(
+            &mut state,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+
+        assert!(action.is_some(), "random moves must request a redraw");
+        assert_eq!(state.hypercube, expected);
+        assert!(state.animating_move.is_none());
+        assert!(state.animating_focus.is_none());
+        assert_eq!(state.random_moves_generation, 1);
+        assert_eq!(
+            state.sticker_generation,
+            sticker_generation_before + 1,
+            "random moves must regenerate cached sticker instances"
+        );
+    }
+
+    #[test]
+    fn random_moves_generation_mismatch_with_zero_count_is_a_no_op_move_wise() {
+        let mut state = HypercubeShaderState::default();
+        assert!(state.hypercube.is_solved());
+
+        let program = HypercubeShaderProgram::new(
+            0.5,
+            2.0,
+            RenderMode::Standard,
+            AABBMode::None,
+            RotateButton::default(),
+            250,
+            0,
+            1,
+            0,
+            0,
+            false,
+        );
+
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let action = program.update(
+            &mut state,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+
+        assert!(action.is_some());
+        assert!(state.hypercube.is_solved());
+        assert_eq!(state.random_moves_generation, 1);
+    }
+
     /// A `RedrawRequested` tick with nothing animating and no input must not
     /// regenerate or re-upload cached indices/sticker instances - the "camera
     /// at rest" case #3's generation-counter dirty-flag mechanism exists to
@@ -1526,6 +1636,8 @@ mod tests {
             RotateButton::default(),
             250,
             state.reset_generation,
+            state.random_moves_generation,
+            0,
             state.reveal_generation,
             false,
         );
@@ -1564,6 +1676,8 @@ mod tests {
             rotate_button,
             250,
             state.reset_generation,
+            state.random_moves_generation,
+            0,
             state.reveal_generation,
             false,
         );
@@ -1611,6 +1725,8 @@ mod tests {
             RotateButton::default(),
             250,
             state.reset_generation,
+            state.random_moves_generation,
+            0,
             state.reveal_generation,
             false,
         );
@@ -1709,6 +1825,8 @@ mod tests {
             RotateButton::default(),
             250,
             0,
+            0,
+            0,
             1,
             true,
         );
@@ -1749,6 +1867,8 @@ mod tests {
             AABBMode::None,
             RotateButton::default(),
             250,
+            0,
+            0,
             0,
             1,
             false,
@@ -1791,6 +1911,8 @@ mod tests {
             250,
             0,
             0,
+            0,
+            0,
             false,
         );
         stale_program.update(
@@ -1809,6 +1931,8 @@ mod tests {
             AABBMode::None,
             RotateButton::default(),
             250,
+            0,
+            0,
             0,
             0,
             false,
@@ -1850,6 +1974,8 @@ mod tests {
             AABBMode::None,
             RotateButton::default(),
             250,
+            0,
+            0,
             0,
             0,
             true,
@@ -1903,6 +2029,8 @@ mod tests {
             AABBMode::None,
             rotate_button,
             250,
+            0,
+            0,
             0,
             0,
             true,

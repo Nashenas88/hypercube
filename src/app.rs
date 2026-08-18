@@ -38,6 +38,12 @@ impl RenderMode {
     const ALL: [RenderMode; 3] = [RenderMode::Standard, RenderMode::Normals, RenderMode::Depth];
 }
 
+/// Move count for the "Scramble" button. 25 mixes a 27-piece side several
+/// times over (180-degree edge and 120-degree corner turns disturb most of
+/// a side per move), enough that the puzzle reads as thoroughly shuffled
+/// without an excessive click-to-solved feel for manual play.
+const SCRAMBLE_MOVE_COUNT: u32 = 25;
+
 impl std::fmt::Display for AABBMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -108,6 +114,11 @@ pub(crate) struct HypercubeApp {
     debug_mode: bool,
     settings: AppSettings,
     reset_generation: u64,
+    random_moves_generation: u64,
+    /// Move count carried alongside `random_moves_generation` for the shader
+    /// program to pick up, since a bare generation bump carries no payload
+    /// (mirrors how `revealed` is threaded alongside `reveal_generation`).
+    pending_random_move_count: u32,
     sticker_scale_adjusting: bool,
     face_gap_adjusting: bool,
     animation_duration_adjusting: bool,
@@ -163,6 +174,7 @@ pub(crate) enum Message {
     AnimationDuration(u32),
     AnimationDurationReleased,
     Reset,
+    RandomMoves(u32),
     ToggleReveal,
     RevealAnimationComplete { final_scale: f32, final_gap: f32 },
 }
@@ -177,6 +189,8 @@ impl HypercubeApp {
             debug_mode: false,
             settings: settings::load(),
             reset_generation: 0,
+            random_moves_generation: 0,
+            pending_random_move_count: 0,
             sticker_scale_adjusting: false,
             face_gap_adjusting: false,
             animation_duration_adjusting: false,
@@ -248,6 +262,10 @@ impl HypercubeApp {
             Message::Reset => {
                 self.reset_generation = self.reset_generation.wrapping_add(1);
             }
+            Message::RandomMoves(count) => {
+                self.pending_random_move_count = count;
+                self.random_moves_generation = self.random_moves_generation.wrapping_add(1);
+            }
             Message::ToggleReveal => {
                 self.revealed = !self.revealed;
                 self.reveal_generation = self.reveal_generation.wrapping_add(1);
@@ -300,7 +318,17 @@ impl HypercubeApp {
                         .width(250),
                     ),
             )
-            .push(Button::new("Reset").on_press(Message::Reset));
+            .push(Button::new("Reset").on_press(Message::Reset))
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(Button::new("1 Random Move").on_press(Message::RandomMoves(1)))
+                    .push(Button::new("2 Random Moves").on_press(Message::RandomMoves(2)))
+                    .push(Button::new("3 Random Moves").on_press(Message::RandomMoves(3)))
+                    .push(
+                        Button::new("Scramble").on_press(Message::RandomMoves(SCRAMBLE_MOVE_COUNT)),
+                    ),
+            );
 
         if self.debug_mode {
             controls = controls
@@ -409,6 +437,8 @@ impl HypercubeApp {
             self.settings.rotate_button,
             self.settings.animation_duration_ms,
             self.reset_generation,
+            self.random_moves_generation,
+            self.pending_random_move_count,
             self.reveal_generation,
             self.revealed,
         ))
