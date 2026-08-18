@@ -106,7 +106,7 @@ pub(crate) const PRIMARY_STICKER_SCALE: f32 = 0.02;
 pub(crate) const PRIMARY_FACE_GAP: f32 = 0.0;
 /// Sticker scale/face gap in the app's raw (slider) domain a reveal animates
 /// toward.
-const SECONDARY_STICKER_SCALE: f32 = 0.1;
+const SECONDARY_STICKER_SCALE: f32 = 0.4;
 const SECONDARY_FACE_GAP: f32 = 1.5;
 
 /// Builds the GPU instance list for the current frame. Piece state is
