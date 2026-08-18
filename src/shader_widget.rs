@@ -1308,6 +1308,74 @@ mod tests {
         }
     }
 
+    /// At `partial_angle` fully swept (end of a move, right before the snap
+    /// to `generate_sticker_instances`), a facet whose own axis is one of
+    /// the rotating slab's `free_axes` (`facet_axis_is_free`) must have its
+    /// `face_normal_4d` fully onto its new face's `FACE_CENTERS`, not still
+    /// mid-sweep or left on the old one - the counterpart to the start-of-move
+    /// check above, checked directly per facet (not just as part of the
+    /// set-based end-state comparison, which can't distinguish a wrong
+    /// normal on one row from a legitimate match on another).
+    #[test]
+    fn animated_face_normal_matches_post_move_face_center_at_end_of_move() {
+        use crate::moves::discrete_rotation;
+        use crate::piece::face_id_for;
+
+        for side_axis in 0..4usize {
+            for side_sign in [-1i8, 1] {
+                for local_coords in [[1i8, 0, 0], [1, 1, 0], [1, 1, 1]] {
+                    let nonzero = local_coords.iter().filter(|c| **c != 0).count();
+                    let angle = base_angle(nonzero);
+                    let axes = free_axes(side_axis);
+                    let (perm, sign) = discrete_rotation(local_coords, angle);
+                    let mut inv_perm = [0usize; 3];
+                    for slot in 0..3 {
+                        inv_perm[perm[slot]] = slot;
+                    }
+
+                    let pre_move = Hypercube::solved();
+                    let state = HypercubeShaderState {
+                        hypercube: pre_move.clone(),
+                        animating_move: Some(AnimatingMove {
+                            side_axis,
+                            side_sign,
+                            local_coords,
+                            angle,
+                            pre_move_pieces: pre_move.pieces.clone(),
+                            elapsed: Duration::from_millis(250),
+                            duration: Duration::from_millis(250),
+                        }),
+                        ..Default::default()
+                    };
+
+                    let instances = sticker_instances_for_render(&state);
+                    for (facet, instance) in FACET_TABLE.iter().zip(instances.iter()) {
+                        let expected_face_id = if facet.axis == side_axis
+                            || pre_move.pieces[facet.piece_slot].position[side_axis] != side_sign
+                        {
+                            facet.face_id
+                        } else {
+                            let p = axes
+                                .iter()
+                                .position(|&x| x == facet.axis)
+                                .expect("facet.axis != side_axis must be one of axes");
+                            let slot = inv_perm[p];
+                            face_id_for(axes[slot], sign[slot] * facet.side_sign)
+                        };
+                        let expected: [f32; 4] = FACE_CENTERS[expected_face_id].into();
+                        assert_eq!(
+                            round_key(instance.face_normal_4d),
+                            round_key(expected),
+                            "mismatch for side_axis={side_axis} side_sign={side_sign} \
+                             local_coords={local_coords:?} piece_slot={} axis={}",
+                            facet.piece_slot, facet.axis
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Position, color, spanned basis axes, and face normal for one rendered
     /// row, used to compare animated vs. static render output as a set.
     type RenderRow = ([i32; 4], [u8; 4], Vec<usize>, [i32; 4]);

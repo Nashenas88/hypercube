@@ -907,7 +907,13 @@ impl Renderer {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                // A move animation rotates a facet's basis away from the
+                // static per-4D-face winding `calculate_indices` computed,
+                // which isn't recomputed mid-move (see `rotation_changed`
+                // in shader_widget.rs) - backface culling against that
+                // stale winding can hide the correctly-outward triangle of
+                // a moving sticker and show its (dark) interior instead.
+                cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -966,7 +972,7 @@ impl Renderer {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
