@@ -42,7 +42,7 @@ impl std::fmt::Display for RotateButton {
     }
 }
 
-pub(crate) const ANIMATION_DURATION_MS_RANGE: std::ops::RangeInclusive<u32> = 100..=600;
+pub(crate) const ANIMATION_DURATION_MS_RANGE: std::ops::RangeInclusive<u32> = 100..=3000;
 const DEFAULT_ANIMATION_DURATION_MS: u32 = 250;
 
 /// Settings persisted across application runs.
