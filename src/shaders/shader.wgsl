@@ -12,10 +12,10 @@ struct LightUniform {
 
 struct HighlightingUniform {
     hovered_sticker_index: u32,
-    highlight_intensity: f32,
-    _padding1: vec2<f32>,
-    highlight_color: vec3<f32>,
-    _padding2: f32,
+    hovered_piece_slot: u32,
+    _padding: vec2<u32>,
+    highlight_color: vec4<f32>,       // rgb = color, a = intensity
+    piece_highlight_color: vec4<f32>, // rgb = color, a = intensity
 };
 
 @group(0) @binding(0)
@@ -33,12 +33,16 @@ var<storage, read> instances: array<StickerInstance>;
 @group(0) @binding(4)
 var<uniform> highlighting: HighlightingUniform;
 
+@group(0) @binding(5)
+var<storage, read> piece_slots: array<u32>;
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec4<f32>,
     @location(1) world_position: vec3<f32>,
     @location(2) world_normal: vec3<f32>,
     @location(3) instance_index: u32,
+    @location(4) piece_slot: u32,
 }
 
 @vertex
@@ -123,7 +127,8 @@ fn vs_main(
     out.world_position = vertex_3d;
     out.world_normal = world_normal;
     out.instance_index = instance_index;
-    
+    out.piece_slot = piece_slots[instance_index];
+
     return out;
 }
 
@@ -155,10 +160,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine all lighting components
     var final_color = ambient + diffuse + specular;
     
-    // Apply highlighting if this sticker is hovered
+    // Apply highlighting: the exact hovered sticker gets its own color, the
+    // rest of the hovered piece's stickers get a dimmer shared highlight.
     if (in.instance_index == highlighting.hovered_sticker_index) {
-        // Mix the final color with the highlight color
-        final_color = mix(final_color, highlighting.highlight_color, highlighting.highlight_intensity);
+        final_color = mix(final_color, highlighting.highlight_color.rgb, highlighting.highlight_color.a);
+    } else if (in.piece_slot == highlighting.hovered_piece_slot) {
+        final_color = mix(final_color, highlighting.piece_highlight_color.rgb, highlighting.piece_highlight_color.a);
     }
     
     return vec4<f32>(final_color, in.color.a);

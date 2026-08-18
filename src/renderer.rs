@@ -16,7 +16,7 @@ use crate::app::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
 use crate::geometry::{CUBE_VERTICES, VERTEX_NORMAL_INDICES};
 use crate::math::{BASE_STICKER_SIZE, VIEWER_DISTANCE};
-use crate::piece::{Hypercube, StickerInstance, generate_sticker_instances};
+use crate::piece::{FACET_TABLE, Hypercube, StickerInstance, generate_sticker_instances};
 use crate::shader_widget::UiControls;
 
 /// GPU renderer for the hypercube visualization.
@@ -131,14 +131,14 @@ pub(crate) struct LightUniform {
 pub(crate) struct HighlightingUniform {
     /// Index of the hovered sticker (u32::MAX if none)
     hovered_sticker_index: u32,
-    /// Highlighting intensity (0.0 to 1.0)
-    highlight_intensity: f32,
-    /// Padding for vec3 alignment
-    _padding1: [f32; 2],
-    /// Highlighting color (RGB)
-    highlight_color: [f32; 3],
-    /// Padding for alignment
-    _padding2: f32,
+    /// `Hypercube::pieces` slot of the hovered sticker's piece (u32::MAX if none)
+    hovered_piece_slot: u32,
+    /// Padding for vec4 alignment
+    _padding: [u32; 2],
+    /// Color and intensity (in `a`) for the exact hovered sticker
+    highlight_color: [f32; 4],
+    /// Color and intensity (in `a`) for the rest of the hovered piece's stickers
+    piece_highlight_color: [f32; 4],
 }
 
 /// Debug instance data for GPU vertex attributes (transparent bounding box rendering)
@@ -399,10 +399,10 @@ impl Renderer {
         // Create initial highlighting uniform (no sticker highlighted)
         let highlighting_uniform = HighlightingUniform {
             hovered_sticker_index: u32::MAX, // No sticker highlighted
-            highlight_intensity: 0.3,        // 30% intensity
-            _padding1: [0.0; 2],
-            highlight_color: [1.0, 1.0, 0.0], // Yellow highlight
-            _padding2: 0.0,
+            hovered_piece_slot: u32::MAX,    // No piece highlighted
+            _padding: [0; 2],
+            highlight_color: [1.0, 1.0, 0.0, 0.3], // Yellow, 30% intensity
+            piece_highlight_color: [0.2, 0.2, 0.2, 0.6], // Gray, 60% intensity
         };
 
         let highlighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -419,6 +419,18 @@ impl Renderer {
             label: Some("Instance Buffer"),
             contents: bytemuck::cast_slice(&sticker_instances),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Static mapping from sticker instance index to owning piece slot,
+        // for piece-level hover highlighting. Unlike `instance_buffer`, this
+        // never changes, so it's uploaded once with no `COPY_DST` and isn't
+        // kept as a `Renderer` field — `main_bind_group` holds the only
+        // reference it needs after creation.
+        let piece_slots: Vec<u32> = FACET_TABLE.iter().map(|f| f.piece_slot as u32).collect();
+        let piece_slot_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Piece Slot Buffer"),
+            contents: bytemuck::cast_slice(&piece_slots),
+            usage: wgpu::BufferUsages::STORAGE,
         });
 
         // Create debug instance buffer for transparent AABB rendering
@@ -491,7 +503,7 @@ impl Renderer {
                 label: Some("Skybox Bind Group Layout"),
             });
 
-        // Main shader bind group layout (transform, camera, light, instances, highlighting)
+        // Main shader bind group layout (transform, camera, light, instances, highlighting, piece_slots)
         let main_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -540,6 +552,16 @@ impl Renderer {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -689,6 +711,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: highlighting_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: piece_slot_buffer.as_entire_binding(),
                 },
             ],
             label: Some("Main Bind Group"),
@@ -1308,7 +1334,8 @@ impl Renderer {
         self.last_sticker_generation = Some(generation);
     }
 
-    /// Updates the highlighting uniform buffer with the currently hovered sticker.
+    /// Updates the highlighting uniform buffer with the currently hovered
+    /// sticker and its owning piece (looked up via `FACET_TABLE`).
     ///
     /// # Arguments
     /// * `queue` - GPU command queue for buffer updates
@@ -1320,6 +1347,9 @@ impl Renderer {
     ) {
         self.highlighting_uniform.hovered_sticker_index = hovered_sticker_index
             .map(|index| index as u32)
+            .unwrap_or(u32::MAX);
+        self.highlighting_uniform.hovered_piece_slot = hovered_sticker_index
+            .map(|index| FACET_TABLE[index].piece_slot as u32)
             .unwrap_or(u32::MAX);
 
         queue.write_buffer(
