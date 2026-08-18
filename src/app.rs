@@ -114,6 +114,10 @@ pub(crate) struct HypercubeApp {
     debug_mode: bool,
     settings: AppSettings,
     reset_generation: u64,
+    /// True from a `Reset` press until `ResetAnimationComplete` arrives;
+    /// gates the Reset/Random Move(s)/Scramble buttons (disabled), since
+    /// they'd conflict with the in-flight 4D-orientation animation.
+    reset_animating: bool,
     random_moves_generation: u64,
     /// Move count carried alongside `random_moves_generation` for the shader
     /// program to pick up, since a bare generation bump carries no payload
@@ -177,6 +181,7 @@ pub(crate) enum Message {
     RandomMoves(u32),
     ToggleReveal,
     RevealAnimationComplete { final_scale: f32, final_gap: f32 },
+    ResetAnimationComplete,
 }
 
 impl HypercubeApp {
@@ -189,6 +194,7 @@ impl HypercubeApp {
             debug_mode: false,
             settings: settings::load(),
             reset_generation: 0,
+            reset_animating: false,
             random_moves_generation: 0,
             pending_random_move_count: 0,
             sticker_scale_adjusting: false,
@@ -261,6 +267,10 @@ impl HypercubeApp {
             }
             Message::Reset => {
                 self.reset_generation = self.reset_generation.wrapping_add(1);
+                self.reset_animating = true;
+            }
+            Message::ResetAnimationComplete => {
+                self.reset_animating = false;
             }
             Message::RandomMoves(count) => {
                 self.pending_random_move_count = count;
@@ -298,37 +308,50 @@ impl HypercubeApp {
     /// Create the view for the application
     pub(crate) fn view(&self) -> Element<'_, Message> {
         // Left pane with controls
-        let mut controls = Column::new()
-            .spacing(20)
-            .push(
-                Checkbox::new(self.debug_mode)
-                    .label("Debug Mode")
-                    .on_toggle(Message::DebugMode),
-            )
-            .push(
-                Column::new()
-                    .spacing(5)
-                    .push(iced::widget::text("Rotate Button"))
-                    .push(
-                        PickList::new(
-                            &RotateButton::ALL[..],
-                            Some(self.settings.rotate_button),
-                            Message::RotateButton,
-                        )
-                        .width(250),
-                    ),
-            )
-            .push(Button::new("Reset").on_press(Message::Reset))
-            .push(
-                Column::new()
-                    .spacing(5)
-                    .push(Button::new("1 Random Move").on_press(Message::RandomMoves(1)))
-                    .push(Button::new("2 Random Moves").on_press(Message::RandomMoves(2)))
-                    .push(Button::new("3 Random Moves").on_press(Message::RandomMoves(3)))
-                    .push(
-                        Button::new("Scramble").on_press(Message::RandomMoves(SCRAMBLE_MOVE_COUNT)),
-                    ),
-            );
+        let mut controls =
+            Column::new()
+                .spacing(20)
+                .push(
+                    Checkbox::new(self.debug_mode)
+                        .label("Debug Mode")
+                        .on_toggle(Message::DebugMode),
+                )
+                .push(
+                    Column::new()
+                        .spacing(5)
+                        .push(iced::widget::text("Rotate Button"))
+                        .push(
+                            PickList::new(
+                                &RotateButton::ALL[..],
+                                Some(self.settings.rotate_button),
+                                Message::RotateButton,
+                            )
+                            .width(250),
+                        ),
+                )
+                .push(
+                    Button::new("Reset")
+                        .on_press_maybe((!self.reset_animating).then_some(Message::Reset)),
+                )
+                .push(
+                    Column::new()
+                        .spacing(5)
+                        .push(Button::new("1 Random Move").on_press_maybe(
+                            (!self.reset_animating).then_some(Message::RandomMoves(1)),
+                        ))
+                        .push(Button::new("2 Random Moves").on_press_maybe(
+                            (!self.reset_animating).then_some(Message::RandomMoves(2)),
+                        ))
+                        .push(Button::new("3 Random Moves").on_press_maybe(
+                            (!self.reset_animating).then_some(Message::RandomMoves(3)),
+                        ))
+                        .push(
+                            Button::new("Scramble").on_press_maybe(
+                                (!self.reset_animating)
+                                    .then_some(Message::RandomMoves(SCRAMBLE_MOVE_COUNT)),
+                            ),
+                        ),
+                );
 
         if self.debug_mode {
             controls = controls

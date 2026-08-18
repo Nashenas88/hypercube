@@ -3,7 +3,7 @@
 //! This module provides CPU-side 4D rotation calculations, 4D-to-3D projections,
 //! and shared transformation logic to eliminate code duplication.
 
-use nalgebra::{Matrix4, Point3, Vector3, Vector4};
+use nalgebra::{Matrix3, Matrix4, Point3, Quaternion, Rotation3, UnitQuaternion, Vector3, Vector4};
 
 use crate::geometry::{BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS};
 
@@ -252,6 +252,136 @@ pub(crate) fn shortest_arc_plane(
     (from, v, dot.acos())
 }
 
+/// Wraps a `Vector4<f32>` interpreted in `nalgebra`'s native quaternion
+/// coordinate order, `(i, j, k, w)`, as a unit quaternion. Only valid when
+/// `coords` is already known to be unit length, e.g. a column of an
+/// orthogonal matrix.
+fn quat_from_unit_coords(coords: Vector4<f32>) -> UnitQuaternion<f32> {
+    UnitQuaternion::new_unchecked(Quaternion::from(coords))
+}
+
+fn quat_one() -> Vector4<f32> {
+    Vector4::new(0.0, 0.0, 0.0, 1.0)
+}
+fn quat_i() -> Vector4<f32> {
+    Vector4::new(1.0, 0.0, 0.0, 0.0)
+}
+fn quat_j() -> Vector4<f32> {
+    Vector4::new(0.0, 1.0, 0.0, 0.0)
+}
+fn quat_k() -> Vector4<f32> {
+    Vector4::new(0.0, 0.0, 1.0, 0.0)
+}
+
+/// Spherical interpolation from `a` to `b` that lands exactly on `b` at
+/// `t = 1`, even when that means going "the long way" around.
+///
+/// This deliberately does *not* use `UnitQuaternion::slerp`: that method
+/// treats a unit quaternion as a stand-in for a 3D rotation, where `q` and
+/// `-q` represent the identical rotation, so it silently swaps in `-b` for
+/// `b` whenever that's less than 90 degrees away - harmless for a single
+/// rotation, but wrong for one half of an isoclinic pair (see
+/// [`decompose_so4`]): swapping only one half without the other changes
+/// which `SO(4)` matrix the pair composes to.
+pub(crate) fn quat_slerp_exact(
+    a: UnitQuaternion<f32>,
+    b: UnitQuaternion<f32>,
+    t: f32,
+) -> UnitQuaternion<f32> {
+    let a = a.coords;
+    let b = b.coords;
+    let dot = a.dot(&b).clamp(-1.0, 1.0);
+    if dot > 0.9995 {
+        // Too close together for the general formula below (dividing by a
+        // near-zero sin(theta)) to stay numerically stable; linear
+        // interpolation is an indistinguishable approximation over such a
+        // small arc.
+        return quat_from_unit_coords((a + (b - a) * t).normalize());
+    }
+    let theta = dot.acos();
+    let sin_theta = theta.sin();
+    let coeff_a = ((1.0 - t) * theta).sin() / sin_theta;
+    let coeff_b = (t * theta).sin() / sin_theta;
+    quat_from_unit_coords((a * coeff_a + b * coeff_b).normalize())
+}
+
+/// Picks whichever of the two double-cover-equivalent representations
+/// `(p, q)` / `(-p, -q)` of the same `SO(4)` rotation is jointly closer to
+/// `(identity, identity)`, so that slerping both toward identity travels the
+/// shorter combined arc. Flipping only one of the pair would represent a
+/// different rotation, so the sign choice must be made for both at once.
+fn canonicalize_pair(
+    p: UnitQuaternion<f32>,
+    q: UnitQuaternion<f32>,
+) -> (UnitQuaternion<f32>, UnitQuaternion<f32>) {
+    if p.coords.w + q.coords.w < 0.0 {
+        (
+            UnitQuaternion::new_unchecked(-p.into_inner()),
+            UnitQuaternion::new_unchecked(-q.into_inner()),
+        )
+    } else {
+        (p, q)
+    }
+}
+
+/// Decomposes an `SO(4)` rotation matrix into a pair of unit quaternions
+/// `(p, q)` such that `compose_so4(p, q) == m`, where `m` acts on a point
+/// `x` (reinterpreted as a quaternion) as `p * x * q⁻¹`.
+///
+/// A unit quaternion's "conjugate" is its inverse: `q⁻¹ = conjugate(q)`.
+/// Conjugating a pure-imaginary quaternion by a unit quaternion,
+/// `q * v * q⁻¹`, is exactly a 3D rotation of `v` - the same double-cover
+/// trick used to spin 3D objects with quaternions, just applied here to
+/// recover `q` itself.
+///
+/// This pairing is unique only up to `(p, q) ↔ (-p, -q)` (both represent
+/// the same matrix), resolved by [`canonicalize_pair`].
+///
+/// Unlike a single plane rotation (see [`shortest_arc_plane`]), which can
+/// only align one vector, this pair lets an entire rotation be
+/// interpolated toward another (e.g. identity) by slerping `p` and `q`
+/// independently - the true geodesic in `SO(4)`.
+pub(crate) fn decompose_so4(m: &Matrix4<f32>) -> (UnitQuaternion<f32>, UnitQuaternion<f32>) {
+    // a = m applied to the quaternion `1` = p * 1 * q⁻¹ = p * q⁻¹.
+    let a = quat_from_unit_coords(m * quat_one());
+    let mi = quat_from_unit_coords(m * quat_i());
+    let mj = quat_from_unit_coords(m * quat_j());
+
+    // Left-multiplying by a⁻¹ cancels the shared p factor:
+    // a⁻¹ * (p * i * q⁻¹) = q * i * q⁻¹, a pure rotation of i by q.
+    // Same for j. Being pure rotations of i and j, both results are
+    // pure-imaginary (zero scalar part).
+    let a_conj = a.conjugate();
+    let r = (a_conj * mi).into_inner().coords;
+    let s = (a_conj * mj).into_inner().coords;
+    let r_vec = Vector3::new(r.x, r.y, r.z);
+    let s_vec = Vector3::new(s.x, s.y, s.z);
+    // q * k * q⁻¹ = (q * i * q⁻¹) x (q * j * q⁻¹): a unit-quaternion
+    // conjugation is an orientation-preserving 3D rotation, so it commutes
+    // with the cross product - no need to compute it directly.
+    let t_vec = r_vec.cross(&s_vec);
+
+    // r_vec, s_vec, t_vec are q's rotation of the 3D basis vectors i, j, k -
+    // i.e. the columns of q's 3x3 rotation matrix. Recover q from it.
+    let rot3 = Rotation3::from_matrix_unchecked(Matrix3::from_columns(&[r_vec, s_vec, t_vec]));
+    let q = UnitQuaternion::from_rotation_matrix(&rot3);
+    let p = a * q; // a = p * q⁻¹  =>  p = a * q
+
+    canonicalize_pair(p, q)
+}
+
+/// Rebuilds the `SO(4)` rotation matrix `M(x) = p * x * q⁻¹` from an
+/// isoclinic quaternion pair. Inverse of [`decompose_so4`].
+pub(crate) fn compose_so4(p: UnitQuaternion<f32>, q: UnitQuaternion<f32>) -> Matrix4<f32> {
+    let q_inv = q.conjugate();
+    let columns = [quat_i(), quat_j(), quat_k(), quat_one()].map(|coords| {
+        (p * quat_from_unit_coords(coords) * q_inv)
+            .into_inner()
+            .coords
+    });
+    Matrix4::from_columns(&columns)
+}
+
 /// Check if a 4D face is visible from the viewer position.
 ///
 /// Replaces the duplicate implementation in ray_casting.rs is_face_visible().
@@ -407,5 +537,99 @@ mod tests {
         let result = visible_faces(&Matrix4::identity(), VIEWER_DISTANCE);
         assert!(result[0], "face 0 (W=-1) should be visible");
         assert!(!result[7], "face 7 (W=+1) should be culled");
+    }
+
+    fn assert_matrix4_close(a: Matrix4<f32>, b: Matrix4<f32>) {
+        assert!(
+            (a - b).norm() < EPSILON,
+            "expected {b:?} to be close to {a:?}"
+        );
+    }
+
+    /// A rotation combining unequal angles in two orthogonal, non-interacting
+    /// planes (`xw` and `yz` share no axis) - a "double rotation". Its
+    /// isoclinic pair (see `decompose_so4`) ends up with unequal angles too,
+    /// unlike a single-plane rotation, whose pair splits the angle evenly
+    /// between `p` and `q`.
+    fn double_rotation(xw_angle: f32, yz_angle: f32) -> Matrix4<f32> {
+        let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let y = Vector4::new(0.0, 1.0, 0.0, 0.0);
+        let z = Vector4::new(0.0, 0.0, 1.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        create_4d_plane_rotation(x, w, xw_angle) * create_4d_plane_rotation(y, z, yz_angle)
+    }
+
+    fn sample_so4_matrices() -> Vec<Matrix4<f32>> {
+        let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let y = Vector4::new(0.0, 1.0, 0.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        vec![
+            Matrix4::identity(),
+            create_4d_plane_rotation(x, w, 0.7),
+            create_4d_plane_rotation(y, w, -1.3),
+            create_4d_plane_rotation(x, w, 0.4) * create_4d_plane_rotation(y, w, 0.9),
+            process_4d_rotation(
+                &Matrix4::identity(),
+                37.0,
+                -21.0,
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
+            process_4d_rotation(
+                &create_4d_plane_rotation(x, w, 2.1),
+                14.0,
+                50.0,
+                Vector3::new(0.0, 0.0, -1.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
+            double_rotation(2.5, 1.0),
+        ]
+    }
+
+    #[test]
+    fn decompose_so4_round_trips() {
+        for m in sample_so4_matrices() {
+            let (p, q) = decompose_so4(&m);
+            assert_matrix4_close(compose_so4(p, q), m);
+        }
+    }
+
+    #[test]
+    fn decompose_so4_of_identity_is_identity_pair() {
+        let (p, q) = decompose_so4(&Matrix4::identity());
+        assert!((p.coords - UnitQuaternion::identity().coords).norm() < EPSILON);
+        assert!((q.coords - UnitQuaternion::identity().coords).norm() < EPSILON);
+    }
+
+    #[test]
+    fn slerping_isoclinic_pair_to_identity_composes_to_identity() {
+        for m in sample_so4_matrices() {
+            let (p, q) = decompose_so4(&m);
+            let identity = UnitQuaternion::identity();
+            let p_end = quat_slerp_exact(p, identity, 1.0);
+            let q_end = quat_slerp_exact(q, identity, 1.0);
+            assert_matrix4_close(compose_so4(p_end, q_end), Matrix4::identity());
+        }
+    }
+
+    /// `double_rotation(2.5, 1.0)`'s isoclinic pair has one quaternion more
+    /// than 90 degrees from `identity`, exercising the `dot < 0` case where
+    /// `quat_slerp_exact` must diverge from `UnitQuaternion::slerp`.
+    #[test]
+    fn quat_slerp_exact_reaches_the_exact_target_even_when_far_away() {
+        let (p, q) = decompose_so4(&double_rotation(2.5, 1.0));
+        let identity = UnitQuaternion::identity();
+        assert!(
+            p.coords.w < 0.0 || q.coords.w < 0.0,
+            "test setup must exercise the dot < 0 branch"
+        );
+
+        for &(a, name) in &[(p, "p"), (q, "q")] {
+            let end = quat_slerp_exact(a, identity, 1.0);
+            assert!(
+                (end.coords - identity.coords).norm() < EPSILON,
+                "{name}: expected exact identity at t=1, got {end:?}"
+            );
+        }
     }
 }

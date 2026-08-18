@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use iced::wgpu;
 use iced::widget::{Action, shader};
 use iced::{Event, Point, Rectangle, event, mouse};
-use nalgebra::{Matrix4, Vector3, Vector4};
+use nalgebra::{Matrix4, UnitQuaternion, Vector3, Vector4};
 
 use crate::app::{AABBMode, Message, RenderMode};
 use crate::camera::{Camera, CameraController, Projection};
@@ -18,8 +18,8 @@ use crate::geometry::{
     BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES, VERTEX_NORMAL_INDICES,
 };
 use crate::math::{
-    GRID_EXTENT, VIEWER_DISTANCE, create_4d_plane_rotation, process_4d_rotation,
-    project_cube_point, shortest_arc_plane, visible_faces,
+    GRID_EXTENT, VIEWER_DISTANCE, compose_so4, create_4d_plane_rotation, decompose_so4,
+    process_4d_rotation, project_cube_point, quat_slerp_exact, shortest_arc_plane, visible_faces,
 };
 use crate::moves::{base_angle, clockwise_sign, rotate_local_position};
 use crate::piece::{
@@ -62,6 +62,19 @@ struct AnimatingFocus {
     start_rotation: Matrix4<f32>,
     plane: (Vector4<f32>, Vector4<f32>),
     total_angle: f32,
+    elapsed: Duration,
+    duration: Duration,
+}
+
+/// An in-progress "return to default orientation" animation, triggered by
+/// Reset: slerps the isoclinic quaternion pair (see `math::decompose_so4`)
+/// describing `rotation_4d` when Reset was pressed toward the identity
+/// quaternion pair, recomposing `rotation_4d` each tick. Unlike
+/// `AnimatingFocus`, which rotates in a single plane, this can undo an
+/// arbitrary accumulated 4D orientation.
+struct AnimatingReset {
+    start_p: UnitQuaternion<f32>,
+    start_q: UnitQuaternion<f32>,
     elapsed: Duration,
     duration: Duration,
 }
@@ -338,6 +351,7 @@ pub struct HypercubeShaderState {
     hypercube: Hypercube,
     animating_move: Option<AnimatingMove>,
     animating_focus: Option<AnimatingFocus>,
+    animating_reset: Option<AnimatingReset>,
     animating_reveal: Option<AnimatingReveal>,
     /// Live sticker scale/face gap while a reveal/hide flourish is playing,
     /// consulted by `draw()`/`update_hover` in preference to
@@ -443,10 +457,19 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.animating_focus = None;
             state.rotate_press = None;
             state.pending_face_click = None;
-            state.last_redraw_instant = None;
             state.hovered_sticker = None;
             state.debug_instances.clear();
             state.reset_generation = self.reset_generation;
+
+            let (start_p, start_q) = decompose_so4(&state.rotation_4d);
+            state.animating_reset = Some(AnimatingReset {
+                start_p,
+                start_q,
+                elapsed: Duration::ZERO,
+                duration: Duration::from_millis(self.animation_duration_ms as u64),
+            });
+            state.last_redraw_instant = None;
+
             let instances = sticker_instances_for_render(state);
             state.set_cached_sticker_instances(instances);
             return Some(Action::request_redraw());
@@ -530,6 +553,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
         // `animating_move` was and still is absent.
         let mut regenerate_stickers = false;
         let mut reveal_completed_message: Option<Message> = None;
+        let mut reset_completed_message: Option<Message> = None;
 
         let status = match event {
             Event::Mouse(mouse_event) => {
@@ -554,6 +578,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 let was_animating = state.animating_move.is_some();
                 let move_tick = Self::advance_animation(state, delta);
                 let focus_tick = Self::advance_focus_animation(state, delta);
+                let reset_tick = Self::advance_reset_animation(state, delta);
                 let reveal_tick = Self::advance_reveal_animation(state, delta);
 
                 if was_animating || state.animating_move.is_some() {
@@ -562,6 +587,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 
                 if state.animating_move.is_none()
                     && state.animating_focus.is_none()
+                    && state.animating_reset.is_none()
                     && state.animating_reveal.is_none()
                 {
                     state.last_redraw_instant = None;
@@ -572,19 +598,27 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 if matches!(
                     focus_tick,
                     AnimationTick::Running | AnimationTick::Completed
+                ) || matches!(
+                    reset_tick,
+                    AnimationTick::Running | AnimationTick::Completed
                 ) {
                     rotation_changed = true;
                 }
 
                 if matches!(
-                    (&move_tick, &focus_tick, &reveal_tick),
-                    (AnimationTick::Completed, _, _)
-                        | (_, AnimationTick::Completed, _)
-                        | (_, _, AnimationTick::Completed)
+                    (&move_tick, &focus_tick, &reset_tick, &reveal_tick),
+                    (AnimationTick::Completed, _, _, _)
+                        | (_, AnimationTick::Completed, _, _)
+                        | (_, _, AnimationTick::Completed, _)
+                        | (_, _, _, AnimationTick::Completed)
                 ) && !state.mouse_pressed
                     && let Some(position) = cursor.position_in(bounds)
                 {
                     self.update_hover(state, position, bounds);
+                }
+
+                if matches!(reset_tick, AnimationTick::Completed) {
+                    reset_completed_message = Some(Message::ResetAnimationComplete);
                 }
 
                 if matches!(reveal_tick, AnimationTick::Completed) {
@@ -601,6 +635,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 
                 if matches!(move_tick, AnimationTick::Ignored)
                     && matches!(focus_tick, AnimationTick::Ignored)
+                    && matches!(reset_tick, AnimationTick::Ignored)
                     && matches!(reveal_tick, AnimationTick::Ignored)
                 {
                     event::Status::Ignored
@@ -620,7 +655,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.set_cached_sticker_instances(instances);
         }
 
-        if let Some(message) = reveal_completed_message {
+        if let Some(message) = reset_completed_message.or(reveal_completed_message) {
             return Some(Action::publish(message));
         }
 
@@ -785,15 +820,20 @@ impl HypercubeShaderProgram {
                     // Apply mouse movement to camera or 4D rotation
                     if state.mouse_pressed {
                         if state.shift_pressed {
-                            // 4D rotation, camera-relative
-                            let (right, up) = state.camera.right_and_up();
-                            state.rotation_4d = process_4d_rotation(
-                                &state.rotation_4d,
-                                delta_x,
-                                delta_y,
-                                right,
-                                up,
-                            );
+                            // 4D rotation, camera-relative. Skipped while
+                            // `animating_reset` is already driving
+                            // `rotation_4d`, rather than fighting it
+                            // frame-by-frame.
+                            if state.animating_reset.is_none() {
+                                let (right, up) = state.camera.right_and_up();
+                                state.rotation_4d = process_4d_rotation(
+                                    &state.rotation_4d,
+                                    delta_x,
+                                    delta_y,
+                                    right,
+                                    up,
+                                );
+                            }
                         } else {
                             // 3D camera rotation
                             state
@@ -833,6 +873,7 @@ impl HypercubeShaderProgram {
                     && *button == self.rotate_button.click_button()
                     && state.animating_move.is_none()
                     && state.animating_focus.is_none()
+                    && state.animating_reset.is_none()
                     && state.animating_reveal.is_none()
                     && let Some(sticker_index) = state.hovered_sticker
                 {
@@ -934,7 +975,11 @@ impl HypercubeShaderProgram {
                 last_face == face_id && now.duration_since(last_time) <= DOUBLE_CLICK_WINDOW
             });
 
-        if is_double_click && state.animating_move.is_none() && state.animating_focus.is_none() {
+        if is_double_click
+            && state.animating_move.is_none()
+            && state.animating_focus.is_none()
+            && state.animating_reset.is_none()
+        {
             self.start_focus_animation(state, face_id);
             state.pending_face_click = None;
         } else {
@@ -1046,6 +1091,36 @@ impl HypercubeShaderProgram {
 
         if animating.elapsed >= animating.duration {
             state.animating_focus = None;
+            return AnimationTick::Completed;
+        }
+
+        AnimationTick::Running
+    }
+
+    /// Advances an in-progress reset animation (see `AnimatingReset`) by
+    /// `delta`, slerping both quaternions toward identity and recomposing
+    /// `rotation_4d`, mirroring `advance_focus_animation`'s shape.
+    fn advance_reset_animation(state: &mut HypercubeShaderState, delta: Duration) -> AnimationTick {
+        let Some(animating) = state.animating_reset.as_mut() else {
+            return AnimationTick::Ignored;
+        };
+
+        animating.elapsed += delta;
+
+        let t = if animating.duration.is_zero() {
+            1.0
+        } else {
+            (animating.elapsed.as_secs_f32() / animating.duration.as_secs_f32()).clamp(0.0, 1.0)
+        };
+        let eased = ease(t);
+        let identity = UnitQuaternion::identity();
+        let p = quat_slerp_exact(animating.start_p, identity, eased);
+        let q = quat_slerp_exact(animating.start_q, identity, eased);
+        state.rotation_4d = compose_so4(p, q);
+
+        if animating.elapsed >= animating.duration {
+            state.rotation_4d = Matrix4::identity();
+            state.animating_reset = None;
             return AnimationTick::Completed;
         }
 
@@ -1165,6 +1240,7 @@ impl Default for HypercubeShaderState {
             hypercube,
             animating_move: None,
             animating_focus: None,
+            animating_reset: None,
             animating_reveal: None,
             reveal_scale_override: None,
             reveal_gap_override: None,
@@ -1368,7 +1444,8 @@ mod tests {
                             round_key(expected),
                             "mismatch for side_axis={side_axis} side_sign={side_sign} \
                              local_coords={local_coords:?} piece_slot={} axis={}",
-                            facet.piece_slot, facet.axis
+                            facet.piece_slot,
+                            facet.axis
                         );
                     }
                 }
@@ -1551,6 +1628,11 @@ mod tests {
         let mut state = HypercubeShaderState::default();
         assert_eq!(state.reset_generation, 0);
 
+        let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        let starting_rotation = create_4d_plane_rotation(x, w, 1.2);
+        state.rotation_4d = starting_rotation;
+
         let facet = FACET_TABLE
             .iter()
             .find(|f| f.is_actionable)
@@ -1609,6 +1691,22 @@ mod tests {
             bytemuck::cast_slice::<_, u8>(state.cached_sticker_instances.as_ref()),
             bytemuck::cast_slice::<_, u8>(&generate_sticker_instances(&Hypercube::solved())),
         );
+
+        // The 4D orientation must not snap instantly - it's handed off to
+        // `AnimatingReset` to animate back to identity over subsequent
+        // ticks.
+        assert!(
+            (state.rotation_4d - starting_rotation).norm() < 1e-4,
+            "rotation_4d must be untouched at the instant reset is pressed"
+        );
+        let animating = state
+            .animating_reset
+            .as_ref()
+            .expect("reset must start a 4D orientation animation");
+        let (expected_p, expected_q) = decompose_so4(&starting_rotation);
+        assert!((animating.start_p.coords - expected_p.coords).norm() < 1e-4);
+        assert!((animating.start_q.coords - expected_q.coords).norm() < 1e-4);
+        assert_eq!(animating.duration, Duration::from_millis(250));
     }
 
     #[test]
@@ -1846,6 +1944,37 @@ mod tests {
         assert_eq!(state.reveal_gap_override, Some(1.0));
         assert_eq!(state.camera_controller.yaw, 10.0 + REVEAL_YAW_SPIN_DEGREES);
         assert!(state.animating_reveal.is_none());
+    }
+
+    #[test]
+    fn advance_reset_animation_interpolates_and_completes() {
+        let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        let start_rotation = create_4d_plane_rotation(x, w, 1.2);
+        let (start_p, start_q) = decompose_so4(&start_rotation);
+
+        let mut state = HypercubeShaderState {
+            rotation_4d: start_rotation,
+            animating_reset: Some(AnimatingReset {
+                start_p,
+                start_q,
+                elapsed: Duration::ZERO,
+                duration: Duration::from_millis(1000),
+            }),
+            ..Default::default()
+        };
+
+        let tick = HypercubeShaderProgram::advance_reset_animation(&mut state, Duration::ZERO);
+        assert!(matches!(tick, AnimationTick::Running));
+        assert!((state.rotation_4d - start_rotation).norm() < 1e-4);
+
+        let tick = HypercubeShaderProgram::advance_reset_animation(
+            &mut state,
+            Duration::from_millis(2000),
+        );
+        assert!(matches!(tick, AnimationTick::Completed));
+        assert!((state.rotation_4d - Matrix4::identity()).norm() < 1e-4);
+        assert!(state.animating_reset.is_none());
     }
 
     /// A bumped `reveal_generation` with `revealed_target: true` must start
