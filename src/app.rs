@@ -2,9 +2,12 @@
 
 use std::time::Duration;
 
-use iced::widget::{Button, Checkbox, Column, PickList, Row, Shader, Slider};
+use iced::widget::{Button, Checkbox, Column, PickList, Row, Shader, Slider, Space};
 use iced::{Element, Length, Task};
 
+use crate::menu_overlay;
+use crate::piece::Hypercube;
+use crate::puzzle_state;
 use crate::settings::{self, ANIMATION_DURATION_MS_RANGE, AppSettings, RotateButton};
 use crate::shader_widget::{HypercubeShaderProgram, PRIMARY_FACE_GAP, PRIMARY_STICKER_SCALE};
 
@@ -35,14 +38,9 @@ impl std::fmt::Display for RenderMode {
 }
 
 impl RenderMode {
-    const ALL: [RenderMode; 3] = [RenderMode::Standard, RenderMode::Normals, RenderMode::Depth];
+    pub(crate) const ALL: [RenderMode; 3] =
+        [RenderMode::Standard, RenderMode::Normals, RenderMode::Depth];
 }
-
-/// Move count for the "Scramble" button. 25 mixes a 27-piece side several
-/// times over (180-degree edge and 120-degree corner turns disturb most of
-/// a side per move), enough that the puzzle reads as thoroughly shuffled
-/// without an excessive click-to-solved feel for manual play.
-const SCRAMBLE_MOVE_COUNT: u32 = 25;
 
 impl std::fmt::Display for AABBMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,7 +53,7 @@ impl std::fmt::Display for AABBMode {
 }
 
 impl AABBMode {
-    const ALL: [AABBMode; 3] = [AABBMode::None, AABBMode::Face, AABBMode::Sticker];
+    pub(crate) const ALL: [AABBMode; 3] = [AABBMode::None, AABBMode::Face, AABBMode::Sticker];
 }
 
 /// Formats the floating tooltip text for the sticker scale slider.
@@ -89,7 +87,7 @@ fn tooltip_delay(is_adjusting: bool) -> Duration {
 /// same frame), so the label alone can't read `revealed` directly while
 /// `reveal_animating` is still true or it would flip early - it keeps
 /// reporting the pre-press state until the flourish settles.
-fn reveal_button_label(revealed: bool, reveal_animating: bool) -> &'static str {
+pub(crate) fn reveal_button_label(revealed: bool, reveal_animating: bool) -> &'static str {
     match (revealed, reveal_animating) {
         (true, false) => "Hide",
         (false, false) => "Reveal",
@@ -114,10 +112,6 @@ pub(crate) struct HypercubeApp {
     debug_mode: bool,
     settings: AppSettings,
     reset_generation: u64,
-    /// True from a `Reset` press until `ResetAnimationComplete` arrives;
-    /// gates the Reset/Random Move(s)/Scramble buttons (disabled), since
-    /// they'd conflict with the in-flight 4D-orientation animation.
-    reset_animating: bool,
     random_moves_generation: u64,
     /// Move count carried alongside `random_moves_generation` for the shader
     /// program to pick up, since a bare generation bump carries no payload
@@ -138,6 +132,10 @@ pub(crate) struct HypercubeApp {
     /// already kicked off. See [`next_reveal_loop_action`].
     #[cfg(feature = "gpu-capture-hooks")]
     reveal_loop_remaining: u32,
+    about_open: bool,
+    save_generation: u64,
+    load_generation: u64,
+    pending_load: Option<Hypercube>,
 }
 
 /// Number of scripted flourishes still to run, after the one the boot task
@@ -180,8 +178,18 @@ pub(crate) enum Message {
     Reset,
     RandomMoves(u32),
     ToggleReveal,
-    RevealAnimationComplete { final_scale: f32, final_gap: f32 },
-    ResetAnimationComplete,
+    RevealAnimationComplete {
+        final_scale: f32,
+        final_gap: f32,
+    },
+    SavePuzzle,
+    PuzzleReadyToSave(Hypercube),
+    LoadPuzzle,
+    Quit,
+    OpenAbout,
+    CloseAbout,
+    /// Target of the Puzzle menu's inert spacer rows (`menu_common::puzzle_items`).
+    NoOp,
 }
 
 impl HypercubeApp {
@@ -194,7 +202,6 @@ impl HypercubeApp {
             debug_mode: false,
             settings: settings::load(),
             reset_generation: 0,
-            reset_animating: false,
             random_moves_generation: 0,
             pending_random_move_count: 0,
             sticker_scale_adjusting: false,
@@ -205,6 +212,10 @@ impl HypercubeApp {
             reveal_animating: false,
             #[cfg(feature = "gpu-capture-hooks")]
             reveal_loop_remaining: REVEAL_LOOP_REPEATS,
+            about_open: false,
+            save_generation: 0,
+            load_generation: 0,
+            pending_load: None,
         }
     }
 
@@ -267,10 +278,6 @@ impl HypercubeApp {
             }
             Message::Reset => {
                 self.reset_generation = self.reset_generation.wrapping_add(1);
-                self.reset_animating = true;
-            }
-            Message::ResetAnimationComplete => {
-                self.reset_animating = false;
             }
             Message::RandomMoves(count) => {
                 self.pending_random_move_count = count;
@@ -300,93 +307,71 @@ impl HypercubeApp {
                     };
                 }
             }
+            Message::SavePuzzle => {
+                self.save_generation = self.save_generation.wrapping_add(1);
+            }
+            Message::PuzzleReadyToSave(hypercube) => {
+                puzzle_state::save(&hypercube);
+            }
+            Message::LoadPuzzle => {
+                self.pending_load = puzzle_state::load();
+                self.load_generation = self.load_generation.wrapping_add(1);
+            }
+            Message::Quit => return iced::exit(),
+            Message::OpenAbout => {
+                self.about_open = true;
+            }
+            Message::CloseAbout => {
+                self.about_open = false;
+            }
+            Message::NoOp => {}
         }
 
         Task::none()
     }
 
+    /// Global keyboard shortcuts, mirroring the File/Help menu items.
+    pub(crate) fn subscription(&self) -> iced::Subscription<Message> {
+        use iced::keyboard::{Key, key};
+
+        iced::keyboard::listen().filter_map(|event| {
+            let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
+                return None;
+            };
+
+            match (key.as_ref(), modifiers.control()) {
+                (Key::Character("q"), true) => Some(Message::Quit),
+                (Key::Character("s"), true) => Some(Message::SavePuzzle),
+                (Key::Character("o"), true) => Some(Message::LoadPuzzle),
+                (Key::Named(key::Named::F1), _) => Some(Message::OpenAbout),
+                _ => None,
+            }
+        })
+    }
+
     /// Create the view for the application
     pub(crate) fn view(&self) -> Element<'_, Message> {
         // Left pane with controls
-        let mut controls =
-            Column::new()
-                .spacing(20)
-                .push(
-                    Checkbox::new(self.debug_mode)
-                        .label("Debug Mode")
-                        .on_toggle(Message::DebugMode),
-                )
-                .push(
-                    Column::new()
-                        .spacing(5)
-                        .push(iced::widget::text("Rotate Button"))
-                        .push(
-                            PickList::new(
-                                &RotateButton::ALL[..],
-                                Some(self.settings.rotate_button),
-                                Message::RotateButton,
-                            )
-                            .width(250),
-                        ),
-                )
-                .push(
-                    Button::new("Reset")
-                        .on_press_maybe((!self.reset_animating).then_some(Message::Reset)),
-                )
-                .push(
-                    Column::new()
-                        .spacing(5)
-                        .push(Button::new("1 Random Move").on_press_maybe(
-                            (!self.reset_animating).then_some(Message::RandomMoves(1)),
-                        ))
-                        .push(Button::new("2 Random Moves").on_press_maybe(
-                            (!self.reset_animating).then_some(Message::RandomMoves(2)),
-                        ))
-                        .push(Button::new("3 Random Moves").on_press_maybe(
-                            (!self.reset_animating).then_some(Message::RandomMoves(3)),
-                        ))
-                        .push(
-                            Button::new("Scramble").on_press_maybe(
-                                (!self.reset_animating)
-                                    .then_some(Message::RandomMoves(SCRAMBLE_MOVE_COUNT)),
-                            ),
-                        ),
-                );
-
-        if self.debug_mode {
-            controls = controls
-                .push(
-                    Column::new()
-                        .spacing(5)
-                        .push(iced::widget::text("Render Mode"))
-                        .push(
-                            PickList::new(
-                                &RenderMode::ALL[..],
-                                Some(self.render_mode),
-                                Message::RenderMode,
-                            )
-                            .width(250),
-                        ),
-                )
-                .push(
-                    Column::new()
-                        .spacing(5)
-                        .push(iced::widget::text("AABB Mode"))
-                        .push(
-                            PickList::new(
-                                &AABBMode::ALL[..],
-                                Some(self.aabb_mode),
-                                Message::AABBMode,
-                            )
-                            .width(250),
-                        ),
-                );
-        }
-
-        controls = controls.push(
-            Button::new(reveal_button_label(self.revealed, self.reveal_animating))
-                .on_press_maybe((!self.reveal_animating).then_some(Message::ToggleReveal)),
-        );
+        let mut controls = Column::new()
+            .spacing(20)
+            .push(
+                Checkbox::new(self.debug_mode)
+                    .label("Debug Mode")
+                    .on_toggle(Message::DebugMode),
+            )
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(iced::widget::text("Rotate Button"))
+                    .push(
+                        PickList::new(
+                            &RotateButton::ALL[..],
+                            Some(self.settings.rotate_button),
+                            Message::RotateButton,
+                        )
+                        .width(250),
+                    ),
+            );
 
         if sliders_visible(self.revealed, self.reveal_animating) {
             controls = controls
@@ -464,12 +449,15 @@ impl HypercubeApp {
             self.pending_random_move_count,
             self.reveal_generation,
             self.revealed,
+            self.save_generation,
+            self.load_generation,
+            self.pending_load.clone(),
         ))
         .width(Length::Fill)
         .height(Length::Fill);
 
-        // Main layout: left controls + right viewport
-        Row::new()
+        // Main layout: menu bar above menu bar + left controls + right viewport
+        let main_row = Row::new()
             .spacing(10)
             .padding(10)
             .push(
@@ -477,9 +465,64 @@ impl HypercubeApp {
                     .width(Length::Shrink)
                     .height(Length::Fill),
             )
-            .push(viewport)
-            .into()
+            .push(viewport);
+
+        let menu_bar = menu_overlay::bar(
+            self.debug_mode,
+            self.render_mode,
+            self.aabb_mode,
+            self.revealed,
+            self.reveal_animating,
+        );
+
+        let content: Element<'_, Message> = Column::new().push(menu_bar).push(main_row).into();
+
+        // Always a 2-layer stack regardless of `about_open`, not a
+        // conditional stack - keeps `content`'s widget-tree position stable.
+        let about_layer: Element<'_, Message> = if self.about_open {
+            about_modal()
+        } else {
+            Space::new().into()
+        };
+
+        iced::widget::stack([content, about_layer]).into()
     }
+}
+
+/// The Help menu's "About" popup: version plus the mouse/keyboard control
+/// scheme.
+fn about_modal<'a>() -> Element<'a, Message> {
+    let content = Column::new()
+        .spacing(10)
+        .padding(20)
+        .push(iced::widget::text("4D Hypercube").size(24))
+        .push(iced::widget::text(format!(
+            "Version {}",
+            env!("CARGO_PKG_VERSION")
+        )))
+        .push(iced::widget::text(
+            "Drag with the rotate button to orbit in 3D.",
+        ))
+        .push(iced::widget::text(
+            "Hold Shift while dragging to rotate in 4D.",
+        ))
+        .push(iced::widget::text(
+            "Click a facet with the other mouse button to turn that side.",
+        ))
+        .push(iced::widget::text("Double-click a face to center it."))
+        .push(iced::widget::text(
+            "Ctrl+S save puzzle, Ctrl+O load puzzle, Ctrl+Q quit.",
+        ))
+        .push(Button::new("Close").on_press(Message::CloseAbout));
+
+    let popup = iced::widget::container(content)
+        .width(420)
+        .style(iced::widget::container::rounded_box);
+
+    iced::widget::opaque(
+        iced::widget::mouse_area(iced::widget::center(iced::widget::opaque(popup)))
+            .on_press(Message::CloseAbout),
+    )
 }
 
 #[cfg(test)]

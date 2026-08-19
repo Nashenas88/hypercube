@@ -9,8 +9,11 @@ mod app;
 mod camera;
 mod geometry;
 mod math;
+mod menu_layout;
+mod menu_overlay;
 mod moves;
 pub mod piece;
+mod puzzle_state;
 mod ray_casting;
 mod renderer;
 mod settings;
@@ -26,6 +29,7 @@ pub fn run() -> iced::Result {
         app::HypercubeApp::view,
     )
     .title(app::HypercubeApp::title)
+    .subscription(app::HypercubeApp::subscription)
     .settings(Settings {
         antialiasing: true,
         ..Settings::default()

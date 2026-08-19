@@ -4,6 +4,7 @@
 //! logic, camera controls, and 4D transformations. It follows Option C architecture
 //! where the shader widget manages its own state independently.
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -374,6 +375,8 @@ pub struct HypercubeShaderState {
     /// run-to-run in the live app (`Rng::new()` seeds from OS entropy).
     rng: fastrand::Rng,
     reveal_generation: u64,
+    save_generation: u64,
+    load_generation: u64,
 }
 
 impl HypercubeShaderState {
@@ -406,6 +409,10 @@ pub struct HypercubeShaderProgram {
     random_move_count: u32,
     reveal_generation: u64,
     revealed_target: bool,
+    save_generation: u64,
+    load_generation: u64,
+    /// Puzzle state loaded by a `LoadPuzzle` press, if any.
+    pending_load: Cell<Option<Hypercube>>,
 }
 
 impl HypercubeShaderProgram {
@@ -423,6 +430,9 @@ impl HypercubeShaderProgram {
         random_move_count: u32,
         reveal_generation: u64,
         revealed_target: bool,
+        save_generation: u64,
+        load_generation: u64,
+        pending_load: Option<Hypercube>,
     ) -> Self {
         Self {
             sticker_scale,
@@ -436,6 +446,9 @@ impl HypercubeShaderProgram {
             random_move_count,
             reveal_generation,
             revealed_target,
+            save_generation,
+            load_generation,
+            pending_load: Cell::new(pending_load),
         }
     }
 }
@@ -490,6 +503,32 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             let instances = sticker_instances_for_render(state);
             state.set_cached_sticker_instances(instances);
             return Some(Action::request_redraw());
+        }
+
+        if self.save_generation != state.save_generation {
+            state.save_generation = self.save_generation;
+            return Some(Action::publish(Message::PuzzleReadyToSave(
+                state.hypercube.clone(),
+            )));
+        }
+
+        if self.load_generation != state.load_generation {
+            state.load_generation = self.load_generation;
+
+            if let Some(hypercube) = self.pending_load.take() {
+                state.hypercube = hypercube;
+                state.animating_move = None;
+                state.animating_focus = None;
+                state.rotate_press = None;
+                state.pending_face_click = None;
+                state.hovered_sticker = None;
+                state.debug_instances.clear();
+                state.last_redraw_instant = None;
+
+                let instances = sticker_instances_for_render(state);
+                state.set_cached_sticker_instances(instances);
+                return Some(Action::request_redraw());
+            }
         }
 
         // Once `HypercubeApp` has caught up to a completed reveal/hide
@@ -553,7 +592,6 @@ impl shader::Program<Message> for HypercubeShaderProgram {
         // `animating_move` was and still is absent.
         let mut regenerate_stickers = false;
         let mut reveal_completed_message: Option<Message> = None;
-        let mut reset_completed_message: Option<Message> = None;
 
         let status = match event {
             Event::Mouse(mouse_event) => {
@@ -617,10 +655,6 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                     self.update_hover(state, position, bounds);
                 }
 
-                if matches!(reset_tick, AnimationTick::Completed) {
-                    reset_completed_message = Some(Message::ResetAnimationComplete);
-                }
-
                 if matches!(reveal_tick, AnimationTick::Completed) {
                     let (final_scale, final_gap) = if self.revealed_target {
                         (SECONDARY_STICKER_SCALE, SECONDARY_FACE_GAP)
@@ -655,7 +689,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.set_cached_sticker_instances(instances);
         }
 
-        if let Some(message) = reset_completed_message.or(reveal_completed_message) {
+        if let Some(message) = reveal_completed_message {
             return Some(Action::publish(message));
         }
 
@@ -1251,6 +1285,8 @@ impl Default for HypercubeShaderState {
             random_moves_generation: 0,
             rng: fastrand::Rng::new(),
             reveal_generation: 0,
+            save_generation: 0,
+            load_generation: 0,
         }
     }
 }
@@ -1666,6 +1702,9 @@ mod tests {
             0,
             0,
             false,
+            0,
+            0,
+            None,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -1732,6 +1771,9 @@ mod tests {
             3,
             0,
             false,
+            0,
+            0,
+            None,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -1772,6 +1814,9 @@ mod tests {
             0,
             0,
             false,
+            0,
+            0,
+            None,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -1806,6 +1851,9 @@ mod tests {
             0,
             state.reveal_generation,
             false,
+            0,
+            0,
+            None,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -1846,6 +1894,9 @@ mod tests {
             0,
             state.reveal_generation,
             false,
+            0,
+            0,
+            None,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
@@ -1895,6 +1946,9 @@ mod tests {
             0,
             state.reveal_generation,
             false,
+            0,
+            0,
+            None,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -2026,6 +2080,9 @@ mod tests {
             0,
             1,
             true,
+            0,
+            0,
+            None,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -2069,6 +2126,9 @@ mod tests {
             0,
             1,
             false,
+            0,
+            0,
+            None,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         program.update(
@@ -2111,6 +2171,9 @@ mod tests {
             0,
             0,
             false,
+            0,
+            0,
+            None,
         );
         stale_program.update(
             &mut state,
@@ -2133,6 +2196,9 @@ mod tests {
             0,
             0,
             false,
+            0,
+            0,
+            None,
         );
         caught_up_program.update(
             &mut state,
@@ -2176,6 +2242,9 @@ mod tests {
             0,
             0,
             true,
+            0,
+            0,
+            None,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let action = program.update(
@@ -2231,6 +2300,9 @@ mod tests {
             0,
             0,
             true,
+            0,
+            0,
+            None,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
