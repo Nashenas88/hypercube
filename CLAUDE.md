@@ -38,6 +38,7 @@ short pointer:
 - `renderer.rs` — owns wgpu resources; per-face instanced draws; generation-gated buffer uploads. See `context/renderer.md`.
 - `camera.rs` — 3D orbit camera (`Camera`, `CameraController`, `Projection`). See `context/camera.md`.
 - `math.rs` — CPU-side 4D rotation matrices and 4D→3D perspective projection. See `context/math.md`.
+- `animation.rs` — shared animation-timing helper (`ease`, a smoothstep curve). See `context/animation.md`.
 - `geometry.rs` — static, puzzle-state-independent tables (face centers, vertices, winding). See `context/geometry.md`.
 - `piece.rs` — core domain model (`Piece`, `Hypercube`, `FACET_TABLE`, sticker instance generation). See `context/piece.md`.
 - `moves.rs` — move application: rotates a 3×3×3 side, snaps to an exact permutation. See `context/moves.md`.

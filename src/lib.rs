@@ -5,6 +5,7 @@
 
 use iced::Settings;
 
+mod animation;
 mod app;
 mod camera;
 mod geometry;

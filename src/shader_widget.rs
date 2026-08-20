@@ -13,6 +13,7 @@ use iced::widget::{Action, shader};
 use iced::{Event, Point, Rectangle, event, mouse};
 use nalgebra::{Matrix4, UnitQuaternion, Vector3, Vector4};
 
+use crate::animation::ease;
 use crate::app::{AABBMode, Message, RenderMode};
 use crate::camera::{Camera, CameraController, Projection};
 use crate::geometry::{
@@ -95,11 +96,6 @@ struct AnimatingReveal {
     duration: Duration,
 }
 
-/// Smoothstep ease: slow-fast-slow, applied to the normalized \[0,1\] progress.
-fn ease(t: f32) -> f32 {
-    t * t * (3.0 - 2.0 * t)
-}
-
 /// Max cursor movement between a rotate-button press and release for it to
 /// still count as a click rather than a drag.
 const CLICK_DRAG_THRESHOLD_PX: f32 = 4.0;
@@ -120,8 +116,8 @@ pub(crate) const PRIMARY_STICKER_SCALE: f32 = 0.02;
 pub(crate) const PRIMARY_FACE_GAP: f32 = 0.0;
 /// Sticker scale/face gap in the app's raw (slider) domain a reveal animates
 /// toward.
-const SECONDARY_STICKER_SCALE: f32 = 0.4;
-const SECONDARY_FACE_GAP: f32 = 1.5;
+pub(crate) const SECONDARY_STICKER_SCALE: f32 = 0.4;
+pub(crate) const SECONDARY_FACE_GAP: f32 = 1.5;
 
 /// Builds the GPU instance list for the current frame. Piece state is
 /// already final (`apply_move` commits atomically) - while a move is

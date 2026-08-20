@@ -1,15 +1,19 @@
 //! Gui elements and messaging for the application
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::widget::{Button, Checkbox, Column, PickList, Row, Shader, Slider, Space};
-use iced::{Element, Length, Task};
+use iced::{Element, Length, Subscription, Task, window};
 
+use crate::animation::{ease, lerp};
 use crate::menu_overlay;
 use crate::piece::Hypercube;
 use crate::puzzle_state;
 use crate::settings::{self, ANIMATION_DURATION_MS_RANGE, AppSettings, RotateButton};
-use crate::shader_widget::{HypercubeShaderProgram, PRIMARY_FACE_GAP, PRIMARY_STICKER_SCALE};
+use crate::shader_widget::{
+    HypercubeShaderProgram, PRIMARY_FACE_GAP, PRIMARY_STICKER_SCALE, REVEAL_ANIMATION_DURATION,
+    SECONDARY_FACE_GAP, SECONDARY_STICKER_SCALE,
+};
 
 /// Rendering modes for visualization
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,10 +100,44 @@ pub(crate) fn reveal_button_label(revealed: bool, reveal_animating: bool) -> &'s
     }
 }
 
-/// Whether the sticker-scale/face-gap sliders should be shown: only once a
-/// reveal has settled, hidden again the instant a hide flourish starts.
-fn sliders_visible(revealed: bool, reveal_animating: bool) -> bool {
-    revealed && !reveal_animating
+/// Exact natural height, in pixels, of a single default-size label+slider
+/// row (`text` + `spacing(5)` + `Slider`): a `1.3 * 16.0 = 20.8`px text
+/// line height, plus `5.0`px spacing, plus a default-height (`16.0`px)
+/// `Slider`.
+const SLIDER_ROW_HEIGHT: f32 = 20.8 + 5.0 + 16.0;
+
+/// Height of a blank margin/gap within the sticker-scale/face-gap panel,
+/// equal to the `20` spacing used between every other pair of controls in
+/// the column.
+const SLIDERS_PANEL_GAP: f32 = 20.0;
+
+/// Height of the sticker-scale/face-gap panel when fully open: a blank
+/// leading margin, the two rows with a gap between them, and a blank
+/// trailing margin.
+const SLIDERS_PANEL_OPEN_HEIGHT: f32 = SLIDERS_PANEL_GAP * 3.0 + SLIDER_ROW_HEIGHT * 2.0;
+
+/// Height of the sticker-scale/face-gap panel when fully closed: its blank
+/// leading margin alone.
+const SLIDERS_PANEL_CLOSED_HEIGHT: f32 = SLIDERS_PANEL_GAP;
+
+/// Portion of a reveal/hide flourish's total duration spent opening or
+/// closing the sticker-scale/face-gap panel: the panel snaps open in the
+/// first `PANEL_ANIMATION_FRACTION` of a reveal, or snaps shut in the last
+/// `PANEL_ANIMATION_FRACTION` of a hide, so it reads as a drawer sliding
+/// open/shut rather than tracking the slower value slide at the same pace.
+const PANEL_ANIMATION_FRACTION: f32 = 0.1;
+
+/// Remaps a flourish's overall `[0,1]` progress `t` to the panel's own
+/// `[0,1]` open/close progress: for `revealing`, the panel's progress
+/// reaches 1.0 once `t` reaches `PANEL_ANIMATION_FRACTION` and holds there;
+/// for hiding, it holds at 0.0 until the last `PANEL_ANIMATION_FRACTION` of
+/// `t`, then rises to 1.0 as `t` reaches 1.0.
+fn panel_progress(t: f32, revealing: bool) -> f32 {
+    if revealing {
+        (t / PANEL_ANIMATION_FRACTION).clamp(0.0, 1.0)
+    } else {
+        ((t - (1.0 - PANEL_ANIMATION_FRACTION)) / PANEL_ANIMATION_FRACTION).clamp(0.0, 1.0)
+    }
 }
 
 /// Main application state - handles UI controls only
@@ -126,8 +164,15 @@ pub(crate) struct HypercubeApp {
     revealed: bool,
     reveal_generation: u64,
     /// True from a `ToggleReveal` press until `RevealAnimationComplete`
-    /// arrives; gates the button (disabled) and the sliders (hidden).
+    /// arrives; gates the button (disabled) and slider interaction (locked
+    /// while animating).
     reveal_animating: bool,
+    /// When the current reveal/hide flourish was triggered, for timing the
+    /// application-level slider interpolation. `None` when idle.
+    reveal_animation_started: Option<Instant>,
+    /// How open the sticker-scale/face-gap panel is: 0.0 fully collapsed,
+    /// 1.0 fully open.
+    reveal_panel_fraction: f32,
     /// Remaining scripted reveal/hide flourishes after the one the boot task
     /// already kicked off. See [`next_reveal_loop_action`].
     #[cfg(feature = "gpu-capture-hooks")]
@@ -178,10 +223,14 @@ pub(crate) enum Message {
     Reset,
     RandomMoves(u32),
     ToggleReveal,
+    RevealAnimationTick(Instant),
     RevealAnimationComplete {
         final_scale: f32,
         final_gap: f32,
     },
+    /// Swallows a mouse-wheel scroll over the sticker-scale/face-gap panel,
+    /// so the `Scrollable` it's clipped by never scrolls itself.
+    SlidersPanelWheelScroll,
     SavePuzzle,
     PuzzleReadyToSave(Hypercube),
     LoadPuzzle,
@@ -210,6 +259,8 @@ impl HypercubeApp {
             revealed: false,
             reveal_generation: 0,
             reveal_animating: false,
+            reveal_animation_started: None,
+            reveal_panel_fraction: 0.0,
             #[cfg(feature = "gpu-capture-hooks")]
             reveal_loop_remaining: REVEAL_LOOP_REPEATS,
             about_open: false,
@@ -242,15 +293,19 @@ impl HypercubeApp {
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::StickerScale(value) => {
-                self.sticker_scale = value;
-                self.sticker_scale_adjusting = true;
+                if !self.reveal_animating {
+                    self.sticker_scale = value;
+                    self.sticker_scale_adjusting = true;
+                }
             }
             Message::StickerScaleReleased => {
                 self.sticker_scale_adjusting = false;
             }
             Message::FaceGap(value) => {
-                self.face_gap = value;
-                self.face_gap_adjusting = true;
+                if !self.reveal_animating {
+                    self.face_gap = value;
+                    self.face_gap_adjusting = true;
+                }
             }
             Message::FaceGapReleased => {
                 self.face_gap_adjusting = false;
@@ -287,6 +342,29 @@ impl HypercubeApp {
                 self.revealed = !self.revealed;
                 self.reveal_generation = self.reveal_generation.wrapping_add(1);
                 self.reveal_animating = true;
+                self.reveal_animation_started = Some(Instant::now());
+            }
+            Message::RevealAnimationTick(now) => {
+                let elapsed = self
+                    .reveal_animation_started
+                    .map(|started| now.duration_since(started))
+                    .unwrap_or_default();
+                let t = (elapsed.as_secs_f32() / REVEAL_ANIMATION_DURATION.as_secs_f32())
+                    .clamp(0.0, 1.0);
+                let eased = ease(t);
+                let panel_eased = ease(panel_progress(t, self.revealed));
+                // (sticker scale, face gap, panel fraction) at the flourish's
+                // start and target, in the direction currently underway.
+                let primary = (PRIMARY_STICKER_SCALE, PRIMARY_FACE_GAP, 0.0);
+                let secondary = (SECONDARY_STICKER_SCALE, SECONDARY_FACE_GAP, 1.0);
+                let (start, target) = if self.revealed {
+                    (primary, secondary)
+                } else {
+                    (secondary, primary)
+                };
+                self.sticker_scale = lerp(start.0, target.0, eased);
+                self.face_gap = lerp(start.1, target.1, eased);
+                self.reveal_panel_fraction = lerp(start.2, target.2, panel_eased);
             }
             Message::RevealAnimationComplete {
                 final_scale,
@@ -295,6 +373,8 @@ impl HypercubeApp {
                 self.sticker_scale = final_scale;
                 self.face_gap = final_gap;
                 self.reveal_animating = false;
+                self.reveal_animation_started = None;
+                self.reveal_panel_fraction = if self.revealed { 1.0 } else { 0.0 };
 
                 #[cfg(feature = "gpu-capture-hooks")]
                 {
@@ -307,6 +387,7 @@ impl HypercubeApp {
                     };
                 }
             }
+            Message::SlidersPanelWheelScroll => {}
             Message::SavePuzzle => {
                 self.save_generation = self.save_generation.wrapping_add(1);
             }
@@ -330,11 +411,12 @@ impl HypercubeApp {
         Task::none()
     }
 
-    /// Global keyboard shortcuts, mirroring the File/Help menu items.
-    pub(crate) fn subscription(&self) -> iced::Subscription<Message> {
+    /// Global keyboard shortcuts, mirroring the File/Help menu items, plus a
+    /// per-frame tick while a reveal/hide flourish is animating.
+    pub(crate) fn subscription(&self) -> Subscription<Message> {
         use iced::keyboard::{Key, key};
 
-        iced::keyboard::listen().filter_map(|event| {
+        let keyboard = iced::keyboard::listen().filter_map(|event| {
             let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
                 return None;
             };
@@ -346,7 +428,13 @@ impl HypercubeApp {
                 (Key::Named(key::Named::F1), _) => Some(Message::OpenAbout),
                 _ => None,
             }
-        })
+        });
+
+        if self.reveal_animating {
+            Subscription::batch([keyboard, window::frames().map(Message::RevealAnimationTick)])
+        } else {
+            keyboard
+        }
     }
 
     /// Create the view for the application
@@ -373,67 +461,121 @@ impl HypercubeApp {
                     ),
             );
 
-        if sliders_visible(self.revealed, self.reveal_animating) {
+        if self.debug_mode {
             controls = controls
                 .push(
                     Column::new()
                         .spacing(5)
-                        .push(iced::widget::text("Sticker Scale"))
+                        .push(iced::widget::text("Render Mode"))
                         .push(
-                            iced::widget::tooltip(
-                                Slider::new(0.0..=0.9, self.sticker_scale, Message::StickerScale)
-                                    .step(0.01f32)
-                                    .width(250)
-                                    .on_release(Message::StickerScaleReleased),
-                                iced::widget::text(format_sticker_scale(self.sticker_scale)),
-                                iced::widget::tooltip::Position::FollowCursor,
+                            PickList::new(
+                                &RenderMode::ALL[..],
+                                Some(self.render_mode),
+                                Message::RenderMode,
                             )
-                            .delay(tooltip_delay(self.sticker_scale_adjusting))
-                            .style(iced::widget::container::rounded_box),
+                            .width(250),
                         ),
                 )
                 .push(
                     Column::new()
                         .spacing(5)
-                        .push(iced::widget::text("Face Gap"))
+                        .push(iced::widget::text("AABB Mode"))
                         .push(
-                            iced::widget::tooltip(
-                                Slider::new(0.0..=1.5, self.face_gap, Message::FaceGap)
-                                    .step(0.01f32)
-                                    .width(250)
-                                    .on_release(Message::FaceGapReleased),
-                                iced::widget::text(format_face_gap(self.face_gap)),
-                                iced::widget::tooltip::Position::FollowCursor,
+                            PickList::new(
+                                &AABBMode::ALL[..],
+                                Some(self.aabb_mode),
+                                Message::AABBMode,
                             )
-                            .delay(tooltip_delay(self.face_gap_adjusting))
-                            .style(iced::widget::container::rounded_box),
+                            .width(250),
                         ),
                 );
         }
 
-        controls = controls.push(
-            Column::new()
-                .spacing(5)
-                .push(iced::widget::text("Animation Duration (ms)"))
-                .push(
-                    iced::widget::tooltip(
-                        Slider::new(
-                            ANIMATION_DURATION_MS_RANGE,
-                            self.settings.animation_duration_ms,
-                            Message::AnimationDuration,
+        let sliders = Column::new()
+            .spacing(0)
+            .push(iced::widget::Space::new().height(SLIDERS_PANEL_GAP))
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(iced::widget::text("Sticker Scale"))
+                    .push(
+                        iced::widget::tooltip(
+                            Slider::new(0.0..=0.9, self.sticker_scale, Message::StickerScale)
+                                .step(0.01f32)
+                                .width(250)
+                                .on_release(Message::StickerScaleReleased),
+                            iced::widget::text(format_sticker_scale(self.sticker_scale)),
+                            iced::widget::tooltip::Position::FollowCursor,
                         )
-                        .step(10u32)
-                        .width(250)
-                        .on_release(Message::AnimationDurationReleased),
-                        iced::widget::text(format_animation_duration(
-                            self.settings.animation_duration_ms,
-                        )),
-                        iced::widget::tooltip::Position::FollowCursor,
-                    )
-                    .delay(tooltip_delay(self.animation_duration_adjusting))
-                    .style(iced::widget::container::rounded_box),
-                ),
-        );
+                        .delay(tooltip_delay(self.sticker_scale_adjusting))
+                        .style(iced::widget::container::rounded_box),
+                    ),
+            )
+            .push(iced::widget::Space::new().height(SLIDERS_PANEL_GAP))
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(iced::widget::text("Face Gap"))
+                    .push(
+                        iced::widget::tooltip(
+                            Slider::new(0.0..=1.5, self.face_gap, Message::FaceGap)
+                                .step(0.01f32)
+                                .width(250)
+                                .on_release(Message::FaceGapReleased),
+                            iced::widget::text(format_face_gap(self.face_gap)),
+                            iced::widget::tooltip::Position::FollowCursor,
+                        )
+                        .delay(tooltip_delay(self.face_gap_adjusting))
+                        .style(iced::widget::container::rounded_box),
+                    ),
+            )
+            .push(iced::widget::Space::new().height(SLIDERS_PANEL_GAP));
+
+        let reveal_group = Column::new()
+            .spacing(0)
+            .push(
+                Button::new(reveal_button_label(self.revealed, self.reveal_animating))
+                    .on_press_maybe((!self.reveal_animating).then_some(Message::ToggleReveal)),
+            )
+            .push(
+                iced::widget::scrollable(
+                    iced::widget::mouse_area(sliders)
+                        .on_scroll(|_delta| Message::SlidersPanelWheelScroll),
+                )
+                .height(Length::Fixed(lerp(
+                    SLIDERS_PANEL_CLOSED_HEIGHT,
+                    SLIDERS_PANEL_OPEN_HEIGHT,
+                    self.reveal_panel_fraction,
+                )))
+                .direction(iced::widget::scrollable::Direction::Vertical(
+                    iced::widget::scrollable::Scrollbar::hidden(),
+                )),
+            )
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(iced::widget::text("Animation Duration (ms)"))
+                    .push(
+                        iced::widget::tooltip(
+                            Slider::new(
+                                ANIMATION_DURATION_MS_RANGE,
+                                self.settings.animation_duration_ms,
+                                Message::AnimationDuration,
+                            )
+                            .step(10u32)
+                            .width(250)
+                            .on_release(Message::AnimationDurationReleased),
+                            iced::widget::text(format_animation_duration(
+                                self.settings.animation_duration_ms,
+                            )),
+                            iced::widget::tooltip::Position::FollowCursor,
+                        )
+                        .delay(tooltip_delay(self.animation_duration_adjusting))
+                        .style(iced::widget::container::rounded_box),
+                    ),
+            );
+
+        controls = controls.push(reveal_group);
 
         // Right pane with 3D viewport
         let viewport = Shader::new(HypercubeShaderProgram::new(
@@ -576,11 +718,90 @@ mod tests {
     }
 
     #[test]
-    fn sliders_visible_only_once_revealed_and_settled() {
-        assert!(!sliders_visible(false, false));
-        assert!(!sliders_visible(true, true));
-        assert!(!sliders_visible(false, true));
-        assert!(sliders_visible(true, false));
+    fn reveal_animation_tick_interpolates_between_primary_and_secondary_when_revealing() {
+        let mut app = HypercubeApp::new_inner();
+        let _ = app.update(Message::ToggleReveal);
+        let started = app
+            .reveal_animation_started
+            .expect("ToggleReveal must record a start instant");
+
+        let _ = app.update(Message::RevealAnimationTick(started));
+        assert_eq!(app.sticker_scale, PRIMARY_STICKER_SCALE);
+        assert_eq!(app.face_gap, PRIMARY_FACE_GAP);
+        assert_eq!(app.reveal_panel_fraction, 0.0);
+
+        let _ = app.update(Message::RevealAnimationTick(
+            started + REVEAL_ANIMATION_DURATION,
+        ));
+        assert_eq!(app.sticker_scale, SECONDARY_STICKER_SCALE);
+        assert_eq!(app.face_gap, SECONDARY_FACE_GAP);
+        assert_eq!(app.reveal_panel_fraction, 1.0);
+
+        app.reveal_animation_started = Some(started);
+        let _ = app.update(Message::RevealAnimationTick(
+            started + REVEAL_ANIMATION_DURATION / 2,
+        ));
+        assert!(app.sticker_scale > PRIMARY_STICKER_SCALE);
+        assert!(app.sticker_scale < SECONDARY_STICKER_SCALE);
+        assert!(app.face_gap > PRIMARY_FACE_GAP);
+        assert!(app.face_gap < SECONDARY_FACE_GAP);
+        // `panel_progress` has its own dedicated coverage above; this only
+        // confirms the tick handler actually wires it into the field.
+        assert_eq!(app.reveal_panel_fraction, ease(panel_progress(0.5, true)));
+    }
+
+    #[test]
+    fn reveal_animation_tick_interpolates_from_secondary_to_primary_when_hiding() {
+        let mut app = HypercubeApp::new_inner();
+        app.sticker_scale = SECONDARY_STICKER_SCALE;
+        app.face_gap = SECONDARY_FACE_GAP;
+        app.revealed = true;
+        let _ = app.update(Message::ToggleReveal);
+        assert!(!app.revealed);
+        let started = app
+            .reveal_animation_started
+            .expect("ToggleReveal must record a start instant");
+
+        let _ = app.update(Message::RevealAnimationTick(
+            started + REVEAL_ANIMATION_DURATION,
+        ));
+        assert!((app.sticker_scale - PRIMARY_STICKER_SCALE).abs() < 1e-6);
+        assert!((app.face_gap - PRIMARY_FACE_GAP).abs() < 1e-6);
+        assert!((app.reveal_panel_fraction - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn panel_progress_opens_over_the_leading_window_when_revealing() {
+        assert_eq!(panel_progress(0.0, true), 0.0);
+        assert_eq!(panel_progress(PANEL_ANIMATION_FRACTION / 2.0, true), 0.5);
+        assert_eq!(panel_progress(PANEL_ANIMATION_FRACTION, true), 1.0);
+        assert_eq!(panel_progress(1.0, true), 1.0);
+    }
+
+    #[test]
+    fn panel_progress_closes_over_the_trailing_window_when_hiding() {
+        let window_start = 1.0 - PANEL_ANIMATION_FRACTION;
+        assert_eq!(panel_progress(0.0, false), 0.0);
+        assert_eq!(panel_progress(window_start, false), 0.0);
+        assert!(
+            (panel_progress(window_start + PANEL_ANIMATION_FRACTION / 2.0, false) - 0.5).abs()
+                < 1e-6
+        );
+        assert_eq!(panel_progress(1.0, false), 1.0);
+    }
+
+    #[test]
+    fn manual_slider_drags_are_ignored_while_reveal_animation_plays() {
+        let mut app = HypercubeApp::new_inner();
+        app.reveal_animating = true;
+        let scale_before = app.sticker_scale;
+        let gap_before = app.face_gap;
+
+        let _ = app.update(Message::StickerScale(0.5));
+        let _ = app.update(Message::FaceGap(0.9));
+
+        assert_eq!(app.sticker_scale, scale_before);
+        assert_eq!(app.face_gap, gap_before);
     }
 
     #[cfg(feature = "gpu-capture-hooks")]
