@@ -1,0 +1,34 @@
+{
+  "name": "hypercube (AMD GPU + display)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "../.."
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "remoteUser": "dev",
+  "containerUser": "dev",
+  "runArgs": ["--device=/dev/dri"],
+  "mounts": [
+    "source=hypercube-cargo-registry,target=/home/dev/.cargo/registry,type=volume",
+    "source=hypercube-cargo-git,target=/home/dev/.cargo/git,type=volume",
+    "source=hypercube-target-${localWorkspaceFolderBasename},target=/workspace/target,type=volume",
+    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
+    "source=${localEnv:XDG_RUNTIME_DIR},target=${localEnv:XDG_RUNTIME_DIR},type=bind"
+  ],
+  "containerEnv": {
+    "DISPLAY": "${localEnv:DISPLAY}",
+    "WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}",
+    "XDG_RUNTIME_DIR": "${localEnv:XDG_RUNTIME_DIR}"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "serayuzgur.crates",
+        "polymeilex.wgsl",
+        "mk12.better-git-line-blame"
+      ]
+    }
+  }
+}
