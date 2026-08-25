@@ -81,15 +81,17 @@ struct AnimatingReset {
     duration: Duration,
 }
 
-/// An in-progress reveal/hide flourish: sweeps sticker scale, face gap, and
-/// camera yaw from their values when the toggle button was pressed toward
-/// the reveal's (or hide's) target values, all driven by the same `elapsed`/
-/// `duration`/`ease` progress.
+/// An in-progress reveal/hide flourish: sweeps sticker scale, face gap, 4D
+/// face gap, and camera yaw from their values when the toggle button was
+/// pressed toward the reveal's (or hide's) target values, all driven by the
+/// same `elapsed`/`duration`/`ease` progress.
 struct AnimatingReveal {
     start_scale: f32,
     target_scale: f32,
     start_gap: f32,
     target_gap: f32,
+    start_gap_4d: f32,
+    target_gap_4d: f32,
     start_yaw: f32,
     target_yaw: f32,
     elapsed: Duration,
@@ -117,7 +119,11 @@ pub(crate) const PRIMARY_FACE_GAP: f32 = 0.0;
 /// Sticker scale/face gap in the app's raw (slider) domain a reveal animates
 /// toward.
 pub(crate) const SECONDARY_STICKER_SCALE: f32 = 0.4;
-pub(crate) const SECONDARY_FACE_GAP: f32 = 1.5;
+pub(crate) const SECONDARY_FACE_GAP: f32 = 0.45;
+/// 4D face gap in the app's raw (slider) domain before a reveal.
+pub(crate) const PRIMARY_FACE_GAP_4D: f32 = 1.0;
+/// 4D face gap in the app's raw (slider) domain a reveal animates toward.
+pub(crate) const SECONDARY_FACE_GAP_4D: f32 = 2.0;
 
 /// Builds the GPU instance list for the current frame. Piece state is
 /// already final (`apply_move` commits atomically) - while a move is
@@ -254,6 +260,8 @@ pub fn sticker_instances_for_render(state: &HypercubeShaderState) -> Vec<Sticker
 pub(crate) struct UiControls {
     pub(crate) sticker_scale: f32,
     pub(crate) face_gap: f32,
+    pub(crate) face_gap_4d: f32,
+    pub(crate) viewer_distance: f32,
     pub(crate) render_mode: RenderMode,
 }
 
@@ -301,6 +309,8 @@ impl shader::Primitive for HypercubePrimitive {
             &self.rotation_4d,
             self.ui_controls.sticker_scale,
             self.ui_controls.face_gap,
+            self.ui_controls.face_gap_4d,
+            self.ui_controls.viewer_distance,
         );
         pipeline.update_camera(queue, &self.camera, &self.projection);
         pipeline.update_light(queue, &self.camera);
@@ -357,6 +367,7 @@ pub struct HypercubeShaderState {
     /// `Program::update`), so it never masks a later manual slider drag.
     reveal_scale_override: Option<f32>,
     reveal_gap_override: Option<f32>,
+    reveal_gap_4d_override: Option<f32>,
     /// Position and hovered sticker (if any) recorded when the rotate button
     /// was last pressed, used at release time to tell a click from a drag.
     rotate_press: Option<(Point, Option<usize>)>,
@@ -396,6 +407,8 @@ impl HypercubeShaderState {
 pub struct HypercubeShaderProgram {
     sticker_scale: f32,
     face_gap: f32,
+    face_gap_4d: f32,
+    viewer_distance: f32,
     render_mode: RenderMode,
     aabb_mode: AABBMode,
     rotate_button: RotateButton,
@@ -417,6 +430,8 @@ impl HypercubeShaderProgram {
     pub(crate) fn new(
         sticker_scale: f32,
         face_gap: f32,
+        face_gap_4d: f32,
+        viewer_distance: f32,
         render_mode: RenderMode,
         aabb_mode: AABBMode,
         rotate_button: RotateButton,
@@ -433,6 +448,8 @@ impl HypercubeShaderProgram {
         Self {
             sticker_scale,
             face_gap,
+            face_gap_4d,
+            viewer_distance,
             render_mode,
             aabb_mode,
             rotate_button,
@@ -541,15 +558,24 @@ impl shader::Program<Message> for HypercubeShaderProgram {
         {
             state.reveal_gap_override = None;
         }
+        if let Some(target) = state.reveal_gap_4d_override
+            && self.face_gap_4d == target
+        {
+            state.reveal_gap_4d_override = None;
+        }
 
         if self.reveal_generation != state.reveal_generation {
             state.animating_move = None;
             state.animating_focus = None;
 
-            let (target_scale_raw, target_gap) = if self.revealed_target {
-                (SECONDARY_STICKER_SCALE, SECONDARY_FACE_GAP)
+            let (target_scale_raw, target_gap, target_gap_4d) = if self.revealed_target {
+                (
+                    SECONDARY_STICKER_SCALE,
+                    SECONDARY_FACE_GAP,
+                    SECONDARY_FACE_GAP_4D,
+                )
             } else {
-                (PRIMARY_STICKER_SCALE, PRIMARY_FACE_GAP)
+                (PRIMARY_STICKER_SCALE, PRIMARY_FACE_GAP, PRIMARY_FACE_GAP_4D)
             };
             let start_yaw = state.camera_controller.yaw;
 
@@ -558,6 +584,8 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 target_scale: 1.0 - target_scale_raw,
                 start_gap: self.face_gap,
                 target_gap,
+                start_gap_4d: self.face_gap_4d,
+                target_gap_4d,
                 start_yaw,
                 target_yaw: start_yaw + REVEAL_YAW_SPIN_DEGREES,
                 elapsed: Duration::ZERO,
@@ -565,6 +593,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             });
             state.reveal_scale_override = Some(self.sticker_scale);
             state.reveal_gap_override = Some(self.face_gap);
+            state.reveal_gap_4d_override = Some(self.face_gap_4d);
             state.reveal_generation = self.reveal_generation;
             state.last_redraw_instant = None;
             let instances = sticker_instances_for_render(state);
@@ -652,14 +681,19 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 }
 
                 if matches!(reveal_tick, AnimationTick::Completed) {
-                    let (final_scale, final_gap) = if self.revealed_target {
-                        (SECONDARY_STICKER_SCALE, SECONDARY_FACE_GAP)
+                    let (final_scale, final_gap, final_gap_4d) = if self.revealed_target {
+                        (
+                            SECONDARY_STICKER_SCALE,
+                            SECONDARY_FACE_GAP,
+                            SECONDARY_FACE_GAP_4D,
+                        )
                     } else {
-                        (PRIMARY_STICKER_SCALE, PRIMARY_FACE_GAP)
+                        (PRIMARY_STICKER_SCALE, PRIMARY_FACE_GAP, PRIMARY_FACE_GAP_4D)
                     };
                     reveal_completed_message = Some(Message::RevealAnimationComplete {
                         final_scale,
                         final_gap,
+                        final_gap_4d,
                     });
                 }
 
@@ -708,6 +742,8 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             ui_controls: UiControls {
                 sticker_scale: state.reveal_scale_override.unwrap_or(self.sticker_scale),
                 face_gap: state.reveal_gap_override.unwrap_or(self.face_gap),
+                face_gap_4d: state.reveal_gap_4d_override.unwrap_or(self.face_gap_4d),
+                viewer_distance: self.viewer_distance,
                 render_mode: self.render_mode,
             },
             cached_indices: state.cached_indices.clone(),
@@ -726,7 +762,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             visible_faces: if state.animating_move.is_some() {
                 [true; 8]
             } else {
-                visible_faces(&state.rotation_4d, VIEWER_DISTANCE)
+                visible_faces(&state.rotation_4d, self.viewer_distance)
             },
         }
     }
@@ -754,6 +790,7 @@ impl HypercubeShaderProgram {
                     *fixed_dim,
                     rotation_4d,
                     VIEWER_DISTANCE,
+                    Vector4::zeros(),
                 )
                 .coords;
 
@@ -959,13 +996,15 @@ impl HypercubeShaderProgram {
         let mouse_ray = calculate_mouse_ray(position, bounds, &state.camera, &state.projection);
         let sticker_scale = state.reveal_scale_override.unwrap_or(self.sticker_scale);
         let face_gap = state.reveal_gap_override.unwrap_or(self.face_gap);
+        let face_gap_4d = state.reveal_gap_4d_override.unwrap_or(self.face_gap_4d);
 
         let (hovered_sticker, debug_instances) = find_intersected_sticker(
             &mouse_ray,
             state,
             sticker_scale,
             face_gap,
-            VIEWER_DISTANCE,
+            face_gap_4d,
+            self.viewer_distance,
             self.aabb_mode,
         );
         state.hovered_sticker = hovered_sticker;
@@ -1186,12 +1225,16 @@ impl HypercubeShaderProgram {
             Some(animating.start_scale + (animating.target_scale - animating.start_scale) * eased);
         state.reveal_gap_override =
             Some(animating.start_gap + (animating.target_gap - animating.start_gap) * eased);
+        state.reveal_gap_4d_override = Some(
+            animating.start_gap_4d + (animating.target_gap_4d - animating.start_gap_4d) * eased,
+        );
         state.camera_controller.yaw =
             animating.start_yaw + (animating.target_yaw - animating.start_yaw) * eased;
 
         if animating.elapsed >= animating.duration {
             state.reveal_scale_override = Some(animating.target_scale);
             state.reveal_gap_override = Some(animating.target_gap);
+            state.reveal_gap_4d_override = Some(animating.target_gap_4d);
             state.camera_controller.yaw = animating.target_yaw;
             state.animating_reveal = None;
             return AnimationTick::Completed;
@@ -1274,6 +1317,7 @@ impl Default for HypercubeShaderState {
             animating_reveal: None,
             reveal_scale_override: None,
             reveal_gap_override: None,
+            reveal_gap_4d_override: None,
             rotate_press: None,
             pending_face_click: None,
             last_redraw_instant: None,
@@ -1689,6 +1733,8 @@ mod tests {
         let program = HypercubeShaderProgram::new(
             0.5,
             2.0,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             RotateButton::default(),
@@ -1758,6 +1804,8 @@ mod tests {
         let program = HypercubeShaderProgram::new(
             0.5,
             2.0,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             RotateButton::default(),
@@ -1801,6 +1849,8 @@ mod tests {
         let program = HypercubeShaderProgram::new(
             0.5,
             2.0,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             RotateButton::default(),
@@ -1838,6 +1888,8 @@ mod tests {
         let program = HypercubeShaderProgram::new(
             0.9,
             0.0,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             RotateButton::default(),
@@ -1881,6 +1933,8 @@ mod tests {
         let program = HypercubeShaderProgram::new(
             0.9,
             0.0,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             rotate_button,
@@ -1933,6 +1987,8 @@ mod tests {
         let program = HypercubeShaderProgram::new(
             0.9,
             0.0,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             RotateButton::default(),
@@ -1971,6 +2027,8 @@ mod tests {
                 target_scale: 0.98,
                 start_gap: 0.0,
                 target_gap: 1.0,
+                start_gap_4d: 1.0,
+                target_gap_4d: 2.0,
                 start_yaw: 10.0,
                 target_yaw: 10.0 + REVEAL_YAW_SPIN_DEGREES,
                 elapsed: Duration::ZERO,
@@ -1983,6 +2041,7 @@ mod tests {
         assert!(matches!(tick, AnimationTick::Running));
         assert_eq!(state.reveal_scale_override, Some(0.9));
         assert_eq!(state.reveal_gap_override, Some(0.0));
+        assert_eq!(state.reveal_gap_4d_override, Some(1.0));
         assert_eq!(state.camera_controller.yaw, 10.0);
 
         let tick = HypercubeShaderProgram::advance_reveal_animation(
@@ -1992,6 +2051,7 @@ mod tests {
         assert!(matches!(tick, AnimationTick::Completed));
         assert_eq!(state.reveal_scale_override, Some(0.98));
         assert_eq!(state.reveal_gap_override, Some(1.0));
+        assert_eq!(state.reveal_gap_4d_override, Some(2.0));
         assert_eq!(state.camera_controller.yaw, 10.0 + REVEAL_YAW_SPIN_DEGREES);
         assert!(state.animating_reveal.is_none());
     }
@@ -2067,6 +2127,8 @@ mod tests {
         let program = HypercubeShaderProgram::new(
             0.9,
             0.0,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             RotateButton::default(),
@@ -2113,6 +2175,8 @@ mod tests {
         let program = HypercubeShaderProgram::new(
             1.0 - SECONDARY_STICKER_SCALE,
             SECONDARY_FACE_GAP,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             RotateButton::default(),
@@ -2158,6 +2222,8 @@ mod tests {
         let stale_program = HypercubeShaderProgram::new(
             0.5,
             0.0,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             RotateButton::default(),
@@ -2183,6 +2249,8 @@ mod tests {
         let caught_up_program = HypercubeShaderProgram::new(
             0.9,
             1.0,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             RotateButton::default(),
@@ -2219,6 +2287,8 @@ mod tests {
                 target_scale: 1.0 - SECONDARY_STICKER_SCALE,
                 start_gap: PRIMARY_FACE_GAP,
                 target_gap: SECONDARY_FACE_GAP,
+                start_gap_4d: PRIMARY_FACE_GAP_4D,
+                target_gap_4d: SECONDARY_FACE_GAP_4D,
                 start_yaw: 0.0,
                 target_yaw: REVEAL_YAW_SPIN_DEGREES,
                 elapsed: REVEAL_ANIMATION_DURATION + Duration::from_millis(100),
@@ -2229,6 +2299,8 @@ mod tests {
         let program = HypercubeShaderProgram::new(
             1.0 - PRIMARY_STICKER_SCALE,
             PRIMARY_FACE_GAP,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             RotateButton::default(),
@@ -2257,9 +2329,11 @@ mod tests {
             Message::RevealAnimationComplete {
                 final_scale,
                 final_gap,
+                final_gap_4d,
             } => {
                 assert_eq!(final_scale, SECONDARY_STICKER_SCALE);
                 assert_eq!(final_gap, SECONDARY_FACE_GAP);
+                assert_eq!(final_gap_4d, SECONDARY_FACE_GAP_4D);
             }
             other => panic!("expected RevealAnimationComplete, got {other:?}"),
         }
@@ -2276,6 +2350,8 @@ mod tests {
                 target_scale: 0.98,
                 start_gap: 0.0,
                 target_gap: 1.0,
+                start_gap_4d: 1.0,
+                target_gap_4d: 2.0,
                 start_yaw: 0.0,
                 target_yaw: REVEAL_YAW_SPIN_DEGREES,
                 elapsed: Duration::ZERO,
@@ -2287,6 +2363,8 @@ mod tests {
         let program = HypercubeShaderProgram::new(
             0.9,
             0.0,
+            1.0,
+            VIEWER_DISTANCE,
             RenderMode::Standard,
             AABBMode::None,
             rotate_button,
@@ -2378,8 +2456,14 @@ mod clockwise_sign_tests {
 
             const ANGLE_EPSILON: f32 = 1e-5;
             let velocity = |p: Vector3<f32>| -> Vector3<f32> {
-                let pre =
-                    project_cube_point(p, position_4d, facet.axis, &rotation_4d, VIEWER_DISTANCE);
+                let pre = project_cube_point(
+                    p,
+                    position_4d,
+                    facet.axis,
+                    &rotation_4d,
+                    VIEWER_DISTANCE,
+                    Vector4::zeros(),
+                );
                 let rotated = rotate_local_position(facet.local_coords, ANGLE_EPSILON, p.into());
                 let post = project_cube_point(
                     Vector3::from(rotated),
@@ -2387,6 +2471,7 @@ mod clockwise_sign_tests {
                     facet.axis,
                     &rotation_4d,
                     VIEWER_DISTANCE,
+                    Vector4::zeros(),
                 );
                 (post - pre) / ANGLE_EPSILON
             };

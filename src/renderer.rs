@@ -15,7 +15,7 @@ use wgpu::util::DeviceExt;
 use crate::app::RenderMode;
 use crate::camera::{Camera, CameraUniform, Projection};
 use crate::geometry::{CUBE_VERTICES, VERTEX_NORMAL_INDICES};
-use crate::math::{BASE_STICKER_SIZE, VIEWER_DISTANCE};
+use crate::math::BASE_STICKER_SIZE;
 use crate::piece::{FACET_TABLE, Hypercube, StickerInstance, generate_sticker_instances};
 use crate::shader_widget::UiControls;
 
@@ -106,8 +106,11 @@ pub(crate) struct Transform4D {
     /// 3D distance to push each face outward from the tesseract, applied
     /// after 4D-to-3D projection
     face_gap: f32,
-    /// Padding for alignment
-    _padding: f32,
+    /// Slider value (1.0 = no push) that `(face_gap_4d - 1.0)` scales into
+    /// the magnitude of a depth-preserving push applied to each facet's
+    /// rotated face-normal direction, added after rotation but before
+    /// projection (see `math::depth_preserving_push`)
+    face_gap_4d: f32,
 }
 
 /// Lighting uniform data
@@ -678,10 +681,10 @@ impl Renderer {
         // Create transform uniform buffer with initial slider values
         let transform_data = Transform4D {
             rotation_matrix: nalgebra::Matrix4::identity().into(),
-            viewer_distance: VIEWER_DISTANCE,
+            viewer_distance: ui_controls.viewer_distance,
             sticker_scale: ui_controls.sticker_scale,
             face_gap: ui_controls.face_gap,
-            _padding: 0.0,
+            face_gap_4d: ui_controls.face_gap_4d,
         };
         let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Transform Buffer"),
@@ -1286,20 +1289,25 @@ impl Renderer {
     /// * `rotation_4d` - Current 4D rotation matrix
     /// * `sticker_scale` - Scale factor for individual stickers (from sticker scale slider)
     /// * `face_gap` - 3D distance to push each face outward (from face gap slider)
+    /// * `face_gap_4d` - 4D anchor scale for each facet (from 4D face gap slider)
+    /// * `viewer_distance` - Distance of the 4D viewer from the W=0 plane
+    ///   (from the 4D viewer distance slider)
     pub(crate) fn update_instances(
         &mut self,
         queue: &Queue,
         rotation_4d: &nalgebra::Matrix4<f32>,
         sticker_scale: f32,
         face_gap: f32,
+        face_gap_4d: f32,
+        viewer_distance: f32,
     ) {
         // Update transform uniform
         let transform_data = Transform4D {
             rotation_matrix: (*rotation_4d).into(),
-            viewer_distance: VIEWER_DISTANCE,
+            viewer_distance,
             sticker_scale,
             face_gap,
-            _padding: 0.0,
+            face_gap_4d,
         };
         queue.write_buffer(
             &self.transform_buffer,
@@ -1554,6 +1562,8 @@ impl shader::Pipeline for Renderer {
             UiControls {
                 sticker_scale: 0.0,
                 face_gap: 0.0,
+                face_gap_4d: 1.0,
+                viewer_distance: crate::math::VIEWER_DISTANCE,
                 render_mode: RenderMode::Standard,
             },
         )

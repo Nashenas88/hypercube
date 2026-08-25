@@ -11,8 +11,8 @@ use crate::piece::Hypercube;
 use crate::puzzle_state;
 use crate::settings::{self, ANIMATION_DURATION_MS_RANGE, AppSettings, RotateButton};
 use crate::shader_widget::{
-    HypercubeShaderProgram, PRIMARY_FACE_GAP, PRIMARY_STICKER_SCALE, REVEAL_ANIMATION_DURATION,
-    SECONDARY_FACE_GAP, SECONDARY_STICKER_SCALE,
+    HypercubeShaderProgram, PRIMARY_FACE_GAP, PRIMARY_FACE_GAP_4D, PRIMARY_STICKER_SCALE,
+    REVEAL_ANIMATION_DURATION, SECONDARY_FACE_GAP, SECONDARY_FACE_GAP_4D, SECONDARY_STICKER_SCALE,
 };
 
 /// Rendering modes for visualization
@@ -71,6 +71,16 @@ fn format_face_gap(value: f32) -> String {
     format!("{value:.2}")
 }
 
+/// Formats the floating tooltip text for the 4D face gap slider.
+fn format_face_gap_4d(value: f32) -> String {
+    format!("{value:.2}")
+}
+
+/// Formats the floating tooltip text for the 4D viewer distance slider.
+fn format_viewer_distance(value: f32) -> String {
+    format!("{value:.2}")
+}
+
 /// Formats the floating tooltip text for the animation duration slider.
 fn format_animation_duration(duration_ms: u32) -> String {
     format!("{duration_ms}ms")
@@ -112,13 +122,16 @@ const SLIDER_ROW_HEIGHT: f32 = 20.8 + 5.0 + 16.0;
 const SLIDERS_PANEL_GAP: f32 = 20.0;
 
 /// Height of the sticker-scale/face-gap panel when fully open: a blank
-/// leading margin, the two rows with a gap between them, and a blank
+/// leading margin, the four rows with a gap between each, and a blank
 /// trailing margin.
-const SLIDERS_PANEL_OPEN_HEIGHT: f32 = SLIDERS_PANEL_GAP * 3.0 + SLIDER_ROW_HEIGHT * 2.0;
+const SLIDERS_PANEL_OPEN_HEIGHT: f32 = SLIDERS_PANEL_GAP * 5.0 + SLIDER_ROW_HEIGHT * 4.0;
 
 /// Height of the sticker-scale/face-gap panel when fully closed: its blank
 /// leading margin alone.
 const SLIDERS_PANEL_CLOSED_HEIGHT: f32 = SLIDERS_PANEL_GAP;
+
+/// Default value of the 4D viewer distance slider.
+const DEFAULT_VIEWER_DISTANCE: f32 = 4.0;
 
 /// Portion of a reveal/hide flourish's total duration spent opening or
 /// closing the sticker-scale/face-gap panel: the panel snaps open in the
@@ -145,6 +158,8 @@ fn panel_progress(t: f32, revealing: bool) -> f32 {
 pub(crate) struct HypercubeApp {
     sticker_scale: f32,
     face_gap: f32,
+    face_gap_4d: f32,
+    viewer_distance: f32,
     render_mode: RenderMode,
     aabb_mode: AABBMode,
     debug_mode: bool,
@@ -157,6 +172,8 @@ pub(crate) struct HypercubeApp {
     pending_random_move_count: u32,
     sticker_scale_adjusting: bool,
     face_gap_adjusting: bool,
+    face_gap_4d_adjusting: bool,
+    viewer_distance_adjusting: bool,
     animation_duration_adjusting: bool,
     /// Target reveal state. Flips immediately on `ToggleReveal` (so the
     /// shader program picks up the new direction that same frame), not only
@@ -214,6 +231,10 @@ pub(crate) enum Message {
     StickerScaleReleased,
     FaceGap(f32),
     FaceGapReleased,
+    FaceGap4d(f32),
+    FaceGap4dReleased,
+    ViewerDistance(f32),
+    ViewerDistanceReleased,
     RenderMode(RenderMode),
     AABBMode(AABBMode),
     DebugMode(bool),
@@ -227,6 +248,7 @@ pub(crate) enum Message {
     RevealAnimationComplete {
         final_scale: f32,
         final_gap: f32,
+        final_gap_4d: f32,
     },
     /// Swallows a mouse-wheel scroll over the sticker-scale/face-gap panel,
     /// so the `Scrollable` it's clipped by never scrolls itself.
@@ -246,6 +268,8 @@ impl HypercubeApp {
         Self {
             sticker_scale: PRIMARY_STICKER_SCALE,
             face_gap: PRIMARY_FACE_GAP,
+            face_gap_4d: PRIMARY_FACE_GAP_4D,
+            viewer_distance: DEFAULT_VIEWER_DISTANCE,
             render_mode: RenderMode::Standard,
             aabb_mode: AABBMode::None,
             debug_mode: false,
@@ -255,6 +279,8 @@ impl HypercubeApp {
             pending_random_move_count: 0,
             sticker_scale_adjusting: false,
             face_gap_adjusting: false,
+            face_gap_4d_adjusting: false,
+            viewer_distance_adjusting: false,
             animation_duration_adjusting: false,
             revealed: false,
             reveal_generation: 0,
@@ -310,6 +336,22 @@ impl HypercubeApp {
             Message::FaceGapReleased => {
                 self.face_gap_adjusting = false;
             }
+            Message::FaceGap4d(value) => {
+                if !self.reveal_animating {
+                    self.face_gap_4d = value;
+                    self.face_gap_4d_adjusting = true;
+                }
+            }
+            Message::FaceGap4dReleased => {
+                self.face_gap_4d_adjusting = false;
+            }
+            Message::ViewerDistance(value) => {
+                self.viewer_distance = value;
+                self.viewer_distance_adjusting = true;
+            }
+            Message::ViewerDistanceReleased => {
+                self.viewer_distance_adjusting = false;
+            }
             Message::RenderMode(mode) => {
                 self.render_mode = mode;
             }
@@ -353,10 +395,21 @@ impl HypercubeApp {
                     .clamp(0.0, 1.0);
                 let eased = ease(t);
                 let panel_eased = ease(panel_progress(t, self.revealed));
-                // (sticker scale, face gap, panel fraction) at the flourish's
-                // start and target, in the direction currently underway.
-                let primary = (PRIMARY_STICKER_SCALE, PRIMARY_FACE_GAP, 0.0);
-                let secondary = (SECONDARY_STICKER_SCALE, SECONDARY_FACE_GAP, 1.0);
+                // (sticker scale, face gap, 4D face gap, panel fraction) at
+                // the flourish's start and target, in the direction
+                // currently underway.
+                let primary = (
+                    PRIMARY_STICKER_SCALE,
+                    PRIMARY_FACE_GAP,
+                    PRIMARY_FACE_GAP_4D,
+                    0.0,
+                );
+                let secondary = (
+                    SECONDARY_STICKER_SCALE,
+                    SECONDARY_FACE_GAP,
+                    SECONDARY_FACE_GAP_4D,
+                    1.0,
+                );
                 let (start, target) = if self.revealed {
                     (primary, secondary)
                 } else {
@@ -364,14 +417,17 @@ impl HypercubeApp {
                 };
                 self.sticker_scale = lerp(start.0, target.0, eased);
                 self.face_gap = lerp(start.1, target.1, eased);
-                self.reveal_panel_fraction = lerp(start.2, target.2, panel_eased);
+                self.face_gap_4d = lerp(start.2, target.2, eased);
+                self.reveal_panel_fraction = lerp(start.3, target.3, panel_eased);
             }
             Message::RevealAnimationComplete {
                 final_scale,
                 final_gap,
+                final_gap_4d,
             } => {
                 self.sticker_scale = final_scale;
                 self.face_gap = final_gap;
+                self.face_gap_4d = final_gap_4d;
                 self.reveal_animating = false;
                 self.reveal_animation_started = None;
                 self.reveal_panel_fraction = if self.revealed { 1.0 } else { 0.0 };
@@ -529,6 +585,42 @@ impl HypercubeApp {
                         .style(iced::widget::container::rounded_box),
                     ),
             )
+            .push(iced::widget::Space::new().height(SLIDERS_PANEL_GAP))
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(iced::widget::text("4D Face Gap"))
+                    .push(
+                        iced::widget::tooltip(
+                            Slider::new(1.0..=2.0, self.face_gap_4d, Message::FaceGap4d)
+                                .step(0.01f32)
+                                .width(250)
+                                .on_release(Message::FaceGap4dReleased),
+                            iced::widget::text(format_face_gap_4d(self.face_gap_4d)),
+                            iced::widget::tooltip::Position::FollowCursor,
+                        )
+                        .delay(tooltip_delay(self.face_gap_4d_adjusting))
+                        .style(iced::widget::container::rounded_box),
+                    ),
+            )
+            .push(iced::widget::Space::new().height(SLIDERS_PANEL_GAP))
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(iced::widget::text("4D Viewer Distance"))
+                    .push(
+                        iced::widget::tooltip(
+                            Slider::new(2.5..=10.0, self.viewer_distance, Message::ViewerDistance)
+                                .step(0.01f32)
+                                .width(250)
+                                .on_release(Message::ViewerDistanceReleased),
+                            iced::widget::text(format_viewer_distance(self.viewer_distance)),
+                            iced::widget::tooltip::Position::FollowCursor,
+                        )
+                        .delay(tooltip_delay(self.viewer_distance_adjusting))
+                        .style(iced::widget::container::rounded_box),
+                    ),
+            )
             .push(iced::widget::Space::new().height(SLIDERS_PANEL_GAP));
 
         let reveal_group = Column::new()
@@ -582,6 +674,8 @@ impl HypercubeApp {
             // Invert value since the slider can't work in reverse.
             1.0 - self.sticker_scale,
             self.face_gap,
+            self.face_gap_4d,
+            self.viewer_distance,
             self.render_mode,
             self.aabb_mode,
             self.settings.rotate_button,
@@ -728,6 +822,7 @@ mod tests {
         let _ = app.update(Message::RevealAnimationTick(started));
         assert_eq!(app.sticker_scale, PRIMARY_STICKER_SCALE);
         assert_eq!(app.face_gap, PRIMARY_FACE_GAP);
+        assert_eq!(app.face_gap_4d, PRIMARY_FACE_GAP_4D);
         assert_eq!(app.reveal_panel_fraction, 0.0);
 
         let _ = app.update(Message::RevealAnimationTick(
@@ -735,6 +830,7 @@ mod tests {
         ));
         assert_eq!(app.sticker_scale, SECONDARY_STICKER_SCALE);
         assert_eq!(app.face_gap, SECONDARY_FACE_GAP);
+        assert_eq!(app.face_gap_4d, SECONDARY_FACE_GAP_4D);
         assert_eq!(app.reveal_panel_fraction, 1.0);
 
         app.reveal_animation_started = Some(started);
@@ -745,6 +841,8 @@ mod tests {
         assert!(app.sticker_scale < SECONDARY_STICKER_SCALE);
         assert!(app.face_gap > PRIMARY_FACE_GAP);
         assert!(app.face_gap < SECONDARY_FACE_GAP);
+        assert!(app.face_gap_4d > PRIMARY_FACE_GAP_4D);
+        assert!(app.face_gap_4d < SECONDARY_FACE_GAP_4D);
         // `panel_progress` has its own dedicated coverage above; this only
         // confirms the tick handler actually wires it into the field.
         assert_eq!(app.reveal_panel_fraction, ease(panel_progress(0.5, true)));
@@ -755,6 +853,7 @@ mod tests {
         let mut app = HypercubeApp::new_inner();
         app.sticker_scale = SECONDARY_STICKER_SCALE;
         app.face_gap = SECONDARY_FACE_GAP;
+        app.face_gap_4d = SECONDARY_FACE_GAP_4D;
         app.revealed = true;
         let _ = app.update(Message::ToggleReveal);
         assert!(!app.revealed);
@@ -767,6 +866,7 @@ mod tests {
         ));
         assert!((app.sticker_scale - PRIMARY_STICKER_SCALE).abs() < 1e-6);
         assert!((app.face_gap - PRIMARY_FACE_GAP).abs() < 1e-6);
+        assert!((app.face_gap_4d - PRIMARY_FACE_GAP_4D).abs() < 1e-6);
         assert!((app.reveal_panel_fraction - 0.0).abs() < 1e-6);
     }
 

@@ -139,6 +139,21 @@ pub(crate) fn face_push_offset_3d(
     Vector3::new(projected.x, projected.y, projected.z)
 }
 
+/// Rotates `push_direction` and discards its resulting w-component, scaled
+/// by `magnitude`. Adding the result to an already-rotated 4D point (before
+/// the perspective divide) shifts that point's x/y/z without changing the
+/// w-coordinate the divide uses, so the point's apparent size stays fixed
+/// no matter how large `magnitude` grows, and its w can never cross the
+/// `viewer_distance - w = 0` perspective singularity.
+pub(crate) fn depth_preserving_push(
+    push_direction: Vector4<f32>,
+    rotation_4d: &Matrix4<f32>,
+    magnitude: f32,
+) -> Vector4<f32> {
+    let rotated = rotation_4d * push_direction;
+    Vector4::new(rotated.x, rotated.y, rotated.z, 0.0) * magnitude
+}
+
 /// Transform all vertices of a sticker cube to 3D space.
 ///
 /// Replaces the duplicate vertex transformation logic in both
@@ -151,6 +166,9 @@ pub(crate) fn face_push_offset_3d(
 /// * `sticker_scale` - Scale factor for individual stickers
 /// * `gap_distance` - 3D distance to push the sticker outward along its
 ///   face's outward direction, applied after projection
+/// * `gap_distance_4d` - slider value (1.0 = no push) whose distance from
+///   1.0 sets the magnitude of the depth-preserving push applied to the
+///   sticker's face-normal direction (see `depth_preserving_push`)
 /// * `viewer_distance` - Distance of 4D viewer from W=0 plane
 ///
 /// # Returns
@@ -161,11 +179,13 @@ pub(crate) fn transform_sticker_vertices_to_3d(
     rotation_4d: &Matrix4<f32>,
     sticker_scale: f32,
     gap_distance: f32,
+    gap_distance_4d: f32,
     viewer_distance: f32,
 ) -> Vec<Point3<f32>> {
     let fixed_dim = FIXED_DIMS[face_id];
     let push =
         face_push_offset_3d(FACE_CENTERS[face_id], rotation_4d, viewer_distance) * gap_distance;
+    let push_4d = depth_preserving_push(FACE_CENTERS[face_id], rotation_4d, gap_distance_4d - 1.0);
 
     // Transform each cube vertex exactly like the shader does
     let mut world_vertices = Vec::with_capacity(36);
@@ -178,6 +198,7 @@ pub(crate) fn transform_sticker_vertices_to_3d(
             fixed_dim,
             rotation_4d,
             viewer_distance,
+            push_4d,
         );
         world_vertices.push(projected + push);
     }
@@ -191,6 +212,7 @@ pub(crate) fn project_cube_point(
     fixed_dim: usize,
     rotation_4d: &Matrix4<f32>,
     viewer_distance: f32,
+    post_rotation_offset: Vector4<f32>,
 ) -> Point3<f32> {
     // Generate vertex in 4D space around sticker center (matching shader logic)
     let mut vertex_4d = center_vertex;
@@ -208,7 +230,14 @@ pub(crate) fn project_cube_point(
         }
     }
 
-    project_4d_to_3d(vertex_4d, rotation_4d, viewer_distance)
+    let rotated_4d = rotation_4d * vertex_4d + post_rotation_offset;
+    let w_distance = viewer_distance - rotated_4d.w;
+    let scale = viewer_distance / w_distance;
+    Point3::new(
+        rotated_4d.x * scale,
+        rotated_4d.y * scale,
+        rotated_4d.z * scale,
+    )
 }
 
 /// Rotates within the plane spanned by orthonormal `u` and `v` by `angle`,
@@ -537,6 +566,108 @@ mod tests {
         let result = visible_faces(&Matrix4::identity(), VIEWER_DISTANCE);
         assert!(result[0], "face 0 (W=-1) should be visible");
         assert!(!result[7], "face 7 (W=+1) should be culled");
+    }
+
+    #[test]
+    fn depth_preserving_push_always_has_zero_w_component() {
+        let rotation = create_4d_rotation_xw(1.234);
+        let direction = Vector4::new(0.3, -0.6, 0.1, 0.9);
+        let push = depth_preserving_push(direction, &rotation, 2.5);
+        assert_eq!(push.w, 0.0);
+    }
+
+    /// Face 0's center is already world-W-aligned at the identity rotation,
+    /// matching a piece that's rotated to sit exactly at the visual center:
+    /// its push direction has no x/y/z component left once the w-component
+    /// is discarded, so the push vanishes entirely.
+    #[test]
+    fn depth_preserving_push_vanishes_for_a_direction_rotated_onto_world_w() {
+        let rotation = Matrix4::identity();
+        let push = depth_preserving_push(FACE_CENTERS[0], &rotation, 3.0);
+        assert!(push.norm() < EPSILON, "expected zero push, got {push:?}");
+    }
+
+    /// `fixed_dim = 3` (W) keeps `local_vertex` mapped straight onto x/y/z,
+    /// so the rotated vertex used to derive the expected scale here doesn't
+    /// need to replicate `project_cube_point`'s axis-skipping loop.
+    #[test]
+    fn project_cube_point_offset_scales_with_the_vertex_perspective_scale() {
+        let local_vertex = Vector3::new(0.05, -0.03, 0.02);
+        let center_vertex = Vector4::new(0.1, -0.2, 0.05, 0.0);
+        let fixed_dim = 3;
+        let rotation = create_4d_rotation_xw(0.4);
+        let offset = Vector4::new(0.3, -0.1, 0.2, 0.0);
+
+        let unpushed = project_cube_point(
+            local_vertex,
+            center_vertex,
+            fixed_dim,
+            &rotation,
+            VIEWER_DISTANCE,
+            Vector4::zeros(),
+        );
+        let pushed = project_cube_point(
+            local_vertex,
+            center_vertex,
+            fixed_dim,
+            &rotation,
+            VIEWER_DISTANCE,
+            offset,
+        );
+
+        let vertex_4d =
+            center_vertex + Vector4::new(local_vertex.x, local_vertex.y, local_vertex.z, 0.0);
+        let rotated_w = (rotation * vertex_4d).w;
+        let scale = VIEWER_DISTANCE / (VIEWER_DISTANCE - rotated_w);
+        let expected = unpushed + Vector3::new(offset.x, offset.y, offset.z) * scale;
+
+        assert!(
+            (pushed - expected).norm() < EPSILON,
+            "expected {expected:?}, got {pushed:?}"
+        );
+    }
+
+    #[test]
+    fn transform_sticker_vertices_to_3d_gap_4d_of_one_leaves_anchor_unshifted() {
+        use crate::geometry::{BASE_CUBE_VERTICES, FIXED_DIMS};
+
+        let sticker_position_4d = Vector4::new(0.1, -0.2, 0.05, 0.0);
+        let face_id = 5;
+        let rotation = create_4d_rotation_xw(0.4);
+        let sticker_scale = 0.9;
+
+        let actual = transform_sticker_vertices_to_3d(
+            sticker_position_4d,
+            face_id,
+            &rotation,
+            sticker_scale,
+            0.0,
+            1.0,
+            VIEWER_DISTANCE,
+        );
+        let expected: Vec<_> = BASE_CUBE_VERTICES
+            .iter()
+            .map(|vertex| {
+                let local_vertex = Vector3::new(vertex[0], vertex[1], vertex[2])
+                    * BASE_STICKER_SIZE
+                    * sticker_scale;
+                project_cube_point(
+                    local_vertex,
+                    sticker_position_4d,
+                    FIXED_DIMS[face_id],
+                    &rotation,
+                    VIEWER_DISTANCE,
+                    Vector4::zeros(),
+                )
+            })
+            .collect();
+
+        for (a, b) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (a - b).norm() < EPSILON,
+                "expected {b:?} to be close to {a:?}"
+            );
+        }
     }
 
     fn assert_matrix4_close(a: Matrix4<f32>, b: Matrix4<f32>) {

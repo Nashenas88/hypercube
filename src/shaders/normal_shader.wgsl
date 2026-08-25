@@ -52,7 +52,13 @@ fn vs_main(
     // R*(center + basis[i]) == R*center + R*basis[i], so these same four
     // rotated vectors serve both the normal and the vertex position below,
     // instead of each being re-rotated separately.
-    let rc = transform.rotation_matrix * sticker_center_4d;
+    //
+    // `depth_preserving_push` is the rotated face normal with its
+    // w-component discarded: adding it shifts x/y/z without changing the w
+    // the perspective divide below uses, so a sticker's apparent size never
+    // depends on the push magnitude.
+    let depth_preserving_push = vec4<f32>(rotated_face_normal.xyz, 0.0) * (transform.face_gap_4d - 1.0);
+    let rc = transform.rotation_matrix * sticker_center_4d + depth_preserving_push;
     let rb0 = transform.rotation_matrix * instance.basis[0];
     let rb1 = transform.rotation_matrix * instance.basis[1];
     let rb2 = transform.rotation_matrix * instance.basis[2];

@@ -8,7 +8,7 @@ struct Transform4D {
     viewer_distance: f32,
     sticker_scale: f32,
     face_gap: f32,
-    _padding: f32,
+    face_gap_4d: f32,
 }
 
 struct CameraUniform {
