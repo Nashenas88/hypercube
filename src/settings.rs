@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use iced::mouse;
 use serde::{Deserialize, Serialize};
 
+use crate::theme::Theme;
+
 /// Which mouse button drives camera rotation (held + drag = 3D rotate, held + Shift + drag = 4D rotate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) enum RotateButton {
@@ -51,6 +53,8 @@ pub(crate) struct AppSettings {
     pub(crate) rotate_button: RotateButton,
     /// Duration of a move's turn animation, in milliseconds.
     pub(crate) animation_duration_ms: u32,
+    #[serde(default)]
+    pub(crate) theme: Theme,
 }
 
 impl Default for AppSettings {
@@ -58,6 +62,7 @@ impl Default for AppSettings {
         Self {
             rotate_button: RotateButton::default(),
             animation_duration_ms: DEFAULT_ANIMATION_DURATION_MS,
+            theme: Theme::default(),
         }
     }
 }

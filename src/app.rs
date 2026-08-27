@@ -14,6 +14,7 @@ use crate::shader_widget::{
     HypercubeShaderProgram, PRIMARY_FACE_GAP, PRIMARY_FACE_GAP_4D, PRIMARY_STICKER_SCALE,
     REVEAL_ANIMATION_DURATION, SECONDARY_FACE_GAP, SECONDARY_FACE_GAP_4D, SECONDARY_STICKER_SCALE,
 };
+use crate::theme::Theme;
 
 /// Rendering modes for visualization
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +240,7 @@ pub(crate) enum Message {
     AABBMode(AABBMode),
     DebugMode(bool),
     RotateButton(RotateButton),
+    Theme(Theme),
     AnimationDuration(u32),
     AnimationDurationReleased,
     Reset,
@@ -363,6 +365,10 @@ impl HypercubeApp {
             }
             Message::RotateButton(button) => {
                 self.settings.rotate_button = button;
+                settings::save(&self.settings);
+            }
+            Message::Theme(theme) => {
+                self.settings.theme = theme;
                 settings::save(&self.settings);
             }
             Message::AnimationDuration(duration_ms) => {
@@ -514,6 +520,15 @@ impl HypercubeApp {
                             Message::RotateButton,
                         )
                         .width(250),
+                    ),
+            )
+            .push(
+                Column::new()
+                    .spacing(5)
+                    .push(iced::widget::text("Theme"))
+                    .push(
+                        PickList::new(&Theme::ALL[..], Some(self.settings.theme), Message::Theme)
+                            .width(250),
                     ),
             );
 

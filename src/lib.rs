@@ -19,6 +19,7 @@ mod ray_casting;
 mod renderer;
 mod settings;
 pub mod shader_widget;
+mod theme;
 
 /// Entry point for the hypercube visualization application
 pub fn run() -> iced::Result {
