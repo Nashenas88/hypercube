@@ -111,6 +111,9 @@ pub(crate) struct Transform4D {
     /// rotated face-normal direction, added after rotation but before
     /// projection (see `math::depth_preserving_push`)
     face_gap_4d: f32,
+    _padding: [f32; 3],
+    /// Wall-clock seconds since the app started, wrapped modulo 3600.
+    elapsed_seconds: f32,
 }
 
 /// Lighting uniform data
@@ -538,7 +541,7 @@ impl Renderer {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -721,6 +724,8 @@ impl Renderer {
             sticker_scale: ui_controls.sticker_scale,
             face_gap: ui_controls.face_gap,
             face_gap_4d: ui_controls.face_gap_4d,
+            _padding: [0.0; 3],
+            elapsed_seconds: 0.0,
         };
         let transform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Transform Buffer"),
@@ -1339,6 +1344,9 @@ impl Renderer {
     /// * `face_gap_4d` - 4D anchor scale for each facet (from 4D face gap slider)
     /// * `viewer_distance` - Distance of the 4D viewer from the W=0 plane
     ///   (from the 4D viewer distance slider)
+    /// * `elapsed_seconds` - Wall-clock seconds since the app started,
+    ///   wrapped modulo 3600
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn update_instances(
         &mut self,
         queue: &Queue,
@@ -1347,6 +1355,7 @@ impl Renderer {
         face_gap: f32,
         face_gap_4d: f32,
         viewer_distance: f32,
+        elapsed_seconds: f32,
     ) {
         // Update transform uniform
         let transform_data = Transform4D {
@@ -1355,6 +1364,8 @@ impl Renderer {
             sticker_scale,
             face_gap,
             face_gap_4d,
+            _padding: [0.0; 3],
+            elapsed_seconds,
         };
         queue.write_buffer(
             &self.transform_buffer,
@@ -1614,5 +1625,15 @@ impl shader::Pipeline for Renderer {
                 render_mode: RenderMode::Standard,
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transform4d_size_is_16_byte_aligned() {
+        assert_eq!(std::mem::size_of::<Transform4D>() % 16, 0);
     }
 }

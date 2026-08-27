@@ -289,6 +289,8 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) sticker_instances: Arc<[StickerInstance]>,
     pub(crate) sticker_generation: u64,
     pub(crate) visible_faces: [bool; 8],
+    /// Wall-clock seconds since the app started, wrapped modulo 3600.
+    pub(crate) elapsed_seconds: f32,
 }
 
 impl shader::Primitive for HypercubePrimitive {
@@ -312,6 +314,7 @@ impl shader::Primitive for HypercubePrimitive {
             self.ui_controls.face_gap,
             self.ui_controls.face_gap_4d,
             self.ui_controls.viewer_distance,
+            self.elapsed_seconds,
         );
         pipeline.update_camera(queue, &self.camera, &self.projection);
         pipeline.update_light(queue, &self.camera);
@@ -376,6 +379,12 @@ pub struct HypercubeShaderState {
     /// waiting to see if a second click lands within `DOUBLE_CLICK_WINDOW`.
     pending_face_click: Option<(Instant, usize)>,
     last_redraw_instant: Option<Instant>,
+    /// Timestamp of the previous `RedrawRequested` tick, used only to
+    /// accumulate `elapsed_seconds`; unlike `last_redraw_instant`, this is
+    /// never reset to `None` while animations are idle.
+    last_tick_instant: Option<Instant>,
+    /// Wall-clock seconds since the app started, wrapped modulo 3600.
+    elapsed_seconds: f32,
     reset_generation: u64,
     random_moves_generation: u64,
     /// Seeded once at construction, reused across every random-move press so
@@ -639,6 +648,13 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                     .map(|last| now.duration_since(last))
                     .unwrap_or_default();
 
+                let tick_delta = state
+                    .last_tick_instant
+                    .map(|last| now.duration_since(last))
+                    .unwrap_or_default();
+                state.elapsed_seconds = (state.elapsed_seconds + tick_delta.as_secs_f32()) % 3600.0;
+                state.last_tick_instant = Some(*now);
+
                 let was_animating = state.animating_move.is_some();
                 let move_tick = Self::advance_animation(state, delta);
                 let focus_tick = Self::advance_focus_animation(state, delta);
@@ -765,6 +781,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             } else {
                 visible_faces(&state.rotation_4d, self.viewer_distance)
             },
+            elapsed_seconds: state.elapsed_seconds,
         }
     }
 }
@@ -1322,6 +1339,8 @@ impl Default for HypercubeShaderState {
             rotate_press: None,
             pending_face_click: None,
             last_redraw_instant: None,
+            last_tick_instant: None,
+            elapsed_seconds: 0.0,
             reset_generation: 0,
             random_moves_generation: 0,
             rng: fastrand::Rng::new(),

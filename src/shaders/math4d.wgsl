@@ -9,6 +9,10 @@ struct Transform4D {
     sticker_scale: f32,
     face_gap: f32,
     face_gap_4d: f32,
+    _padding: vec3<f32>,
+    // Wall-clock seconds since the app started, wrapped modulo 3600, driving
+    // fragment-shader animation.
+    elapsed_seconds: f32,
 }
 
 struct CameraUniform {
