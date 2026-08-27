@@ -158,6 +158,26 @@ fn crystal_color(instance_index: u32, world_position: vec3<f32>, world_normal: v
     return ambient + diffuse + specular + rim * vec3<f32>(0.7, 0.3, 1.0);
 }
 
+fn glowing_light_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
+    let seed = f32(instance_index);
+    let pulse = 0.5 + 0.5 * sin(transform.elapsed_seconds * 2.0 + seed * 6.28318);
+    let base = mix(vec3<f32>(0.85, 0.8, 0.6), vec3<f32>(1.0, 1.0, 0.9), pulse);
+    let view_dir = normalize(-world_position);
+    let halo = fresnel(world_normal, view_dir, 1.5);
+    return base + halo * vec3<f32>(1.0, 1.0, 0.9) * 0.6;
+}
+
+fn lightning_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
+    let seed = f32(instance_index);
+    let flash_bucket = floor(transform.elapsed_seconds * 12.0);
+    let flash = hash11(seed * 5.0 + flash_bucket);
+    let brightness = step(0.6, flash);
+    let base = mix(vec3<f32>(0.2, 0.18, 0.05), vec3<f32>(1.0, 0.95, 0.5), brightness);
+    let view_dir = normalize(-world_position);
+    let rim = fresnel(world_normal, view_dir, 1.0) * brightness;
+    return base + rim * vec3<f32>(1.0, 0.9, 0.3);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var final_color: vec3<f32>;
@@ -177,6 +197,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         case 4u: {
             final_color = sand_color(in.instance_index, in.world_position, in.world_normal);
+        }
+        case 5u: {
+            final_color = glowing_light_color(in.instance_index, in.world_position, in.world_normal);
+        }
+        case 6u: {
+            final_color = lightning_color(in.instance_index, in.world_position, in.world_normal);
         }
         case 7u: {
             final_color = crystal_color(in.instance_index, in.world_position, in.world_normal);
