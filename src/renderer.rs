@@ -34,7 +34,7 @@ pub(crate) struct Renderer {
     /// Graphics pipeline for sky rendering
     sky_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for standard rendering
-    render_pipeline: wgpu::RenderPipeline,
+    classic_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for normal visualization
     normal_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for depth visualization
@@ -795,11 +795,11 @@ impl Renderer {
                 Err(err) => panic!("{}", err.emit_to_string(&composer)),
             };
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
+        let classic_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Classic Shader"),
             source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
-                include_str!("shaders/shader.wgsl"),
-                "shaders/shader.wgsl",
+                include_str!("shaders/classic_shader.wgsl"),
+                "shaders/classic_shader.wgsl",
             ))),
         });
 
@@ -809,9 +809,9 @@ impl Renderer {
             push_constant_ranges: &[],
         });
 
-        let render_pipeline_layout =
+        let classic_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Render Pipeline Layout"),
+                label: Some("Classic Pipeline Layout"),
                 bind_group_layouts: &[&main_bind_group_layout],
                 push_constant_ranges: &[],
             });
@@ -862,7 +862,7 @@ impl Renderer {
             layout: Some(&sky_pipeline_layout),
             cache: None,
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &classic_shader,
                 entry_point: Some("vs_sky"),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
@@ -875,7 +875,7 @@ impl Renderer {
                 },
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &classic_shader,
                 entry_point: Some("fs_sky"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
@@ -902,12 +902,12 @@ impl Renderer {
             multiview: None,
         });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
+        let classic_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Classic Pipeline"),
+            layout: Some(&classic_pipeline_layout),
             cache: None,
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &classic_shader,
                 entry_point: Some("vs_main"),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
@@ -920,7 +920,7 @@ impl Renderer {
                 },
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &classic_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
@@ -1177,7 +1177,7 @@ impl Renderer {
             sky_vertex_buffer,
             sky_index_buffer,
             sky_pipeline,
-            render_pipeline,
+            classic_pipeline,
             normal_pipeline,
             depth_pipeline,
             debug_pipeline,
@@ -1452,7 +1452,7 @@ impl Renderer {
 
         // Then render the hypercube
         let (pipeline, bind_group) = match self.current_render_mode {
-            RenderMode::Standard => (&self.render_pipeline, &self.main_bind_group),
+            RenderMode::Standard => (&self.classic_pipeline, &self.main_bind_group),
             RenderMode::Normals => (&self.normal_pipeline, &self.normal_bind_group),
             RenderMode::Depth => (&self.depth_pipeline, &self.debug_bind_group),
         };
