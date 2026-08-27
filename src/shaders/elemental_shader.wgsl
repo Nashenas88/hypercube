@@ -1,6 +1,6 @@
 #import math4d::{compute_vertex_geometry, instances, transform}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting}
-#import elemental_common::{hash21, value_noise1, fresnel}
+#import elemental_common::{hash11, hash21, value_noise1, fresnel}
 
 @group(0) @binding(5)
 var<storage, read> piece_slots: array<u32>;
@@ -116,6 +116,48 @@ fn sand_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3
     return ambient + diffuse + specular;
 }
 
+fn leaves_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
+    let normal = normalize(world_normal);
+    let light_dir = normalize(-light.direction);
+    let view_dir = normalize(-world_position);
+
+    let sway = value_noise1(f32(instance_index) * 1.7 + transform.elapsed_seconds * 0.8);
+    let dapple = value_noise1(f32(instance_index) * 9.3 + transform.elapsed_seconds * 2.5);
+    let albedo = mix(vec3<f32>(0.1, 0.35, 0.05), vec3<f32>(0.35, 0.6, 0.15), sway) * mix(0.7, 1.0, dapple);
+
+    let ambient = light.ambient * albedo;
+    let diffuse_strength = max(dot(normal, light_dir), 0.0);
+    let diffuse = diffuse_strength * light.color * albedo;
+
+    let half_dir = normalize(light_dir + view_dir);
+    let specular_strength = pow(max(dot(normal, half_dir), 0.0), 16.0);
+    let specular = specular_strength * light.color * 0.2;
+
+    return ambient + diffuse + specular;
+}
+
+fn crystal_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
+    let normal = normalize(world_normal);
+    let light_dir = normalize(-light.direction);
+    let view_dir = normalize(-world_position);
+
+    let facet_seed = hash11(f32(instance_index) * 4.0 + floor(transform.elapsed_seconds * 0.5));
+    let albedo = mix(vec3<f32>(0.3, 0.05, 0.5), vec3<f32>(0.55, 0.2, 0.8), facet_seed);
+
+    let ambient = light.ambient * albedo;
+    let diffuse_strength = max(dot(normal, light_dir), 0.0);
+    let banded_diffuse = floor(diffuse_strength * 4.0) / 4.0;
+    let diffuse = banded_diffuse * light.color * albedo;
+
+    let half_dir = normalize(light_dir + view_dir);
+    let specular_strength = pow(max(dot(normal, half_dir), 0.0), 96.0);
+    let specular = specular_strength * light.color;
+
+    let rim = fresnel(normal, view_dir, 2.5) * 0.6;
+
+    return ambient + diffuse + specular + rim * vec3<f32>(0.7, 0.3, 1.0);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var final_color: vec3<f32>;
@@ -123,6 +165,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     switch (in.kind) {
         case 0u: {
             final_color = fire_color(in.instance_index, in.world_position, in.world_normal);
+        }
+        case 1u: {
+            final_color = leaves_color(in.instance_index, in.world_position, in.world_normal);
         }
         case 2u: {
             final_color = water_color(in.instance_index, in.world_position, in.world_normal);
@@ -132,6 +177,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         case 4u: {
             final_color = sand_color(in.instance_index, in.world_position, in.world_normal);
+        }
+        case 7u: {
+            final_color = crystal_color(in.instance_index, in.world_position, in.world_normal);
         }
         default: {
             final_color = vec3<f32>(0.5, 0.5, 0.5);
