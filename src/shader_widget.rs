@@ -128,7 +128,7 @@ pub(crate) const SECONDARY_FACE_GAP_4D: f32 = 2.0;
 /// Builds the GPU instance list for the current frame. Piece state is
 /// already final (`apply_move` commits atomically) - while a move is
 /// animating, the 27 affected facets are instead swept from their pre-move
-/// position/color toward that already-committed final position, using the
+/// position/kind toward that already-committed final position, using the
 /// exact same rotation formula `apply_move` used, so the last animated
 /// frame always lines up perfectly with the static post-move render it
 /// hands off to.
@@ -149,8 +149,8 @@ pub fn sticker_instances_for_render(state: &HypercubeShaderState) -> Vec<Sticker
         .iter()
         .map(|facet| {
             let pre_move_piece = &animating.pre_move_pieces[facet.piece_slot];
-            let color = pre_move_piece.colors[facet.axis]
-                .expect("FACET_TABLE entries are only built where colors[axis] is Some");
+            let kind = pre_move_piece.kinds[facet.axis]
+                .expect("FACET_TABLE entries are only built where kinds[axis] is Some");
 
             let (position_4d, basis, face_normal_4d) = if pre_move_piece.position
                 [animating.side_axis]
@@ -247,9 +247,10 @@ pub fn sticker_instances_for_render(state: &HypercubeShaderState) -> Vec<Sticker
 
             StickerInstance {
                 position_4d,
-                color: nalgebra::Vector4::from(color).into(),
                 basis,
                 face_normal_4d,
+                kind: kind as u32,
+                _padding: [0; 3],
             }
         })
         .collect()
@@ -1341,10 +1342,6 @@ mod tests {
         v.map(|x| (x * 1000.0).round() as i32)
     }
 
-    fn color_key(c: [f32; 4]) -> [u8; 4] {
-        c.map(|x| (x * 255.0).round() as u8)
-    }
-
     /// At the end of a move, a rotated basis vector is `±` some world unit
     /// vector, matching `discrete_rotation`'s signed-permutation snap - but
     /// unlike position, the *sign* isn't independently meaningful here: the
@@ -1529,12 +1526,12 @@ mod tests {
         }
     }
 
-    /// Position, color, spanned basis axes, and face normal for one rendered
+    /// Position, kind, spanned basis axes, and face normal for one rendered
     /// row, used to compare animated vs. static render output as a set.
-    type RenderRow = ([i32; 4], [u8; 4], Vec<usize>, [i32; 4]);
+    type RenderRow = ([i32; 4], u32, Vec<usize>, [i32; 4]);
 
     /// At the end of an animation, the full set of rendered (position,
-    /// color) pairs must exactly match what the static post-move render
+    /// kind) pairs must exactly match what the static post-move render
     /// would show - checked as a set (not a row-by-row comparison), since
     /// each animated row keeps its pre-move identity while sweeping to
     /// wherever its content ends up, which is a different GPU row than the
@@ -1579,7 +1576,7 @@ mod tests {
                             .map(|inst| {
                                 (
                                     round_key(inst.position_4d),
-                                    color_key(inst.color),
+                                    inst.kind,
                                     basis_axis_set(inst.basis),
                                     round_key(inst.face_normal_4d),
                                 )
@@ -1591,7 +1588,7 @@ mod tests {
                                 .map(|inst| {
                                     (
                                         round_key(inst.position_4d),
-                                        color_key(inst.color),
+                                        inst.kind,
                                         basis_axis_set(inst.basis),
                                         round_key(inst.face_normal_4d),
                                     )

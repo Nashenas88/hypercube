@@ -2,7 +2,7 @@
 //!
 //! Replaces sticker-tracking with piece-tracking: each `Piece` carries a
 //! lattice position (one of the 81 points in {-1,0,1}^4) and, for each axis
-//! where its position is nonzero, the color of the facet currently facing
+//! where its position is nonzero, the kind of the facet currently facing
 //! that axis's sign. A piece's `Vec` slot is always determined by its own
 //! current position (see `index_of`), so moves never need to reorder the
 //! `Vec` and two `Hypercube`s can be compared with a plain `assert_eq!`.
@@ -11,15 +11,16 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::geometry::{Color, FACE_CENTERS};
+use crate::geometry::FACE_CENTERS;
 use crate::math::GRID_EXTENT;
 
 /// A single puzzle piece: its current lattice position and, per axis, the
-/// color of the facet facing that axis (if any).
+/// opaque kind of the facet facing that axis (if any). A kind's meaning is
+/// defined entirely by the active theme's shader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Piece {
     pub(crate) position: [i8; 4],
-    pub(crate) colors: [Option<Color>; 4],
+    pub(crate) kinds: [Option<u8>; 4],
 }
 
 impl Piece {
@@ -42,14 +43,12 @@ pub(crate) struct Hypercube {
 /// Instance data for the vertex shader - represents one rendered facet in 4D
 /// space. Lives here (rather than in `renderer.rs`) because building the
 /// full instance list is a puzzle-state concern: it walks `FACET_TABLE` and
-/// looks up each facet's live color from a `Hypercube`.
+/// looks up each facet's live kind from a `Hypercube`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct StickerInstance {
     /// 4D position of the sticker
     pub(crate) position_4d: [f32; 4],
-    /// RGBA color of the sticker
-    pub(crate) color: [f32; 4],
     /// The 3 world-space basis vectors (one per local mesh axis) the vertex
     /// shader embeds the sticker's local cube offsets along.
     pub(crate) basis: [[f32; 4]; 3],
@@ -57,27 +56,11 @@ pub struct StickerInstance {
     /// culling. Tracks the facet's true current orientation, so it sweeps
     /// continuously during a move animation instead of snapping at the end.
     pub(crate) face_normal_4d: [f32; 4],
+    /// Opaque sticker-kind identity; interpreted only by the active theme's
+    /// shader.
+    pub(crate) kind: u32,
+    pub(crate) _padding: [u32; 3],
 }
-
-/// Colors for the 8 sides of the puzzle, indexed by `face_id_for`.
-const COLORS: [Color; 8] = [
-    // center
-    Color::Cyan,
-    // left
-    Color::Green,
-    // bottom
-    Color::Yellow,
-    // front
-    Color::Red,
-    // back
-    Color::Orange,
-    // top
-    Color::White,
-    // right
-    Color::Blue,
-    // void
-    Color::Purple,
-];
 
 /// Maps a (axis, sign) side to one of the 8 face ids, reproducing the same
 /// axis/sign -> face pairing as the old `FACE_CENTERS`/`FIXED_DIMS` tables in
@@ -112,9 +95,9 @@ const FACE_AXIS_SIGN: [(usize, i8); 8] = [
     (3, 1),
 ];
 
-/// The color assigned to a given (axis, sign) side.
-pub(crate) fn side_color(axis: usize, sign: i8) -> Color {
-    COLORS[face_id_for(axis, sign)]
+/// The opaque kind assigned to a given (axis, sign) side.
+pub(crate) fn side_kind(axis: usize, sign: i8) -> u8 {
+    face_id_for(axis, sign) as u8
 }
 
 /// The 3 axes other than `fixed`, in ascending order.
@@ -157,7 +140,7 @@ pub(crate) fn position_of(mut index: usize) -> [i8; 4] {
 
 impl Hypercube {
     /// Builds the solved puzzle: all 81 lattice positions, each piece's
-    /// colors matching `side_color` for every axis where its position is
+    /// kinds matching `side_kind` for every axis where its position is
     /// nonzero.
     pub(crate) fn solved() -> Self {
         let mut pieces = Vec::with_capacity(81);
@@ -166,13 +149,13 @@ impl Hypercube {
                 for z in -1..=1i8 {
                     for w in -1..=1i8 {
                         let position = [x, y, z, w];
-                        let mut colors = [None; 4];
+                        let mut kinds = [None; 4];
                         for axis in 0..4 {
                             if position[axis] != 0 {
-                                colors[axis] = Some(side_color(axis, position[axis]));
+                                kinds[axis] = Some(side_kind(axis, position[axis]));
                             }
                         }
-                        pieces.push(Piece { position, colors });
+                        pieces.push(Piece { position, kinds });
                     }
                 }
             }
@@ -180,14 +163,14 @@ impl Hypercube {
         Self { pieces }
     }
 
-    /// True iff every piece's colors match its position's home-side colors,
+    /// True iff every piece's kinds match its position's home-side kinds,
     /// i.e. no piece has ever been moved out of its solved orientation.
     #[cfg(test)]
     pub(crate) fn is_solved(&self) -> bool {
         self.pieces.iter().all(|p| {
-            (0..4).all(|axis| match (p.position[axis], p.colors[axis]) {
+            (0..4).all(|axis| match (p.position[axis], p.kinds[axis]) {
                 (0, None) => true,
-                (n, Some(c)) if n != 0 => c == side_color(axis, n),
+                (n, Some(k)) if n != 0 => k == side_kind(axis, n),
                 _ => false,
             })
         })
@@ -202,12 +185,12 @@ pub(crate) const NUM_FACETS: usize = 216;
 /// Static, state-independent geometry for one rendered facet: everything
 /// needed to place it, hit-test it, and know which move it triggers if
 /// clicked, computed once from its `(piece_slot, axis)` identity. Only the
-/// facet's color is live state, looked up from a `Hypercube` at render time.
+/// facet's kind is live state, looked up from a `Hypercube` at render time.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FacetGeometry {
     /// Index into `Hypercube::pieces` for the piece this facet belongs to.
     pub(crate) piece_slot: usize,
-    /// The axis this facet faces (`Piece::colors[axis]` is `Some` for it).
+    /// The axis this facet faces (`Piece::kinds[axis]` is `Some` for it).
     pub(crate) axis: usize,
     /// Which of the 8 tesseract sides this facet renders on.
     pub(crate) face_id: usize,
@@ -297,13 +280,14 @@ pub(crate) fn generate_sticker_instances(hypercube: &Hypercube) -> Vec<StickerIn
     FACET_TABLE
         .iter()
         .map(|facet| {
-            let color = hypercube.pieces[facet.piece_slot].colors[facet.axis]
-                .expect("FACET_TABLE entries are only built where colors[axis] is Some");
+            let kind = hypercube.pieces[facet.piece_slot].kinds[facet.axis]
+                .expect("FACET_TABLE entries are only built where kinds[axis] is Some");
             StickerInstance {
                 position_4d: facet.position_4d,
-                color: nalgebra::Vector4::from(color).into(),
                 basis: facet.basis,
                 face_normal_4d: FACE_CENTERS[facet.face_id].into(),
+                kind: kind as u32,
+                _padding: [0; 3],
             }
         })
         .collect()
@@ -312,6 +296,12 @@ pub(crate) fn generate_sticker_instances(hypercube: &Hypercube) -> Vec<StickerIn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sticker_instance_size_is_16_byte_aligned() {
+        assert_eq!(std::mem::size_of::<StickerInstance>() % 16, 0);
+        assert_eq!(std::mem::size_of::<StickerInstance>(), 96);
+    }
 
     #[test]
     fn index_of_position_of_round_trip() {
@@ -353,11 +343,12 @@ mod tests {
     }
 
     #[test]
-    fn scrambled_colors_are_not_solved() {
+    fn scrambled_kinds_are_not_solved() {
         let mut cube = Hypercube::solved();
-        // Manually desync one piece's color from its home side.
+        // Manually desync one piece's kind from its home side.
         let slot = index_of([1, 1, 1, 1]);
-        cube.pieces[slot].colors[0] = Some(Color::Cyan);
+        let home_kind = cube.pieces[slot].kinds[0].unwrap();
+        cube.pieces[slot].kinds[0] = Some((home_kind + 1) % 8);
         assert!(!cube.is_solved());
     }
 
@@ -366,7 +357,7 @@ mod tests {
         let cube = Hypercube::solved();
         let center = &cube.pieces[index_of([0, 0, 0, 0])];
         assert_eq!(center.facet_count(), 0);
-        assert!(center.colors.iter().all(Option::is_none));
+        assert!(center.kinds.iter().all(Option::is_none));
     }
 
     #[test]
@@ -417,14 +408,13 @@ mod tests {
     }
 
     #[test]
-    fn generate_sticker_instances_matches_solved_colors() {
+    fn generate_sticker_instances_matches_solved_kinds() {
         let cube = Hypercube::solved();
         let instances = generate_sticker_instances(&cube);
         assert_eq!(instances.len(), NUM_FACETS);
         for (facet, instance) in FACET_TABLE.iter().zip(instances.iter()) {
-            let expected_color = cube.pieces[facet.piece_slot].colors[facet.axis].unwrap();
-            let expected: [f32; 4] = nalgebra::Vector4::from(expected_color).into();
-            assert_eq!(instance.color, expected);
+            let expected_kind = cube.pieces[facet.piece_slot].kinds[facet.axis].unwrap();
+            assert_eq!(instance.kind, expected_kind as u32);
             assert_eq!(instance.position_4d, facet.position_4d);
         }
     }

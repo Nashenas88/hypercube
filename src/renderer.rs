@@ -144,6 +144,26 @@ pub(crate) struct HighlightingUniform {
     piece_highlight_color: [f32; 4],
 }
 
+/// Classic theme's per-kind RGBA colors, indexed by kind.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct KindColors {
+    colors: [[f32; 4]; 8],
+}
+
+const DEFAULT_KIND_COLORS: KindColors = KindColors {
+    colors: [
+        [0.0, 1.0, 1.0, 1.0],  // 0: center, Cyan
+        [0.0, 1.0, 0.0, 1.0],  // 1: left, Green
+        [1.0, 1.0, 0.0, 1.0],  // 2: bottom, Yellow
+        [1.0, 0.0, 0.0, 1.0],  // 3: front, Red
+        [1.0, 0.65, 0.0, 1.0], // 4: back, Orange
+        [1.0, 1.0, 1.0, 1.0],  // 5: top, White
+        [0.1, 0.1, 1.0, 1.0],  // 6: right, Blue
+        [0.5, 0.0, 1.0, 1.0],  // 7: void, Purple
+    ],
+};
+
 /// Debug instance data for GPU vertex attributes (transparent bounding box rendering)
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -436,6 +456,12 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
+        let kind_colors_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Kind Colors Buffer"),
+            contents: bytemuck::cast_slice(&[DEFAULT_KIND_COLORS]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
         // Create debug instance buffer for transparent AABB rendering
         // Initialize with dummy instances to avoid zero-size buffer
         let dummy_instance = DebugInstance {
@@ -506,7 +532,7 @@ impl Renderer {
                 label: Some("Skybox Bind Group Layout"),
             });
 
-        // Main shader bind group layout (transform, camera, instances, light, highlighting, piece_slots)
+        // Main shader bind group layout (transform, camera, instances, light, highlighting, piece_slots, kind_colors)
         let main_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -565,6 +591,16 @@ impl Renderer {
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -718,6 +754,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: piece_slot_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: kind_colors_buffer.as_entire_binding(),
                 },
             ],
             label: Some("Main Bind Group"),

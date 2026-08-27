@@ -18,6 +18,10 @@ struct HighlightingUniform {
     piece_highlight_color: vec4<f32>, // rgb = color, a = intensity
 };
 
+struct KindColors {
+    colors: array<vec4<f32>, 8>,
+};
+
 @group(0) @binding(3)
 var<uniform> light: LightUniform;
 
@@ -26,6 +30,9 @@ var<uniform> highlighting: HighlightingUniform;
 
 @group(0) @binding(5)
 var<storage, read> piece_slots: array<u32>;
+
+@group(0) @binding(6)
+var<uniform> kind_colors: KindColors;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -55,7 +62,7 @@ fn vs_main(
         return out;
     }
 
-    out.color = instances[instance_index].color;
+    out.color = kind_colors.colors[instances[instance_index].kind];
     out.instance_index = instance_index;
     out.piece_slot = piece_slots[instance_index];
 

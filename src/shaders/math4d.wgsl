@@ -19,9 +19,10 @@ struct CameraUniform {
 // Instance data for each sticker
 struct StickerInstance {
     position_4d: vec4<f32>,
-    color: vec4<f32>,
     basis: array<vec4<f32>, 3>,
     face_normal_4d: vec4<f32>,
+    kind: u32,
+    _padding: array<u32, 3>,
 }
 
 @group(0) @binding(0)

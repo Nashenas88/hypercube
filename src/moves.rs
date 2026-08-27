@@ -192,16 +192,16 @@ impl Hypercube {
 
         for old in &snapshot {
             let mut new_position = old.position;
-            let mut new_colors = old.colors;
+            let mut new_kinds = old.kinds;
             for slot in 0..3 {
                 let dst = axes[slot];
                 let src = axes[perm[slot]];
                 new_position[dst] = sign[slot] * old.position[src];
-                new_colors[dst] = old.colors[src];
+                new_kinds[dst] = old.kinds[src];
             }
             self.pieces[index_of(new_position)] = Piece {
                 position: new_position,
-                colors: new_colors,
+                kinds: new_kinds,
             };
         }
     }
@@ -299,10 +299,10 @@ mod tests {
         );
     }
 
-    fn colors_position_invariant_holds(cube: &Hypercube) -> bool {
+    fn kinds_position_invariant_holds(cube: &Hypercube) -> bool {
         cube.pieces
             .iter()
-            .all(|p| (0..4).all(|axis| p.colors[axis].is_some() == (p.position[axis] != 0)))
+            .all(|p| (0..4).all(|axis| p.kinds[axis].is_some() == (p.position[axis] != 0)))
     }
 
     fn total_facet_count(cube: &Hypercube) -> usize {
@@ -314,7 +314,7 @@ mod tests {
         for local_coords in [[1i8, 0, 0], [1, 1, 0], [1, 1, 1]] {
             let mut cube = Hypercube::solved();
             apply_click(&mut cube, local_coords, 1);
-            assert!(colors_position_invariant_holds(&cube));
+            assert!(kinds_position_invariant_holds(&cube));
         }
     }
 
@@ -474,7 +474,7 @@ mod tests {
         let mut rng = fastrand::Rng::with_seed(7);
         cube.apply_random_moves(30, &mut rng);
         assert_eq!(total_facet_count(&cube), expected);
-        assert!(colors_position_invariant_holds(&cube));
+        assert!(kinds_position_invariant_holds(&cube));
     }
 
     #[test]
