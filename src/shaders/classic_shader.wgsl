@@ -1,32 +1,10 @@
 // Vertex shader using instanced rendering with static cube geometry
 #import math4d::{CameraUniform, compute_vertex_geometry, instances}
-
-struct LightUniform {
-    direction: vec3<f32>,
-    _padding1: f32,
-    color: vec3<f32>,
-    _padding2: f32,
-    ambient: vec3<f32>,
-    _padding3: f32,
-};
-
-struct HighlightingUniform {
-    hovered_sticker_index: u32,
-    hovered_piece_slot: u32,
-    _padding: vec2<u32>,
-    highlight_color: vec4<f32>,       // rgb = color, a = intensity
-    piece_highlight_color: vec4<f32>, // rgb = color, a = intensity
-};
+#import sticker_common::{HighlightingUniform, LightUniform, light, highlighting}
 
 struct KindColors {
     colors: array<vec4<f32>, 8>,
 };
-
-@group(0) @binding(3)
-var<uniform> light: LightUniform;
-
-@group(0) @binding(4)
-var<uniform> highlighting: HighlightingUniform;
 
 @group(0) @binding(5)
 var<storage, read> piece_slots: array<u32>;

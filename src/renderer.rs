@@ -825,6 +825,13 @@ impl Renderer {
                 ..Default::default()
             })
             .expect("shaders/math4d.wgsl failed to compose");
+        composer
+            .add_composable_module(ComposableModuleDescriptor {
+                source: include_str!("shaders/sticker_common.wgsl"),
+                file_path: "shaders/sticker_common.wgsl",
+                ..Default::default()
+            })
+            .expect("shaders/sticker_common.wgsl failed to compose");
         let mut compose_shader =
             |source: &str, file_path: &str| match composer.make_naga_module(NagaModuleDescriptor {
                 source,
