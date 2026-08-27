@@ -18,6 +18,7 @@ use crate::geometry::{CUBE_VERTICES, VERTEX_NORMAL_INDICES};
 use crate::math::BASE_STICKER_SIZE;
 use crate::piece::{FACET_TABLE, Hypercube, StickerInstance, generate_sticker_instances};
 use crate::shader_widget::UiControls;
+use crate::theme::Theme;
 
 /// GPU renderer for the hypercube visualization.
 ///
@@ -35,6 +36,8 @@ pub(crate) struct Renderer {
     sky_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for standard rendering
     classic_pipeline: wgpu::RenderPipeline,
+    /// Graphics pipeline for the Elemental theme's sticker materials
+    elemental_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for normal visualization
     normal_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for depth visualization
@@ -43,6 +46,8 @@ pub(crate) struct Renderer {
     debug_pipeline: wgpu::RenderPipeline,
     /// Current rendering mode
     current_render_mode: RenderMode,
+    /// Currently selected sticker theme
+    current_theme: Theme,
     /// Buffer containing cube vertex positions
     vertex_buffer: wgpu::Buffer,
     /// Number of stickers (each generates 36 vertices)
@@ -837,6 +842,13 @@ impl Renderer {
                 ..Default::default()
             })
             .expect("shaders/sticker_common.wgsl failed to compose");
+        composer
+            .add_composable_module(ComposableModuleDescriptor {
+                source: include_str!("shaders/elemental_common.wgsl"),
+                file_path: "shaders/elemental_common.wgsl",
+                ..Default::default()
+            })
+            .expect("shaders/elemental_common.wgsl failed to compose");
         let mut compose_shader =
             |source: &str, file_path: &str| match composer.make_naga_module(NagaModuleDescriptor {
                 source,
@@ -994,6 +1006,64 @@ impl Renderer {
                 // in shader_widget.rs) - backface culling against that
                 // stale winding can hide the correctly-outward triangle of
                 // a moving sticker and show its (dark) interior instead.
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        let elemental_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Elemental Shader"),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
+                include_str!("shaders/elemental_shader.wgsl"),
+                "shaders/elemental_shader.wgsl",
+            ))),
+        });
+
+        let elemental_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Elemental Pipeline"),
+            layout: Some(&classic_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &elemental_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &elemental_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
                 cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
@@ -1230,10 +1300,12 @@ impl Renderer {
             sky_index_buffer,
             sky_pipeline,
             classic_pipeline,
+            elemental_pipeline,
             normal_pipeline,
             depth_pipeline,
             debug_pipeline,
             current_render_mode: ui_controls.render_mode,
+            current_theme: ui_controls.theme,
             vertex_buffer,
             face_index_buffer,
             last_indices_generation: None,
@@ -1330,6 +1402,11 @@ impl Renderer {
     /// Sets the current render mode
     pub(crate) fn set_render_mode(&mut self, mode: RenderMode) {
         self.current_render_mode = mode;
+    }
+
+    /// Sets the current sticker theme
+    pub(crate) fn set_theme(&mut self, theme: Theme) {
+        self.current_theme = theme;
     }
 
     /// Updates the instance buffer using compute shaders for 4D transformations.
@@ -1509,10 +1586,15 @@ impl Renderer {
         render_pass.draw_indexed(0..6, 0, 0..1);
 
         // Then render the hypercube
-        let (pipeline, bind_group) = match self.current_render_mode {
-            RenderMode::Standard => (&self.classic_pipeline, &self.main_bind_group),
-            RenderMode::Normals => (&self.normal_pipeline, &self.normal_bind_group),
-            RenderMode::Depth => (&self.depth_pipeline, &self.debug_bind_group),
+        let (pipeline, bind_group) = match (self.current_render_mode, self.current_theme) {
+            (RenderMode::Standard, Theme::Classic) => {
+                (&self.classic_pipeline, &self.main_bind_group)
+            }
+            (RenderMode::Standard, Theme::Elemental) => {
+                (&self.elemental_pipeline, &self.main_bind_group)
+            }
+            (RenderMode::Normals, _) => (&self.normal_pipeline, &self.normal_bind_group),
+            (RenderMode::Depth, _) => (&self.depth_pipeline, &self.debug_bind_group),
         };
         render_pass.set_pipeline(pipeline);
         render_pass.set_bind_group(0, bind_group, &[]);
@@ -1623,6 +1705,7 @@ impl shader::Pipeline for Renderer {
                 face_gap_4d: 1.0,
                 viewer_distance: crate::math::VIEWER_DISTANCE,
                 render_mode: RenderMode::Standard,
+                theme: Theme::Classic,
             },
         )
     }
@@ -1635,5 +1718,58 @@ mod tests {
     #[test]
     fn transform4d_size_is_16_byte_aligned() {
         assert_eq!(std::mem::size_of::<Transform4D>() % 16, 0);
+    }
+
+    #[test]
+    fn render_with_elemental_theme_does_not_panic() {
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("no GPU adapter available to run this smoke test");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .expect("failed to request a device for this smoke test");
+
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let renderer = Renderer::new(
+            &device,
+            &queue,
+            format,
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 64.0,
+                height: 64.0,
+            },
+            Size::new(64, 64),
+            UiControls {
+                sticker_scale: 0.5,
+                face_gap: 0.1,
+                face_gap_4d: 1.0,
+                viewer_distance: crate::math::VIEWER_DISTANCE,
+                render_mode: RenderMode::Standard,
+                theme: Theme::Elemental,
+            },
+        );
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Smoke Test Target"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        renderer.render(&mut encoder, &target_view, &[true; 8]);
+        queue.submit(Some(encoder.finish()));
     }
 }

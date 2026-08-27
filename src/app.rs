@@ -692,6 +692,7 @@ impl HypercubeApp {
             self.face_gap_4d,
             self.viewer_distance,
             self.render_mode,
+            self.settings.theme,
             self.aabb_mode,
             self.settings.rotate_button,
             self.settings.animation_duration_ms,

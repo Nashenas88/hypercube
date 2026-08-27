@@ -30,6 +30,7 @@ use crate::piece::{
 use crate::ray_casting::{calculate_mouse_ray, find_intersected_sticker};
 use crate::renderer::{DebugInstanceWithDistance, Renderer};
 use crate::settings::RotateButton;
+use crate::theme::Theme;
 
 /// An in-progress move's animation: piece state has already been committed
 /// atomically by `apply_move`; this only drives the visual sweep from the
@@ -264,6 +265,7 @@ pub(crate) struct UiControls {
     pub(crate) face_gap_4d: f32,
     pub(crate) viewer_distance: f32,
     pub(crate) render_mode: RenderMode,
+    pub(crate) theme: Theme,
 }
 
 fn scale_bounds(bounds: &Rectangle, scale: f32) -> Rectangle {
@@ -323,6 +325,7 @@ impl shader::Primitive for HypercubePrimitive {
         pipeline.update_debug_instances(queue, &self.debug_instances);
         pipeline.update_sticker_instances(queue, &self.sticker_instances, self.sticker_generation);
         pipeline.set_render_mode(self.ui_controls.render_mode);
+        pipeline.set_theme(self.ui_controls.theme);
     }
 
     fn render(
@@ -420,6 +423,7 @@ pub struct HypercubeShaderProgram {
     face_gap_4d: f32,
     viewer_distance: f32,
     render_mode: RenderMode,
+    theme: Theme,
     aabb_mode: AABBMode,
     rotate_button: RotateButton,
     animation_duration_ms: u32,
@@ -443,6 +447,7 @@ impl HypercubeShaderProgram {
         face_gap_4d: f32,
         viewer_distance: f32,
         render_mode: RenderMode,
+        theme: Theme,
         aabb_mode: AABBMode,
         rotate_button: RotateButton,
         animation_duration_ms: u32,
@@ -461,6 +466,7 @@ impl HypercubeShaderProgram {
             face_gap_4d,
             viewer_distance,
             render_mode,
+            theme,
             aabb_mode,
             rotate_button,
             animation_duration_ms,
@@ -714,14 +720,18 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                     });
                 }
 
-                if matches!(move_tick, AnimationTick::Ignored)
-                    && matches!(focus_tick, AnimationTick::Ignored)
-                    && matches!(reset_tick, AnimationTick::Ignored)
-                    && matches!(reveal_tick, AnimationTick::Ignored)
+                // Elemental's sticker materials animate continuously from
+                // elapsed time alone, so its redraw loop must stay alive
+                // even while every other animation is idle.
+                if self.theme == Theme::Elemental
+                    || !matches!(move_tick, AnimationTick::Ignored)
+                    || !matches!(focus_tick, AnimationTick::Ignored)
+                    || !matches!(reset_tick, AnimationTick::Ignored)
+                    || !matches!(reveal_tick, AnimationTick::Ignored)
                 {
-                    event::Status::Ignored
-                } else {
                     event::Status::Captured
+                } else {
+                    event::Status::Ignored
                 }
             }
             _ => event::Status::Ignored,
@@ -762,6 +772,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 face_gap_4d: state.reveal_gap_4d_override.unwrap_or(self.face_gap_4d),
                 viewer_distance: self.viewer_distance,
                 render_mode: self.render_mode,
+                theme: self.theme,
             },
             cached_indices: state.cached_indices.clone(),
             indices_generation: state.indices_generation,
@@ -1752,6 +1763,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             RotateButton::default(),
             250,
@@ -1823,6 +1835,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             RotateButton::default(),
             250,
@@ -1868,6 +1881,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             RotateButton::default(),
             250,
@@ -1907,6 +1921,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             RotateButton::default(),
             250,
@@ -1952,6 +1967,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             rotate_button,
             250,
@@ -2006,6 +2022,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             RotateButton::default(),
             250,
@@ -2146,6 +2163,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             RotateButton::default(),
             250,
@@ -2194,6 +2212,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             RotateButton::default(),
             250,
@@ -2241,6 +2260,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             RotateButton::default(),
             250,
@@ -2268,6 +2288,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             RotateButton::default(),
             250,
@@ -2318,6 +2339,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             RotateButton::default(),
             250,
@@ -2382,6 +2404,7 @@ mod tests {
             1.0,
             VIEWER_DISTANCE,
             RenderMode::Standard,
+            Theme::Classic,
             AABBMode::None,
             rotate_button,
             250,
