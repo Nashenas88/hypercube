@@ -1,6 +1,6 @@
 #import math4d::{compute_vertex_geometry, instances, transform}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting}
-#import elemental_common::{value_noise1, fresnel}
+#import elemental_common::{hash21, value_noise1, fresnel}
 
 @group(0) @binding(5)
 var<storage, read> piece_slots: array<u32>;
@@ -74,6 +74,48 @@ fn water_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec
     return ambient + diffuse + specular + sheen * vec3<f32>(0.6, 0.8, 1.0);
 }
 
+fn ice_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
+    let normal = normalize(world_normal);
+    let light_dir = normalize(-light.direction);
+    let view_dir = normalize(-world_position);
+
+    let shimmer = value_noise1(f32(instance_index) * 2.1 + transform.elapsed_seconds * 0.6);
+    let albedo = mix(vec3<f32>(0.75, 0.9, 0.95), vec3<f32>(0.9, 0.98, 1.0), shimmer);
+
+    let ambient = light.ambient * albedo;
+    let diffuse_strength = max(dot(normal, light_dir), 0.0);
+    let diffuse = diffuse_strength * light.color * albedo;
+
+    let half_dir = normalize(light_dir + view_dir);
+    let specular_strength = pow(max(dot(normal, half_dir), 0.0), 128.0);
+    let specular = specular_strength * light.color * 1.2;
+
+    let sparkle_time_bucket = floor(transform.elapsed_seconds * 3.0);
+    let sparkle_phase = hash21(vec2<f32>(f32(instance_index), sparkle_time_bucket));
+    let sparkle = step(0.97, sparkle_phase) * fresnel(normal, view_dir, 1.0);
+
+    return ambient + diffuse + specular + sparkle * vec3<f32>(1.0, 1.0, 1.0);
+}
+
+fn sand_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
+    let normal = normalize(world_normal);
+    let light_dir = normalize(-light.direction);
+    let view_dir = normalize(-world_position);
+
+    let grain = value_noise1(f32(instance_index) * 5.3 + transform.elapsed_seconds * 0.3);
+    let albedo = mix(vec3<f32>(0.55, 0.4, 0.2), vec3<f32>(0.75, 0.6, 0.35), grain);
+
+    let ambient = light.ambient * albedo;
+    let diffuse_strength = max(dot(normal, light_dir), 0.0);
+    let diffuse = diffuse_strength * light.color * albedo;
+
+    let half_dir = normalize(light_dir + view_dir);
+    let specular_strength = pow(max(dot(normal, half_dir), 0.0), 8.0);
+    let specular = specular_strength * light.color * 0.15;
+
+    return ambient + diffuse + specular;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var final_color: vec3<f32>;
@@ -84,6 +126,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         case 2u: {
             final_color = water_color(in.instance_index, in.world_position, in.world_normal);
+        }
+        case 3u: {
+            final_color = ice_color(in.instance_index, in.world_position, in.world_normal);
+        }
+        case 4u: {
+            final_color = sand_color(in.instance_index, in.world_position, in.world_normal);
         }
         default: {
             final_color = vec3<f32>(0.5, 0.5, 0.5);
