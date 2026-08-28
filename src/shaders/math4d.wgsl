@@ -121,6 +121,66 @@ fn compute_world_normal(
     return n;
 }
 
+// World-space frame of one sticker, for effects that sit off its surface
+// rather than on it. `edge_x`/`edge_y`/`edge_z` are the projected cube's
+// half-edge vectors, one per local mesh axis: unequal in length and no longer
+// mutually perpendicular once the 4D perspective divide warps the cube, so
+// mapping a direction through them stretches it exactly as the sticker is
+// stretched, instead of applying one scale to every axis.
+struct StickerAnchor {
+    world_center: vec3<f32>,
+    edge_x: vec3<f32>,
+    edge_y: vec3<f32>,
+    edge_z: vec3<f32>,
+    visible: bool,
+}
+
+// Places a sticker instance's center and its warped local frame in world
+// space, for a cube whose local half-extent is `half_extent`. Evaluates the
+// same rotate, push and project path as `compute_vertex_geometry`, at the
+// sticker's center and along its own basis rather than at a mesh vertex, so
+// both stay consistent while a move animation sweeps that basis. `visible` is
+// false when the 4D face is culled; the other fields then hold arbitrary but
+// valid defaults.
+fn compute_sticker_anchor(instance_index: u32, half_extent: f32) -> StickerAnchor {
+    var out: StickerAnchor;
+
+    let instance = instances[instance_index];
+    let rotated_face_normal = transform.rotation_matrix * instance.face_normal_4d;
+
+    if (!is_face_visible(rotated_face_normal, transform.viewer_distance)) {
+        out.world_center = vec3<f32>(0.0, 0.0, 0.0);
+        out.edge_x = vec3<f32>(1.0, 0.0, 0.0);
+        out.edge_y = vec3<f32>(0.0, 1.0, 0.0);
+        out.edge_z = vec3<f32>(0.0, 0.0, 1.0);
+        out.visible = false;
+        return out;
+    }
+
+    let depth_preserving_push = vec4<f32>(rotated_face_normal.xyz, 0.0) * (transform.face_gap_4d - 1.0);
+    let rc = transform.rotation_matrix * instance.position_4d + depth_preserving_push;
+
+    let rb0 = transform.rotation_matrix * instance.basis[0];
+    let rb1 = transform.rotation_matrix * instance.basis[1];
+    let rb2 = transform.rotation_matrix * instance.basis[2];
+
+    // Each edge is a difference of projected points rather than a projected
+    // difference, since the 4D perspective divide is not linear - that
+    // difference is the whole reason the three edges come out unequal.
+    let center_3d = project_4d_to_3d(rc, transform.viewer_distance);
+    out.edge_x = project_4d_to_3d(rc + rb0 * half_extent, transform.viewer_distance) - center_3d;
+    out.edge_y = project_4d_to_3d(rc + rb1 * half_extent, transform.viewer_distance) - center_3d;
+    out.edge_z = project_4d_to_3d(rc + rb2 * half_extent, transform.viewer_distance) - center_3d;
+
+    // The face-gap push shifts the whole sticker equally, so it belongs on
+    // the center and cancels out of the edges above.
+    out.world_center = center_3d
+        + project_4d_to_3d(rotated_face_normal, transform.viewer_distance) * transform.face_gap;
+    out.visible = true;
+
+    return out;
+}
+
 // Geometry-only placement of one sticker-instance vertex in clip space.
 // Excludes per-shader material fields (e.g. `kind`, `piece_slot`).
 struct VertexGeometry {

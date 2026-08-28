@@ -184,16 +184,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     switch (in.kind) {
         case 0u: {
-            final_color = fire_color(in.instance_index, in.world_position, in.world_normal);
+            final_color = ice_color(in.instance_index, in.world_position, in.world_normal);
         }
         case 1u: {
             final_color = leaves_color(in.instance_index, in.world_position, in.world_normal);
         }
         case 2u: {
-            final_color = water_color(in.instance_index, in.world_position, in.world_normal);
+            final_color = lightning_color(in.instance_index, in.world_position, in.world_normal);
         }
         case 3u: {
-            final_color = ice_color(in.instance_index, in.world_position, in.world_normal);
+            final_color = fire_color(in.instance_index, in.world_position, in.world_normal);
         }
         case 4u: {
             final_color = sand_color(in.instance_index, in.world_position, in.world_normal);
@@ -202,7 +202,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             final_color = glowing_light_color(in.instance_index, in.world_position, in.world_normal);
         }
         case 6u: {
-            final_color = lightning_color(in.instance_index, in.world_position, in.world_normal);
+            final_color = water_color(in.instance_index, in.world_position, in.world_normal);
         }
         case 7u: {
             final_color = crystal_color(in.instance_index, in.world_position, in.world_normal);

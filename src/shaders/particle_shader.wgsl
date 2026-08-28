@@ -1,0 +1,212 @@
+#import math4d::{StickerAnchor, compute_sticker_anchor, instances, transform, camera}
+#import elemental_common::{hash11, hash21}
+
+// Particle instances emitted per sticker facet. Must match
+// `PARTICLES_PER_STICKER` in renderer.rs, which sizes the draw range this
+// divides back down into a sticker index.
+const PARTICLES_PER_STICKER: u32 = 24u;
+
+const TAU: f32 = 6.28318530718;
+
+// Half-extent of a sticker's mesh cube before `transform.sticker_scale`. Must
+// match `BASE_STICKER_SIZE` in math.rs, which renderer.rs premultiplies into
+// the cube vertices.
+const STICKER_HALF_EXTENT: f32 = 0.33333334;
+
+// Radius, in sticker radii, a particle is born at. Past the cube's longest
+// diagonal (sqrt 3) so a new particle isn't swallowed by the depth test
+// against the sticker it came from.
+const BIRTH_RADIUS: f32 = 1.8;
+
+// Per-element emitter tuning. Distances are all in sticker radii, mapped
+// through the anchor's warped local frame at use, so an element's tuning
+// doesn't change with a sticker's projected size. `emission` of zero
+// suppresses the element's particles entirely.
+struct ParticleStyle {
+    // Seconds one particle takes to travel its arc and fade out. Chosen from
+    // values that divide 3600 evenly so the modulo-3600 wrap of
+    // `transform.elapsed_seconds` doesn't restart every particle mid-flight.
+    lifetime: f32,
+    // Distance travelled along the launch direction over a full lifetime.
+    speed: f32,
+    // Pull back toward the sticker over the square of age, in the same units
+    // as `speed`.
+    gravity: f32,
+    // Billboard half-extent at birth, before the age curve shrinks it.
+    size: f32,
+    color_hot: vec3<f32>,
+    color_cool: vec3<f32>,
+    emission: f32,
+}
+
+fn particle_style(kind: u32) -> ParticleStyle {
+    var style: ParticleStyle;
+    style.lifetime = 1.0;
+    style.speed = 0.0;
+    style.gravity = 0.0;
+    style.size = 0.0;
+    style.color_hot = vec3<f32>(0.0, 0.0, 0.0);
+    style.color_cool = vec3<f32>(0.0, 0.0, 0.0);
+    style.emission = 0.0;
+
+    switch (kind) {
+        case 3u: {
+            // Fire: embers thrown off the sticker in every direction,
+            // cooling from yellow to deep red as they slow.
+            style.lifetime = 1.2;
+            style.speed = 1.2;
+            style.gravity = 0.9;
+            style.size = 0.22;
+            style.color_hot = vec3<f32>(1.0, 0.75, 0.25);
+            style.color_cool = vec3<f32>(0.85, 0.12, 0.0);
+            style.emission = 1.0;
+        }
+        default: {
+        }
+    }
+
+    return style;
+}
+
+// One corner of a unit quad, as two triangles over 6 vertices. Returned from
+// a switch rather than a runtime-indexed array, which most drivers spill to
+// scratch memory.
+fn quad_corner(vertex_index: u32) -> vec2<f32> {
+    switch (vertex_index) {
+        case 0u: {
+            return vec2<f32>(-1.0, -1.0);
+        }
+        case 1u: {
+            return vec2<f32>(1.0, -1.0);
+        }
+        case 2u: {
+            return vec2<f32>(1.0, 1.0);
+        }
+        case 3u: {
+            return vec2<f32>(-1.0, -1.0);
+        }
+        case 4u: {
+            return vec2<f32>(1.0, 1.0);
+        }
+        default: {
+            return vec2<f32>(-1.0, 1.0);
+        }
+    }
+}
+
+fn unproject(clip_xy: vec2<f32>) -> vec3<f32> {
+    let point = camera.view_proj_inv * vec4<f32>(clip_xy, 0.0, 1.0);
+    return point.xyz / point.w;
+}
+
+// Recovers the camera's world-space right/up axes from the inverse
+// view-projection by unprojecting two opposite near-plane points and taking
+// the direction between them, so billboards need no extra uniform data.
+// `camera.view_proj_inv` is translation-free (it inverts a rotation-only view
+// matrix, for the skybox), which costs nothing here: the missing eye
+// translation is the same constant on both points and cancels in the
+// difference.
+fn camera_right_world() -> vec3<f32> {
+    return normalize(unproject(vec2<f32>(1.0, 0.0)) - unproject(vec2<f32>(-1.0, 0.0)));
+}
+
+fn camera_up_world() -> vec3<f32> {
+    return normalize(unproject(vec2<f32>(0.0, 1.0)) - unproject(vec2<f32>(0.0, -1.0)));
+}
+
+// A direction distributed evenly over the whole unit sphere. `height` selects
+// the z band and `angle_seed` the rotation within it; sampling z uniformly
+// (rather than an inclination angle) is what keeps the poles from bunching.
+fn direction_on_sphere(height_seed: f32, angle_seed: f32) -> vec3<f32> {
+    let height = height_seed * 2.0 - 1.0;
+    let ring_radius = sqrt(max(0.0, 1.0 - height * height));
+    let angle = angle_seed * TAU;
+    return vec3<f32>(ring_radius * cos(angle), ring_radius * sin(angle), height);
+}
+
+// Maps a direction expressed in sticker radii onto world space through the
+// sticker's own projected cube, so a particle travels the same distance
+// relative to the sticker along every local axis - which is an unequal
+// world-space distance wherever the 4D projection has warped the cube.
+fn sticker_to_world(anchor: StickerAnchor, local: vec3<f32>) -> vec3<f32> {
+    return local.x * anchor.edge_x + local.y * anchor.edge_y + local.z * anchor.edge_z;
+}
+
+// The sticker's mean projected radius, for sizing a billboard that should
+// track its apparent size.
+fn apparent_radius(anchor: StickerAnchor) -> f32 {
+    return (length(anchor.edge_x) + length(anchor.edge_y) + length(anchor.edge_z)) / 3.0;
+}
+
+struct ParticleVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    // Position within the billboard, -1 to 1 on each axis, for the radial
+    // falloff that rounds the quad off into a soft dot.
+    @location(0) corner: vec2<f32>,
+    @location(1) color: vec3<f32>,
+    @location(2) alpha: f32,
+}
+
+// Places `vertex_index`'s corner of one billboarded particle. The particle
+// carries no stored state: its launch direction and age come entirely from
+// hashing its instance index against the current lifetime cycle, so the whole
+// system is a function of `transform.elapsed_seconds`.
+@vertex
+fn vs_main(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+) -> ParticleVertexOutput {
+    var out: ParticleVertexOutput;
+    out.corner = vec2<f32>(0.0, 0.0);
+    out.color = vec3<f32>(0.0, 0.0, 0.0);
+    out.alpha = 0.0;
+
+    let sticker_index = instance_index / PARTICLES_PER_STICKER;
+    let anchor = compute_sticker_anchor(
+        sticker_index,
+        STICKER_HALF_EXTENT * transform.sticker_scale,
+    );
+    let style = particle_style(instances[sticker_index].kind);
+
+    if (!anchor.visible || style.emission <= 0.0) {
+        out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+        return out;
+    }
+
+    // Stagger the particles of one sticker across the lifetime so they emit
+    // as a stream rather than all at once.
+    let phase = hash11(f32(instance_index) * 0.37) * style.lifetime;
+    let cycles = (transform.elapsed_seconds + phase) / style.lifetime;
+    let cycle = floor(cycles);
+    let age = fract(cycles);
+
+    // Reseeded every cycle, so each life gets a fresh direction instead of
+    // the particle retracing one fixed path forever.
+    let angle_seed = hash21(vec2<f32>(f32(instance_index), cycle));
+    let height_seed = hash21(vec2<f32>(f32(instance_index) + 37.0, cycle));
+    let direction = direction_on_sphere(height_seed, angle_seed);
+
+    let distance = BIRTH_RADIUS + style.speed * age - style.gravity * age * age;
+    let world_position = anchor.world_center
+        + sticker_to_world(anchor, direction * distance);
+
+    let half_extent = style.size * apparent_radius(anchor) * mix(1.0, 0.45, age);
+    let corner = quad_corner(vertex_index);
+    let offset = camera_right_world() * corner.x * half_extent
+        + camera_up_world() * corner.y * half_extent;
+
+    out.clip_position = camera.view_proj * vec4<f32>(world_position + offset, 1.0);
+    out.corner = corner;
+    out.color = mix(style.color_hot, style.color_cool, age);
+    // Fade in over the first tenth of the life so a particle appears rather
+    // than pops, then fade out across the rest.
+    out.alpha = style.emission * smoothstep(0.0, 0.1, age) * (1.0 - age);
+
+    return out;
+}
+
+@fragment
+fn fs_main(in: ParticleVertexOutput) -> @location(0) vec4<f32> {
+    let falloff = smoothstep(1.0, 0.0, length(in.corner));
+    return vec4<f32>(in.color * falloff, in.alpha * falloff);
+}

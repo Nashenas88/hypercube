@@ -20,6 +20,26 @@ use crate::piece::{FACET_TABLE, Hypercube, StickerInstance, generate_sticker_ins
 use crate::shader_widget::UiControls;
 use crate::theme::Theme;
 
+/// Particle instances emitted per sticker facet. Must match
+/// `PARTICLES_PER_STICKER` in `shaders/particle_shader.wgsl`, which divides
+/// an instance index by it to recover the sticker the particle belongs to.
+const PARTICLES_PER_STICKER: u32 = 24;
+
+/// Vertices in one billboard quad: two triangles, generated in the vertex
+/// shader rather than read from a buffer.
+const QUAD_VERTICES: u32 = 6;
+
+/// Instance range covering every particle emitted by one 4D face's stickers.
+///
+/// `FACET_TABLE` is built in face-major blocks of `facets_per_face`, so each
+/// face's particles form one contiguous run and `index / PARTICLES_PER_STICKER`
+/// stays inside that face's own block of stickers.
+fn particle_instance_range(face_id: u32, facets_per_face: u32) -> std::ops::Range<u32> {
+    let particles_per_face = facets_per_face * PARTICLES_PER_STICKER;
+    let start = face_id * particles_per_face;
+    start..start + particles_per_face
+}
+
 /// GPU renderer for the hypercube visualization.
 ///
 /// Manages all graphics resources including buffers, textures, pipelines, and rendering state.
@@ -38,6 +58,8 @@ pub(crate) struct Renderer {
     classic_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for the Elemental theme's sticker materials
     elemental_pipeline: wgpu::RenderPipeline,
+    /// Graphics pipeline for the Elemental theme's billboarded particles
+    particle_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for normal visualization
     normal_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for depth visualization
@@ -1080,6 +1102,74 @@ impl Renderer {
             multiview: None,
         });
 
+        let particle_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Particle Shader"),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
+                include_str!("shaders/particle_shader.wgsl"),
+                "shaders/particle_shader.wgsl",
+            ))),
+        });
+
+        let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Particle Pipeline"),
+            layout: Some(&classic_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &particle_shader,
+                entry_point: Some("vs_main"),
+                // Billboard corners are generated from the vertex index, so
+                // there is no per-vertex data to feed in.
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &particle_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    // Additive: particles glow over whatever is behind them
+                    // and need no back-to-front sort to composite correctly.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                // Tested against the stickers already drawn this pass, so a
+                // particle behind one is hidden, but never written, so
+                // particles don't occlude each other.
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
         // Create normal visualization shader and pipeline
         let normal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Normal Shader"),
@@ -1301,6 +1391,7 @@ impl Renderer {
             sky_pipeline,
             classic_pipeline,
             elemental_pipeline,
+            particle_pipeline,
             normal_pipeline,
             depth_pipeline,
             debug_pipeline,
@@ -1625,6 +1716,23 @@ impl Renderer {
                 instance_start..instance_start + facets_per_face,
             );
         }
+
+        // Particles are drawn last, into the same pass, so the sticker depth
+        // they test against is already written.
+        if (self.current_render_mode, self.current_theme)
+            == (RenderMode::Standard, Theme::Elemental)
+        {
+            render_pass.set_pipeline(&self.particle_pipeline);
+            for face_id in 0..8u32 {
+                if !visible_faces[face_id as usize] {
+                    continue;
+                }
+                render_pass.draw(
+                    0..QUAD_VERTICES,
+                    particle_instance_range(face_id, facets_per_face),
+                );
+            }
+        }
     }
 
     /// Renders transparent debug AABB visualization
@@ -1718,6 +1826,34 @@ mod tests {
     #[test]
     fn transform4d_size_is_16_byte_aligned() {
         assert_eq!(std::mem::size_of::<Transform4D>() % 16, 0);
+    }
+
+    #[test]
+    fn particle_instance_ranges_tile_every_sticker_exactly_once() {
+        let facets_per_face = 27;
+        let mut expected_start = 0;
+
+        for face_id in 0..8u32 {
+            let range = particle_instance_range(face_id, facets_per_face);
+            assert_eq!(range.start, expected_start);
+            assert_eq!(
+                range.end - range.start,
+                facets_per_face * PARTICLES_PER_STICKER
+            );
+
+            // Every particle in the range must divide back down into a
+            // sticker belonging to this face's own facet block.
+            let block = face_id * facets_per_face;
+            assert_eq!(range.start / PARTICLES_PER_STICKER, block);
+            assert_eq!(
+                (range.end - 1) / PARTICLES_PER_STICKER,
+                block + facets_per_face - 1
+            );
+
+            expected_start = range.end;
+        }
+
+        assert_eq!(expected_start, 8 * facets_per_face * PARTICLES_PER_STICKER);
     }
 
     #[test]
