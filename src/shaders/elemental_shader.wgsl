@@ -1,6 +1,6 @@
 #import math4d::{compute_vertex_geometry, instances, transform}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting}
-#import elemental_common::{hash11, hash21, value_noise1, fresnel}
+#import elemental_common::{LIGHTNING_STROBE_HZ, hash11, hash21, value_noise1, fresnel, strobe}
 
 @group(0) @binding(5)
 var<storage, read> piece_slots: array<u32>;
@@ -168,9 +168,7 @@ fn glowing_light_color(instance_index: u32, world_position: vec3<f32>, world_nor
 }
 
 fn lightning_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    let seed = f32(instance_index);
-    let flash_bucket = floor(transform.elapsed_seconds * 12.0);
-    let flash = hash11(seed * 5.0 + flash_bucket);
+    let flash = strobe(instance_index, transform.elapsed_seconds, LIGHTNING_STROBE_HZ);
     let brightness = step(0.6, flash);
     let base = mix(vec3<f32>(0.2, 0.18, 0.05), vec3<f32>(1.0, 0.95, 0.5), brightness);
     let view_dir = normalize(-world_position);

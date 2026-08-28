@@ -1,5 +1,5 @@
 #import math4d::{StickerAnchor, compute_sticker_anchor, instances, transform, camera}
-#import elemental_common::{hash11, hash21}
+#import elemental_common::{LIGHTNING_STROBE_HZ, hash11, hash21, strobe}
 
 // Particle instances emitted per sticker facet. Must match
 // `PARTICLES_PER_STICKER` in renderer.rs, which sizes the draw range this
@@ -37,6 +37,12 @@ struct ParticleStyle {
     color_hot: vec3<f32>,
     color_cool: vec3<f32>,
     emission: f32,
+    // Rate of the per-sticker gate that decides whether a particle born at a
+    // given moment emits at all, so an element can fire in bursts rather than
+    // as a steady stream. Zero emits continuously.
+    burst_hz: f32,
+    // Fraction of those gate windows that are open.
+    burst_chance: f32,
 }
 
 fn particle_style(kind: u32) -> ParticleStyle {
@@ -48,8 +54,35 @@ fn particle_style(kind: u32) -> ParticleStyle {
     style.color_hot = vec3<f32>(0.0, 0.0, 0.0);
     style.color_cool = vec3<f32>(0.0, 0.0, 0.0);
     style.emission = 0.0;
+    style.burst_hz = 0.0;
+    style.burst_chance = 1.0;
 
     switch (kind) {
+        case 2u: {
+            // Lightning: small hard sparks flicked out fast and straight,
+            // gated onto the same strobe the material flashes its sticker
+            // on so they read as thrown by the flash itself.
+            style.lifetime = 0.5;
+            style.speed = 3.0;
+            style.gravity = 0.0;
+            style.size = 0.10;
+            style.color_hot = vec3<f32>(1.0, 0.95, 0.55);
+            style.color_cool = vec3<f32>(1.0, 0.55, 0.05);
+            style.emission = 1.4;
+            style.burst_hz = LIGHTNING_STROBE_HZ;
+            style.burst_chance = 0.15;
+        }
+        case 5u: {
+            // Glowing Light: large soft motes drifting slowly outward and
+            // dimming, warm white throughout.
+            style.lifetime = 3.0;
+            style.speed = 0.9;
+            style.gravity = 0.0;
+            style.size = 0.30;
+            style.color_hot = vec3<f32>(1.0, 0.98, 0.85);
+            style.color_cool = vec3<f32>(0.85, 0.78, 0.5);
+            style.emission = 0.55;
+        }
         case 3u: {
             // Fire: embers thrown off the sticker in every direction,
             // cooling from yellow to deep red as they slow.
@@ -66,6 +99,20 @@ fn particle_style(kind: u32) -> ParticleStyle {
     }
 
     return style;
+}
+
+// Whether a particle born at `birth_time` falls inside one of its sticker's
+// open burst windows. Seeded per sticker rather than per particle, so a whole
+// sticker's worth of particles fires together. Sharing `strobe` with
+// `lightning_color` in elemental_shader.wgsl is what puts Lightning's sparks
+// on the same beat as its flashes: at a matching rate, a `burst_chance` at or
+// below that material's own 0.4 makes these windows a subset of the ones it
+// lights the sticker for, so sparks only ever fly on a flash.
+fn burst_open(style: ParticleStyle, sticker_index: u32, birth_time: f32) -> bool {
+    if (style.burst_hz <= 0.0) {
+        return true;
+    }
+    return strobe(sticker_index, birth_time, style.burst_hz) >= 1.0 - style.burst_chance;
 }
 
 // One corner of a unit quad, as two triangles over 6 vertices. Returned from
@@ -179,6 +226,14 @@ fn vs_main(
     let cycles = (transform.elapsed_seconds + phase) / style.lifetime;
     let cycle = floor(cycles);
     let age = fract(cycles);
+
+    // Gated on when the particle was born rather than on now, so one that
+    // launched during an open window keeps flying after that window shuts.
+    let birth_time = transform.elapsed_seconds - age * style.lifetime;
+    if (!burst_open(style, sticker_index, birth_time)) {
+        out.clip_position = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+        return out;
+    }
 
     // Reseeded every cycle, so each life gets a fresh direction instead of
     // the particle retracing one fixed path forever.
