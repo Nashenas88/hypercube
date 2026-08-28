@@ -1,5 +1,5 @@
 #import math4d::{StickerAnchor, compute_sticker_anchor, instances, transform, camera}
-#import elemental_common::{LIGHTNING_STROBE_HZ, hash11, hash21, strobe}
+#import elemental_common::{ICE_TWINKLE_HZ, LIGHTNING_STROBE_HZ, hash11, hash21, strobe}
 
 // Particle instances emitted per sticker facet. Must match
 // `PARTICLES_PER_STICKER` in renderer.rs, which sizes the draw range this
@@ -43,6 +43,11 @@ struct ParticleStyle {
     burst_hz: f32,
     // Fraction of those gate windows that are open.
     burst_chance: f32,
+    // Rate at which a live particle's brightness is re-hashed, so it winks
+    // while it flies rather than shining steadily. Seeded per particle, so an
+    // element twinkles as scattered points instead of a whole sticker
+    // pulsing. Zero holds brightness constant.
+    twinkle_hz: f32,
 }
 
 fn particle_style(kind: u32) -> ParticleStyle {
@@ -56,6 +61,7 @@ fn particle_style(kind: u32) -> ParticleStyle {
     style.emission = 0.0;
     style.burst_hz = 0.0;
     style.burst_chance = 1.0;
+    style.twinkle_hz = 0.0;
 
     switch (kind) {
         case 2u: {
@@ -94,6 +100,30 @@ fn particle_style(kind: u32) -> ParticleStyle {
             style.color_cool = vec3<f32>(0.85, 0.12, 0.0);
             style.emission = 1.0;
         }
+        case 6u: {
+            // Water: droplets flung clear of the sticker and pulled back
+            // again, with gravity matching speed so a droplet lands back at
+            // the radius it launched from just as it fades.
+            style.lifetime = 1.5;
+            style.speed = 2.4;
+            style.gravity = 2.4;
+            style.size = 0.16;
+            style.color_hot = vec3<f32>(0.55, 0.8, 1.0);
+            style.color_cool = vec3<f32>(0.1, 0.35, 0.8);
+            style.emission = 0.7;
+        }
+        case 0u: {
+            // Ice: frost motes barely drifting off the surface, winking on
+            // the same beat the material buckets its own sparkle at.
+            style.lifetime = 3.0;
+            style.speed = 0.5;
+            style.gravity = 0.0;
+            style.size = 0.14;
+            style.color_hot = vec3<f32>(0.85, 0.97, 1.0);
+            style.color_cool = vec3<f32>(0.6, 0.85, 1.0);
+            style.emission = 0.5;
+            style.twinkle_hz = ICE_TWINKLE_HZ;
+        }
         default: {
         }
     }
@@ -113,6 +143,17 @@ fn burst_open(style: ParticleStyle, sticker_index: u32, birth_time: f32) -> bool
         return true;
     }
     return strobe(sticker_index, birth_time, style.burst_hz) >= 1.0 - style.burst_chance;
+}
+
+// Brightness multiplier for one particle at `time`. Sampled at the current
+// moment rather than at birth, which is what makes a particle wink partway
+// through its flight; it only dims rather than cutting to nothing, so a mote
+// fades between bright and faint instead of blinking out of existence.
+fn twinkle_scale(style: ParticleStyle, instance_index: u32, time: f32) -> f32 {
+    if (style.twinkle_hz <= 0.0) {
+        return 1.0;
+    }
+    return mix(0.25, 1.0, strobe(instance_index, time, style.twinkle_hz));
 }
 
 // One corner of a unit quad, as two triangles over 6 vertices. Returned from
@@ -255,7 +296,10 @@ fn vs_main(
     out.color = mix(style.color_hot, style.color_cool, age);
     // Fade in over the first tenth of the life so a particle appears rather
     // than pops, then fade out across the rest.
-    out.alpha = style.emission * smoothstep(0.0, 0.1, age) * (1.0 - age);
+    out.alpha = style.emission
+        * smoothstep(0.0, 0.1, age)
+        * (1.0 - age)
+        * twinkle_scale(style, instance_index, transform.elapsed_seconds);
 
     return out;
 }

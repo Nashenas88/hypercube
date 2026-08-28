@@ -1,6 +1,6 @@
 #import math4d::{compute_vertex_geometry, instances, transform}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting}
-#import elemental_common::{LIGHTNING_STROBE_HZ, hash11, hash21, value_noise1, fresnel, strobe}
+#import elemental_common::{ICE_TWINKLE_HZ, LIGHTNING_STROBE_HZ, hash11, hash21, value_noise1, fresnel, strobe}
 
 @group(0) @binding(5)
 var<storage, read> piece_slots: array<u32>;
@@ -90,7 +90,7 @@ fn ice_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<
     let specular_strength = pow(max(dot(normal, half_dir), 0.0), 128.0);
     let specular = specular_strength * light.color * 1.2;
 
-    let sparkle_time_bucket = floor(transform.elapsed_seconds * 3.0);
+    let sparkle_time_bucket = floor(transform.elapsed_seconds * ICE_TWINKLE_HZ);
     let sparkle_phase = hash21(vec2<f32>(f32(instance_index), sparkle_time_bucket));
     let sparkle = step(0.97, sparkle_phase) * fresnel(normal, view_dir, 1.0);
 
