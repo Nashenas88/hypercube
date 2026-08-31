@@ -124,6 +124,44 @@ fn particle_style(kind: u32) -> ParticleStyle {
             style.emission = 0.5;
             style.twinkle_hz = ICE_TWINKLE_HZ;
         }
+        case 1u: {
+            // Leaves: broad flecks tumbling slowly outward, sagging back a
+            // little as they go, and darkening from new growth to leaf
+            // litter over their life.
+            style.lifetime = 3.0;
+            style.speed = 1.0;
+            style.gravity = 0.4;
+            style.size = 0.18;
+            style.color_hot = vec3<f32>(0.45, 0.7, 0.2);
+            style.color_cool = vec3<f32>(0.2, 0.4, 0.08);
+            style.emission = 0.45;
+        }
+        case 4u: {
+            // Sand: fine dim grains hanging close to the surface, small and
+            // numerous enough to read as a haze rather than as separate
+            // particles.
+            style.lifetime = 2.0;
+            style.speed = 0.8;
+            style.gravity = 0.3;
+            style.size = 0.09;
+            style.color_hot = vec3<f32>(0.8, 0.68, 0.42);
+            style.color_cool = vec3<f32>(0.5, 0.38, 0.2);
+            style.emission = 0.4;
+        }
+        case 7u: {
+            // Crystal: bright violet glints that barely travel, gated to
+            // occasional bursts so they pop and fade in place rather than
+            // streaming off the facet.
+            style.lifetime = 1.5;
+            style.speed = 0.2;
+            style.gravity = 0.0;
+            style.size = 0.13;
+            style.color_hot = vec3<f32>(0.9, 0.7, 1.0);
+            style.color_cool = vec3<f32>(0.5, 0.15, 0.85);
+            style.emission = 1.2;
+            style.burst_hz = 1.0;
+            style.burst_chance = 0.2;
+        }
         default: {
         }
     }
