@@ -335,7 +335,8 @@ impl shader::Primitive for HypercubePrimitive {
         target: &wgpu::TextureView,
         _clip_bounds: &Rectangle<u32>,
     ) {
-        pipeline.render(encoder, target, &self.visible_faces);
+        pipeline.render(encoder, &self.visible_faces);
+        pipeline.composite(encoder, target);
 
         // Render transparent debug AABBs
         pipeline.render_debug_aabb(encoder, target, self.debug_instances.len() as u32);

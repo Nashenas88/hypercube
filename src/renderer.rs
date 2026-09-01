@@ -24,6 +24,13 @@ use crate::theme::Theme;
 /// shader rather than read from a buffer.
 const QUAD_VERTICES: u32 = 6;
 
+/// Format of the offscreen scene target every pipeline but the final
+/// composite renders into, and the two half-res bloom targets. Half-float
+/// so a material can write emission above 1.0 for bloom to threshold
+/// against, instead of clipping at the display's 8-bit range like a direct
+/// render to `target` would.
+const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
 /// Sticker indices grouped into contiguous `(face_id, kind)` blocks, plus the
 /// sub-range each block occupies.
 ///
@@ -120,6 +127,15 @@ pub(crate) struct Renderer {
     depth_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for debug AABB rendering
     debug_pipeline: wgpu::RenderPipeline,
+    /// Bright-pass, blur H, blur V and composite pipelines, in that order:
+    /// the post-processing chain that turns `scene_view` (plus, under
+    /// `Theme::Elemental`, a blurred `bloom_view_a`) into the final frame in
+    /// `target`. Debug AABBs are drawn after compositing, straight into
+    /// `target`, so they're excluded from bloom.
+    bright_pass_pipeline: wgpu::RenderPipeline,
+    blur_h_pipeline: wgpu::RenderPipeline,
+    blur_v_pipeline: wgpu::RenderPipeline,
+    composite_pipeline: wgpu::RenderPipeline,
     /// Current rendering mode
     current_render_mode: RenderMode,
     /// Currently selected sticker theme
@@ -177,6 +193,27 @@ pub(crate) struct Renderer {
     depth_texture: wgpu::Texture,
     /// Depth texture view for rendering
     depth_view: wgpu::TextureView,
+    /// Offscreen HDR target every pipeline but the final composite renders
+    /// into, resized alongside `depth_texture`.
+    scene_texture: wgpu::Texture,
+    scene_view: wgpu::TextureView,
+    /// Half-res HDR ping-pong pair for the separable bloom blur. The blur
+    /// always leaves its result in `bloom_texture_a`: bright-pass writes it,
+    /// blur H reads it into `bloom_texture_b`, blur V reads that back.
+    bloom_texture_a: wgpu::Texture,
+    bloom_view_a: wgpu::TextureView,
+    bloom_texture_b: wgpu::Texture,
+    bloom_view_b: wgpu::TextureView,
+    /// Layouts for the post-process bind groups below, kept to rebuild them
+    /// in `resize` whenever the views they reference are replaced.
+    post_process_bind_group_layout: wgpu::BindGroupLayout,
+    composite_bind_group_layout: wgpu::BindGroupLayout,
+    /// Shared by every post-process pipeline's texture input.
+    post_process_sampler: wgpu::Sampler,
+    bright_pass_bind_group: wgpu::BindGroup,
+    blur_h_bind_group: wgpu::BindGroup,
+    blur_v_bind_group: wgpu::BindGroup,
+    composite_bind_group: wgpu::BindGroup,
     /// Transform uniform buffer for vertex shaders
     transform_buffer: wgpu::Buffer,
     /// Skybox bind group
@@ -449,6 +486,162 @@ fn load_cross_cubemap(
     Ok((cubemap_texture, view, sampler))
 }
 
+/// Creates one `HDR_FORMAT` render target usable both as a pass's color
+/// attachment and as a later pass's sampled input.
+fn create_hdr_target(
+    device: &Device,
+    label: &str,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// Rebuilds the post-process pipelines' bind groups against the current
+/// scene/bloom views, needed both at creation and whenever `resize` replaces
+/// those views.
+#[allow(clippy::too_many_arguments)]
+fn create_post_process_bind_groups(
+    device: &Device,
+    post_process_bind_group_layout: &wgpu::BindGroupLayout,
+    composite_bind_group_layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    scene_view: &wgpu::TextureView,
+    bloom_view_a: &wgpu::TextureView,
+    bloom_view_b: &wgpu::TextureView,
+) -> (
+    wgpu::BindGroup,
+    wgpu::BindGroup,
+    wgpu::BindGroup,
+    wgpu::BindGroup,
+) {
+    let single_texture_bind_group = |label: &str, view: &wgpu::TextureView| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: post_process_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        })
+    };
+
+    // Bright-pass reads the full-res scene; the two blur passes ping-pong
+    // between the half-res bloom textures.
+    let bright_pass_bind_group = single_texture_bind_group("Bright Pass Bind Group", scene_view);
+    let blur_h_bind_group = single_texture_bind_group("Blur H Bind Group", bloom_view_a);
+    let blur_v_bind_group = single_texture_bind_group("Blur V Bind Group", bloom_view_b);
+
+    // The blur ping-pong always leaves its result in `bloom_view_a`: bright-
+    // pass writes it, blur H reads it into `bloom_view_b`, blur V reads that
+    // back into `bloom_view_a`.
+    let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Composite Bind Group"),
+        layout: composite_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(scene_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(bloom_view_a),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    });
+
+    (
+        bright_pass_bind_group,
+        blur_h_bind_group,
+        blur_v_bind_group,
+        composite_bind_group,
+    )
+}
+
+/// Runs one post-process pipeline over its bind group's input, drawing the
+/// fullscreen triangle `vs_fullscreen` generates into `target`. `viewport`
+/// restricts the draw to a sub-rectangle of `target` (used only by the
+/// composite pass, to `Renderer::bounds`); the other passes always cover
+/// their entire (always freshly-sized) target, so need none.
+fn draw_fullscreen_pass(
+    encoder: &mut CommandEncoder,
+    label: &str,
+    pipeline: &wgpu::RenderPipeline,
+    bind_group: &wgpu::BindGroup,
+    target: &TextureView,
+    viewport: Option<Rectangle<f32>>,
+) {
+    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                // The fullscreen triangle always covers every pixel this
+                // pass's viewport reaches, so prior contents never matter.
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    if let Some(bounds) = viewport {
+        render_pass.set_viewport(bounds.x, bounds.y, bounds.width, bounds.height, 0.0, 1.0);
+    }
+    render_pass.set_pipeline(pipeline);
+    render_pass.set_bind_group(0, bind_group, &[]);
+    render_pass.draw(0..3, 0..1);
+}
+
+/// Clears `view` to black - used in place of the bloom passes when they're
+/// skipped, so `composite` adds in nothing rather than a stale bloom result
+/// left over from an earlier `Theme::Elemental` frame.
+fn clear_texture(encoder: &mut CommandEncoder, label: &str, view: &TextureView) {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+}
+
 impl Renderer {
     /// Creates a new renderer with initialized GPU resources.
     ///
@@ -499,6 +692,22 @@ impl Renderer {
         });
 
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Offscreen HDR scene target every pipeline but the final composite
+        // renders into, plus a half-res ping-pong pair for the separable
+        // bloom blur. Sized and resized alongside `depth_texture`.
+        let (scene_texture, scene_view) = create_hdr_target(
+            device,
+            "Scene Texture",
+            viewport_size.width,
+            viewport_size.height,
+        );
+        let bloom_width = (viewport_size.width / 2).max(1);
+        let bloom_height = (viewport_size.height / 2).max(1);
+        let (bloom_texture_a, bloom_view_a) =
+            create_hdr_target(device, "Bloom Texture A", bloom_width, bloom_height);
+        let (bloom_texture_b, bloom_view_b) =
+            create_hdr_target(device, "Bloom Texture B", bloom_width, bloom_height);
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
@@ -839,6 +1048,86 @@ impl Renderer {
                 label: Some("Debug AABB Bind Group Layout"),
             });
 
+        // Post-process bind group layouts: one texture + sampler for
+        // bright-pass and the two blur passes, and scene + bloom textures
+        // sharing one sampler for the final composite.
+        let post_process_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("Post Process Bind Group Layout"),
+            });
+
+        let composite_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: Some("Composite Bind Group Layout"),
+            });
+
+        let post_process_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Post Process Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let (bright_pass_bind_group, blur_h_bind_group, blur_v_bind_group, composite_bind_group) =
+            create_post_process_bind_groups(
+                device,
+                &post_process_bind_group_layout,
+                &composite_bind_group_layout,
+                &post_process_sampler,
+                &scene_view,
+                &bloom_view_a,
+                &bloom_view_b,
+            );
+
         // Create transform uniform buffer with initial slider values
         let transform_data = Transform4D {
             rotation_matrix: nalgebra::Matrix4::identity().into(),
@@ -1022,6 +1311,20 @@ impl Renderer {
                 push_constant_ranges: &[],
             });
 
+        let post_process_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Post Process Pipeline Layout"),
+                bind_group_layouts: &[&post_process_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let composite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Composite Pipeline Layout"),
+                bind_group_layouts: &[&composite_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
         let sky_vertices: &[[f32; 2]] = &[
             [-1.0, -1.0], // bottom-left
             [1.0, -1.0],  // bottom-right
@@ -1063,7 +1366,7 @@ impl Renderer {
                 module: &classic_shader,
                 entry_point: Some("fs_sky"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1108,7 +1411,7 @@ impl Renderer {
                 module: &classic_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1172,7 +1475,7 @@ impl Renderer {
                 module: &elemental_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1228,7 +1531,7 @@ impl Renderer {
                 module: &particle_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: HDR_FORMAT,
                     // Additive: particles glow over whatever is behind them
                     // and need no back-to-front sort to composite correctly.
                     blend: Some(wgpu::BlendState {
@@ -1299,7 +1602,7 @@ impl Renderer {
                 module: &normal_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1362,7 +1665,7 @@ impl Renderer {
                 module: &depth_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1458,6 +1761,104 @@ impl Renderer {
             multiview: None,
         });
 
+        let post_process_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Post Process Shader"),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
+                include_str!("shaders/post_process.wgsl"),
+                "shaders/post_process.wgsl",
+            ))),
+        });
+
+        // Bright-pass and the two blur passes share one vertex shader, pipeline
+        // layout and primitive/multisample state, differing only in fragment
+        // entry point; all three write a half-res `HDR_FORMAT` target with no
+        // depth test.
+        let post_process_pipeline = |label: &str, entry_point: &'static str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&post_process_pipeline_layout),
+                cache: None,
+                vertex: wgpu::VertexState {
+                    module: &post_process_shader,
+                    entry_point: Some("vs_fullscreen"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[],
+                        zero_initialize_workgroup_memory: false,
+                    },
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &post_process_shader,
+                    entry_point: Some(entry_point),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: HDR_FORMAT,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[],
+                        zero_initialize_workgroup_memory: false,
+                    },
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+            })
+        };
+
+        let bright_pass_pipeline = post_process_pipeline("Bright Pass Pipeline", "fs_bright_pass");
+        let blur_h_pipeline = post_process_pipeline("Blur H Pipeline", "fs_blur_h");
+        let blur_v_pipeline = post_process_pipeline("Blur V Pipeline", "fs_blur_v");
+
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Composite Pipeline"),
+            layout: Some(&composite_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &post_process_shader,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &post_process_shader,
+                entry_point: Some("fs_composite"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
         // Load skybox cubemap texture
         let (_skybox_texture, skybox_view, skybox_sampler) =
             load_cross_cubemap(device, queue, "src/resources/Cubemap_Sky_02-512x512.png")
@@ -1494,6 +1895,10 @@ impl Renderer {
             normal_pipeline,
             depth_pipeline,
             debug_pipeline,
+            bright_pass_pipeline,
+            blur_h_pipeline,
+            blur_v_pipeline,
+            composite_pipeline,
             current_render_mode: ui_controls.render_mode,
             current_theme: ui_controls.theme,
             vertex_buffer,
@@ -1518,6 +1923,19 @@ impl Renderer {
             debug_aabb_bind_group,
             depth_texture,
             depth_view,
+            scene_texture,
+            scene_view,
+            bloom_texture_a,
+            bloom_view_a,
+            bloom_texture_b,
+            bloom_view_b,
+            post_process_bind_group_layout,
+            composite_bind_group_layout,
+            post_process_sampler,
+            bright_pass_bind_group,
+            blur_h_bind_group,
+            blur_v_bind_group,
+            composite_bind_group,
             transform_buffer,
             skybox_bind_group,
         }
@@ -1564,6 +1982,30 @@ impl Renderer {
             self.depth_view = self
                 .depth_texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
+
+            (self.scene_texture, self.scene_view) =
+                create_hdr_target(device, "Scene Texture", new_size.width, new_size.height);
+            let bloom_width = (new_size.width / 2).max(1);
+            let bloom_height = (new_size.height / 2).max(1);
+            (self.bloom_texture_a, self.bloom_view_a) =
+                create_hdr_target(device, "Bloom Texture A", bloom_width, bloom_height);
+            (self.bloom_texture_b, self.bloom_view_b) =
+                create_hdr_target(device, "Bloom Texture B", bloom_width, bloom_height);
+
+            (
+                self.bright_pass_bind_group,
+                self.blur_h_bind_group,
+                self.blur_v_bind_group,
+                self.composite_bind_group,
+            ) = create_post_process_bind_groups(
+                device,
+                &self.post_process_bind_group_layout,
+                &self.composite_bind_group_layout,
+                &self.post_process_sampler,
+                &self.scene_view,
+                &self.bloom_view_a,
+                &self.bloom_view_b,
+            );
         }
     }
 
@@ -1734,7 +2176,9 @@ impl Renderer {
         );
     }
 
-    /// Renders a single frame of the hypercube visualization.
+    /// Renders a single frame of the hypercube visualization into the
+    /// offscreen HDR `scene_view`; `composite` blits it (plus, under
+    /// `Theme::Elemental`, bloom) into the real surface afterward.
     ///
     /// Updates camera uniforms, acquires surface texture, and draws all instances
     /// with proper depth testing.
@@ -1745,19 +2189,19 @@ impl Renderer {
     /// * `visible_faces` - Per-`face_id` visibility (see `math::visible_faces`);
     ///   faces marked invisible are skipped entirely, issuing no draw call
     ///   and no vertex-shader invocations for their 27 instances.
-    pub(crate) fn render(
-        &self,
-        encoder: &mut CommandEncoder,
-        target: &TextureView,
-        visible_faces: &[bool; 8],
-    ) {
+    pub(crate) fn render(&self, encoder: &mut CommandEncoder, visible_faces: &[bool; 8]) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Render Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
+                view: &self.scene_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load, // Don't clear, we already cleared selectively
+                    // No clear needed: the skybox pass right below always
+                    // draws an opaque fullscreen quad over the whole
+                    // viewport first, so every pixel `composite` will later
+                    // read gets fully overwritten regardless of what was in
+                    // `scene_view` before this pass.
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
                 // TODO new field. validate
@@ -1850,6 +2294,51 @@ impl Renderer {
                 }
             }
         }
+    }
+
+    /// Blits `scene_view` into `target`, within `self.bounds`. Under
+    /// `Theme::Elemental` this first runs a bright-pass and a two-pass
+    /// separable blur so bloom is added in; otherwise the bloom input is
+    /// cleared to black rather than sampled stale. Debug AABBs are drawn
+    /// afterward, directly onto `target`, so they're excluded from bloom.
+    pub(crate) fn composite(&self, encoder: &mut CommandEncoder, target: &TextureView) {
+        if self.current_theme == Theme::Elemental {
+            draw_fullscreen_pass(
+                encoder,
+                "Bright Pass",
+                &self.bright_pass_pipeline,
+                &self.bright_pass_bind_group,
+                &self.bloom_view_a,
+                None,
+            );
+            draw_fullscreen_pass(
+                encoder,
+                "Blur H Pass",
+                &self.blur_h_pipeline,
+                &self.blur_h_bind_group,
+                &self.bloom_view_b,
+                None,
+            );
+            draw_fullscreen_pass(
+                encoder,
+                "Blur V Pass",
+                &self.blur_v_pipeline,
+                &self.blur_v_bind_group,
+                &self.bloom_view_a,
+                None,
+            );
+        } else {
+            clear_texture(encoder, "Clear Bloom", &self.bloom_view_a);
+        }
+
+        draw_fullscreen_pass(
+            encoder,
+            "Composite Pass",
+            &self.composite_pipeline,
+            &self.composite_bind_group,
+            target,
+            Some(self.bounds),
+        );
     }
 
     /// Renders transparent debug AABB visualization
@@ -2089,7 +2578,8 @@ mod tests {
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        renderer.render(&mut encoder, &target_view, &[true; 8]);
+        renderer.render(&mut encoder, &[true; 8]);
+        renderer.composite(&mut encoder, &target_view);
         queue.submit(Some(encoder.finish()));
     }
 }
