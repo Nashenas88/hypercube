@@ -49,6 +49,26 @@ This project uses rootless podman instead of Docker. One-time host setup:
    doesn't require the blocked capability elevation. This pause process
    doesn't survive logout/reboot, so repeat this step after those.
 
+## jj workspaces
+
+Workspaces are mounted at `/workspaces/<folder-basename>` rather than a fixed
+path, so a secondary jj workspace and its main repo can sit side by side.
+
+A secondary workspace's `.jj/repo` is a file holding the path of the main repo's
+`.jj/repo`, relative to `.jj` — a location that does not exist in the container,
+and one that must be writable, since it holds the operation log and the commit
+store. Two hooks bridge that without rewriting the host's `.jj`:
+
+- `initializeCommand` runs `jj-main-link.sh` on the host, pointing the gitignored
+  `.devcontainer/.jj-main` symlink at the main repo (the checkout itself, for a
+  main workspace). It gives the config a fixed path to bind-mount, whatever the
+  main repo is named or wherever it lives, and mounts only that one repository.
+- `postCreateCommand` runs `jj-workspace-link.sh` in the container, which
+  recreates the location the pointer resolves to as a symlink to that mount.
+
+A main workspace needs neither: `.jj/repo` is a directory, so the second script
+exits immediately and the mount is just the workspace itself.
+
 ## File ownership on bind mounts
 
 Both configs pass `--userns=keep-id:uid=1000,gid=1000`. Rootless podman

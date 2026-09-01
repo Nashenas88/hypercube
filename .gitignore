@@ -7,3 +7,4 @@ perf-*.data
 CLAUDE.local.md
 .claude/settings.local.json
 flamegraph.svg
+.devcontainer/.jj-main

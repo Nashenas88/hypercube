@@ -13,8 +13,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash dev
+
+# Workspaces are bind-mounted under /workspaces, which a secondary jj workspace
+# also writes to, to place a symlink beside itself for its main repo.
+RUN mkdir -p /workspaces /home/dev/jj-main \
+    && chown dev:dev /workspaces /home/dev/jj-main
+
 USER dev
-WORKDIR /workspace
+WORKDIR /workspaces
 
 COPY --chown=dev:dev rust-toolchain.toml /tmp/rust-toolchain.toml
 RUN cd /tmp && rustup show
