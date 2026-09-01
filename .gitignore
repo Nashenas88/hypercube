@@ -5,5 +5,5 @@ perf.data.old
 perf-*.data
 .vscode/
 CLAUDE.local.md
-.claude/settings.local.md
+.claude/settings.local.json
 flamegraph.svg
