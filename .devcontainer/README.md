@@ -9,6 +9,11 @@ config picker:
   `/dev/dri`) and configurable X11/Wayland display forwarding so `cargo run`
   shows the window on your host screen.
 
+Both build from the single `Dockerfile`, which has a shared `base` stage and a
+`gpu` stage layered on top of it; each config picks its stage with
+`build.target`. The GPU image therefore reuses the base image's layers rather
+than repeating its apt and rustup steps.
+
 ## Host prerequisites (podman)
 
 This project uses rootless podman instead of Docker. One-time host setup:
@@ -53,11 +58,20 @@ config is needed — it follows whatever your host session actually uses.
 
 ## Build caches
 
-`~/.cargo/registry` and `~/.cargo/git` are shared, global named volumes
-across all workspaces and configs. The `target/` directory is a named volume
-scoped per workspace folder (`hypercube-target-<folder-basename>`), so
-multiple jj workspaces or git worktrees checked out to differently-named
-directories each get their own build cache and can build in parallel without
-blocking on Cargo's build lock. Two worktrees that happen to share the same
-directory basename will still share a `target` volume — rename one if you
-need them fully independent.
+`hypercube-cargo-cache` is a shared, global named volume across all workspaces
+and configs, mounted over `CARGO_HOME` — which the `rust` base image sets to
+`/usr/local/cargo`, not `~/.cargo`. Mounting the whole cargo home rather than
+its `registry`/`git` subdirectories means the volume seeds from a directory that
+already exists in the image, so it inherits that directory's permissive mode and
+keeps the cargo and rustup shims reachable.
+
+One consequence: the volume masks later image changes under `/usr/local/cargo`,
+since a named volume is only seeded when it is first created. Tools that must
+track the image are installed outside it.
+
+The `target/` directory is a named volume scoped per workspace folder
+(`hypercube-target-<folder-basename>`), so multiple jj workspaces or git
+worktrees checked out to differently-named directories each get their own build
+cache and can build in parallel without blocking on Cargo's build lock. Two
+worktrees that happen to share the same directory basename will still share a
+`target` volume — rename one if you need them fully independent.
