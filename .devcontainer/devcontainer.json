@@ -15,8 +15,12 @@
   "mounts": [
     "source=hypercube-cargo-cache,target=/usr/local/cargo,type=volume",
     "source=hypercube-target-${localWorkspaceFolderBasename},target=/workspaces/${localWorkspaceFolderBasename}/target,type=volume",
-    "source=${localWorkspaceFolder}/.devcontainer/.jj-main,target=/home/dev/jj-main,type=bind"
+    "source=${localWorkspaceFolder}/.devcontainer/.jj-main,target=/home/dev/jj-main,type=bind",
+    "source=${localEnv:HOME}/.config/jj/config.toml,target=/home/dev/host-jj.toml,type=bind,readonly"
   ],
+  "containerEnv": {
+    "JJ_CONFIG": "/home/dev/host-jj.toml:${containerWorkspaceFolder}/.devcontainer/jj-config.toml"
+  },
   "customizations": {
     "vscode": {
       "extensions": [

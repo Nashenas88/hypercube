@@ -4,6 +4,7 @@ FROM rust:slim AS base
 # display backend (or none) is available at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
+    git \
     libx11-dev \
     libxkbcommon-dev \
     libwayland-dev \
@@ -11,6 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxi-dev \
     libxcursor-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Installed outside CARGO_HOME, which a named volume mounts over at runtime and
+# would otherwise mask.
+RUN cargo install --root /usr/local jj-cli --locked
 
 RUN useradd --create-home --shell /bin/bash dev
 

@@ -16,10 +16,12 @@
     "source=hypercube-cargo-cache,target=/usr/local/cargo,type=volume",
     "source=hypercube-target-${localWorkspaceFolderBasename},target=/workspaces/${localWorkspaceFolderBasename}/target,type=volume",
     "source=${localWorkspaceFolder}/.devcontainer/.jj-main,target=/home/dev/jj-main,type=bind",
+    "source=${localEnv:HOME}/.config/jj/config.toml,target=/home/dev/host-jj.toml,type=bind,readonly",
     "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
     "source=${localEnv:XDG_RUNTIME_DIR},target=${localEnv:XDG_RUNTIME_DIR},type=bind"
   ],
   "containerEnv": {
+    "JJ_CONFIG": "/home/dev/host-jj.toml:${containerWorkspaceFolder}/.devcontainer/jj-config.toml",
     "DISPLAY": "${localEnv:DISPLAY}",
     "WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}",
     "XDG_RUNTIME_DIR": "${localEnv:XDG_RUNTIME_DIR}"

@@ -49,6 +49,29 @@ This project uses rootless podman instead of Docker. One-time host setup:
    doesn't require the blocked capability elevation. This pause process
    doesn't survive logout/reboot, so repeat this step after those.
 
+## jj and git
+
+`git` comes from apt. `jj` is built with `cargo install --root /usr/local`,
+which puts it in `/usr/local/bin` rather than under `CARGO_HOME`, where the
+cargo cache volume would mask it.
+
+`JJ_CONFIG` names two files, and the later one wins:
+
+1. `~/.config/jj/config.toml`, bind-mounted read-only from the host, which
+   supplies `user.name` and `user.email` so no identity is committed here. This
+   file must exist on the host, or the container will not start.
+2. `jj-config.toml`, which pins the pager and diff formatter to jj's built-ins.
+   The host config selects `delta`; without the override `jj diff` fails with
+   `Error executing 'delta'` inside the container.
+
+No revset aliases are set: jj's built-in `trunk()` already resolves to
+`main@origin` here.
+
+The repo-level config `.jj/repo/config.toml` is a symlink to a path outside the
+workspace, so it dangles in the container. jj treats that as a missing per-repo
+config, warns once, and generates an empty one under its own config directory —
+the host's `.jj` is not modified.
+
 ## jj workspaces
 
 Workspaces are mounted at `/workspaces/<folder-basename>` rather than a fixed
