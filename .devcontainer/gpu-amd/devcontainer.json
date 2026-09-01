@@ -7,12 +7,16 @@
   },
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind",
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+  },
   "initializeCommand": "${localWorkspaceFolder}/.devcontainer/jj-main-link.sh",
   "postCreateCommand": "${containerWorkspaceFolder}/.devcontainer/jj-workspace-link.sh",
   "remoteUser": "dev",
   "containerUser": "dev",
   "runArgs": ["--device=/dev/dri", "--userns=keep-id:uid=1000,gid=1000"],
   "mounts": [
+    "source=hypercube-claude-config,target=/home/dev/.claude,type=volume",
     "source=hypercube-cargo-cache,target=/usr/local/cargo,type=volume",
     "source=hypercube-target-${localWorkspaceFolderBasename},target=/workspaces/${localWorkspaceFolderBasename}/target,type=volume",
     "source=${localWorkspaceFolder}/.devcontainer/.jj-main,target=/home/dev/jj-main,type=bind",
@@ -21,6 +25,7 @@
     "source=${localEnv:XDG_RUNTIME_DIR},target=${localEnv:XDG_RUNTIME_DIR},type=bind"
   ],
   "containerEnv": {
+    "CLAUDE_CONFIG_DIR": "/home/dev/.claude",
     "JJ_CONFIG": "/home/dev/host-jj.toml:${containerWorkspaceFolder}/.devcontainer/jj-config.toml",
     "DISPLAY": "${localEnv:DISPLAY}",
     "WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}",

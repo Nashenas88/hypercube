@@ -49,6 +49,28 @@ This project uses rootless podman instead of Docker. One-time host setup:
    doesn't require the blocked capability elevation. This pause process
    doesn't survive logout/reboot, so repeat this step after those.
 
+## Claude Code
+
+Installed by the `ghcr.io/anthropics/devcontainer-features/claude-code` feature.
+The feature installs Node only when it is absent, so the image supplies Node 22
+from NodeSource — the package requires 22 or newer and Debian ships 18.
+
+`ignore-scripts` is set in dev's npmrc rather than as an image-wide environment
+variable. npm has no per-package setting, and the package places its native
+binary from a `postinstall` script, so disabling scripts for the feature's
+install as root leaves `claude` reporting `claude native binary not installed`,
+which `dev` cannot repair afterwards — the global prefix is root-owned and there
+is no `sudo`. Scoping the setting to dev covers interactive npm use while
+leaving the build-time install working.
+
+`CLAUDE_CONFIG_DIR` points at `/home/dev/.claude`, which is a named volume, so a
+login survives a rebuild. Claude otherwise keeps part of its state in
+`~/.claude.json`, a sibling *file* that a volume over the directory would not
+capture; setting the variable moves that file inside the directory.
+
+The feature installs into a root-owned global prefix, so `claude update` fails
+for `dev`. Rebuild the container to pick up a new version.
+
 ## jj and git
 
 `git` comes from apt. `jj` is built with `cargo install --root /usr/local`,
