@@ -9,7 +9,7 @@
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
   "remoteUser": "dev",
   "containerUser": "dev",
-  "runArgs": ["--device=/dev/dri"],
+  "runArgs": ["--device=/dev/dri", "--userns=keep-id:uid=1000,gid=1000"],
   "mounts": [
     "source=hypercube-cargo-cache,target=/usr/local/cargo,type=volume",
     "source=hypercube-target-${localWorkspaceFolderBasename},target=/workspace/target,type=volume",

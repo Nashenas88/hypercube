@@ -49,6 +49,15 @@ This project uses rootless podman instead of Docker. One-time host setup:
    doesn't require the blocked capability elevation. This pause process
    doesn't survive logout/reboot, so repeat this step after those.
 
+## File ownership on bind mounts
+
+Both configs pass `--userns=keep-id:uid=1000,gid=1000`. Rootless podman
+otherwise maps the container user to a subordinate uid, so bind-mounted host
+files show up owned by `root` and the `dev` user cannot write to them — builds
+still work, because `target/` is a named volume, but editing tracked files or
+committing from inside the container fails. `keep-id` maps the host uid and gid
+straight through, which lines up with `dev` being uid 1000 in the image.
+
 ## Display forwarding (gpu-amd variant)
 
 The `gpu-amd` config mounts `/tmp/.X11-unix` and your `$XDG_RUNTIME_DIR`
