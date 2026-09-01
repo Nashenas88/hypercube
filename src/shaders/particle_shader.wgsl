@@ -1,10 +1,6 @@
 #import math4d::{StickerAnchor, compute_sticker_anchor, instances, transform, camera}
+#import sticker_common::{sticker_order}
 #import elemental_common::{ICE_TWINKLE_HZ, LIGHTNING_STROBE_HZ, hash11, hash21, strobe}
-
-// Particle instances emitted per sticker facet. Must match
-// `PARTICLES_PER_STICKER` in renderer.rs, which sizes the draw range this
-// divides back down into a sticker index.
-const PARTICLES_PER_STICKER: u32 = 24u;
 
 const TAU: f32 = 6.28318530718;
 
@@ -287,7 +283,7 @@ fn vs_main(
     out.color = vec3<f32>(0.0, 0.0, 0.0);
     out.alpha = 0.0;
 
-    let sticker_index = instance_index / PARTICLES_PER_STICKER;
+    let sticker_index = sticker_order[instance_index];
     let anchor = compute_sticker_anchor(
         sticker_index,
         STICKER_HALF_EXTENT * transform.sticker_scale,

@@ -20,24 +20,78 @@ use crate::piece::{FACET_TABLE, Hypercube, StickerInstance, generate_sticker_ins
 use crate::shader_widget::UiControls;
 use crate::theme::Theme;
 
-/// Particle instances emitted per sticker facet. Must match
-/// `PARTICLES_PER_STICKER` in `shaders/particle_shader.wgsl`, which divides
-/// an instance index by it to recover the sticker the particle belongs to.
-const PARTICLES_PER_STICKER: u32 = 24;
-
 /// Vertices in one billboard quad: two triangles, generated in the vertex
 /// shader rather than read from a buffer.
 const QUAD_VERTICES: u32 = 6;
 
-/// Instance range covering every particle emitted by one 4D face's stickers.
+/// Sticker indices grouped into contiguous `(face_id, kind)` blocks, plus the
+/// sub-range each block occupies.
 ///
-/// `FACET_TABLE` is built in face-major blocks of `facets_per_face`, so each
-/// face's particles form one contiguous run and `index / PARTICLES_PER_STICKER`
-/// stays inside that face's own block of stickers.
-fn particle_instance_range(face_id: u32, facets_per_face: u32) -> std::ops::Range<u32> {
-    let particles_per_face = facets_per_face * PARTICLES_PER_STICKER;
-    let start = face_id * particles_per_face;
-    start..start + particles_per_face
+/// `FACET_TABLE` groups instances into 8 contiguous per-`face_id` blocks of
+/// `facets_per_face`, but `kind` is dynamic within a block: a move permutes
+/// which piece, and so which kind, sits in a slot. This regroups a block's
+/// instances by kind without touching which face they belong to.
+struct StickerOrder {
+    /// Every sticker index, covering each exactly once, ordered face-major
+    /// then kind-major within each face.
+    sorted: Vec<u32>,
+    /// `ranges[face_id][kind]` is `sorted`'s sub-range for that group.
+    ranges: [[std::ops::Range<u32>; 8]; 8],
+}
+
+fn build_sticker_order(instances: &[StickerInstance], facets_per_face: u32) -> StickerOrder {
+    let mut sorted = Vec::with_capacity(instances.len());
+    let mut ranges: [[std::ops::Range<u32>; 8]; 8] =
+        std::array::from_fn(|_| std::array::from_fn(|_| 0..0u32));
+
+    for face_id in 0..8u32 {
+        let block_start = face_id * facets_per_face;
+        for kind in 0..8u32 {
+            let range_start = sorted.len() as u32;
+            for offset in 0..facets_per_face {
+                let index = block_start + offset;
+                if instances[index as usize].kind == kind {
+                    sorted.push(index);
+                }
+            }
+            ranges[face_id as usize][kind as usize] = range_start..sorted.len() as u32;
+        }
+    }
+
+    StickerOrder { sorted, ranges }
+}
+
+/// Expands a [`StickerOrder`]'s per-`(face_id, kind)` sticker groups into the
+/// particle pipeline's actual instance buffer: `counts[kind]` copies of a
+/// sticker's index for every sticker of that kind, so the vertex shader
+/// recovers a particle's owning sticker with one indexed load instead of
+/// dividing by a shared per-kind budget. Returns the expanded buffer contents
+/// plus the `(face_id, kind)` sub-range each group occupies within it.
+fn build_particle_instances(
+    order: &StickerOrder,
+    counts: &[u32; 8],
+) -> (Vec<u32>, [[std::ops::Range<u32>; 8]; 8]) {
+    let mut expanded = Vec::new();
+    let mut ranges: [[std::ops::Range<u32>; 8]; 8] =
+        std::array::from_fn(|_| std::array::from_fn(|_| 0..0u32));
+
+    for (face_id, kind_ranges) in ranges.iter_mut().enumerate() {
+        for (kind, range_slot) in kind_ranges.iter_mut().enumerate() {
+            let sticker_range = order.ranges[face_id][kind].clone();
+            let count = counts[kind];
+            let start = expanded.len() as u32;
+            if count > 0 {
+                for &sticker_index in
+                    &order.sorted[sticker_range.start as usize..sticker_range.end as usize]
+                {
+                    expanded.extend(std::iter::repeat_n(sticker_index, count as usize));
+                }
+            }
+            *range_slot = start..expanded.len() as u32;
+        }
+    }
+
+    (expanded, ranges)
 }
 
 /// GPU renderer for the hypercube visualization.
@@ -85,6 +139,15 @@ pub(crate) struct Renderer {
     /// `instance_buffer`, so `update_sticker_instances` can skip
     /// re-uploading unchanged data.
     last_sticker_generation: Option<u64>,
+    /// Particle pipeline's indirection buffer: sticker indices grouped into
+    /// contiguous `(face_id, kind)` blocks, rebuilt by
+    /// `update_sticker_instances` alongside `instance_buffer` whenever
+    /// `sticker_generation` changes.
+    sticker_order_buffer: wgpu::Buffer,
+    /// `particle_ranges[face_id][kind]` is `sticker_order_buffer`'s
+    /// instance-index sub-range for that group, used by `render()` to issue
+    /// one particle draw per visible face and populated kind.
+    particle_ranges: [[std::ops::Range<u32>; 8]; 8],
     /// CPU-side camera uniform data
     camera_uniform: CameraUniform,
     /// GPU buffer containing camera matrices
@@ -492,6 +555,25 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
+        // Particle pipeline's indirection buffer (see `build_particle_instances`).
+        // Only `Theme::Elemental` ever draws particles (`render()`'s gate), so
+        // it's sized and built for that theme's budget regardless of
+        // `current_theme` — a kind's kept sticker count is invariant to
+        // scrambling (moves permute which piece holds a kind, never how many
+        // stickers have it), so this length never changes across generations,
+        // only the order of indices within it.
+        let facets_per_face = (num_stickers / 8) as u32;
+        let initial_sticker_order = build_sticker_order(&sticker_instances, facets_per_face);
+        let (initial_particle_instances, initial_particle_ranges) = build_particle_instances(
+            &initial_sticker_order,
+            &Theme::Elemental.particles_per_kind(),
+        );
+        let sticker_order_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Sticker Order Buffer"),
+            contents: bytemuck::cast_slice(&initial_particle_instances),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
         // Create debug instance buffer for transparent AABB rendering
         // Initialize with dummy instances to avoid zero-size buffer
         let dummy_instance = DebugInstance {
@@ -564,8 +646,8 @@ impl Renderer {
 
         // Main shader bind group layout, ordered by descending readership
         // across the classic/elemental/particle pipelines: transform,
-        // camera, instances, piece_slots, highlighting, light, (6 reserved
-        // for the particle pipeline's sticker_order), kind_colors.
+        // camera, instances, piece_slots, highlighting, light,
+        // sticker_order (particle pipeline only), kind_colors.
         let main_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -624,6 +706,16 @@ impl Renderer {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -789,6 +881,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: light_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: sticker_order_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
@@ -1404,6 +1500,8 @@ impl Renderer {
             face_index_buffer,
             last_indices_generation: None,
             last_sticker_generation: None,
+            sticker_order_buffer,
+            particle_ranges: initial_particle_ranges,
             num_stickers,
             instance_buffer,
             camera_uniform,
@@ -1557,7 +1655,9 @@ impl Renderer {
     }
 
     /// Uploads `instances` to the GPU only if `generation` differs from the
-    /// last generation uploaded, mirroring `update_indices`.
+    /// last generation uploaded, mirroring `update_indices`. Also rebuilds
+    /// and re-uploads the particle pipeline's `(face_id, kind)` indirection
+    /// buffer, since a move can change which kind occupies which face.
     pub(crate) fn update_sticker_instances(
         &mut self,
         queue: &Queue,
@@ -1568,6 +1668,18 @@ impl Renderer {
             return;
         }
         queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
+
+        let facets_per_face = (instances.len() / 8) as u32;
+        let order = build_sticker_order(instances, facets_per_face);
+        let (particle_instances, particle_ranges) =
+            build_particle_instances(&order, &Theme::Elemental.particles_per_kind());
+        queue.write_buffer(
+            &self.sticker_order_buffer,
+            0,
+            bytemuck::cast_slice(&particle_instances),
+        );
+        self.particle_ranges = particle_ranges;
+
         self.last_sticker_generation = Some(generation);
     }
 
@@ -1726,14 +1838,16 @@ impl Renderer {
             == (RenderMode::Standard, Theme::Elemental)
         {
             render_pass.set_pipeline(&self.particle_pipeline);
-            for face_id in 0..8u32 {
-                if !visible_faces[face_id as usize] {
+            for (face_id, visible) in visible_faces.iter().enumerate() {
+                if !visible {
                     continue;
                 }
-                render_pass.draw(
-                    0..QUAD_VERTICES,
-                    particle_instance_range(face_id, facets_per_face),
-                );
+                for range in &self.particle_ranges[face_id] {
+                    if range.is_empty() {
+                        continue;
+                    }
+                    render_pass.draw(0..QUAD_VERTICES, range.clone());
+                }
             }
         }
     }
@@ -1831,32 +1945,99 @@ mod tests {
         assert_eq!(std::mem::size_of::<Transform4D>() % 16, 0);
     }
 
+    fn sticker_instance_with_kind(kind: u32) -> StickerInstance {
+        StickerInstance {
+            position_4d: [0.0; 4],
+            basis: [[0.0; 4]; 3],
+            face_normal_4d: [0.0; 4],
+            kind,
+            _padding: [0; 3],
+        }
+    }
+
+    /// 8 face-major blocks of 27, kind cycling 0..8 within each block so
+    /// every `(face_id, kind)` group is non-empty.
+    fn test_instances(facets_per_face: u32) -> Vec<StickerInstance> {
+        (0..8 * facets_per_face)
+            .map(|index| sticker_instance_with_kind(index % 8))
+            .collect()
+    }
+
     #[test]
-    fn particle_instance_ranges_tile_every_sticker_exactly_once() {
+    fn sticker_order_covers_every_sticker_exactly_once() {
         let facets_per_face = 27;
-        let mut expected_start = 0;
+        let instances = test_instances(facets_per_face);
 
-        for face_id in 0..8u32 {
-            let range = particle_instance_range(face_id, facets_per_face);
-            assert_eq!(range.start, expected_start);
-            assert_eq!(
-                range.end - range.start,
-                facets_per_face * PARTICLES_PER_STICKER
-            );
+        let order = build_sticker_order(&instances, facets_per_face);
 
-            // Every particle in the range must divide back down into a
-            // sticker belonging to this face's own facet block.
-            let block = face_id * facets_per_face;
-            assert_eq!(range.start / PARTICLES_PER_STICKER, block);
-            assert_eq!(
-                (range.end - 1) / PARTICLES_PER_STICKER,
-                block + facets_per_face - 1
-            );
+        let mut seen = vec![false; instances.len()];
+        for &index in &order.sorted {
+            assert!(!seen[index as usize], "sticker {index} appears twice");
+            seen[index as usize] = true;
+        }
+        assert!(seen.iter().all(|&s| s), "every sticker must appear");
+    }
 
-            expected_start = range.end;
+    #[test]
+    fn sticker_order_ranges_are_contiguous_and_non_overlapping() {
+        let facets_per_face = 27;
+        let instances = test_instances(facets_per_face);
+
+        let order = build_sticker_order(&instances, facets_per_face);
+
+        let mut expected_start = 0u32;
+        for face_id in 0..8usize {
+            for kind in 0..8usize {
+                let range = order.ranges[face_id][kind].clone();
+                assert_eq!(range.start, expected_start);
+                expected_start = range.end;
+            }
+        }
+        assert_eq!(expected_start, order.sorted.len() as u32);
+    }
+
+    #[test]
+    fn sticker_order_groups_belong_to_their_face_and_kind() {
+        let facets_per_face = 27;
+        let instances = test_instances(facets_per_face);
+
+        let order = build_sticker_order(&instances, facets_per_face);
+
+        for face_id in 0..8usize {
+            for kind in 0..8usize {
+                let range = order.ranges[face_id][kind].clone();
+                for &index in &order.sorted[range.start as usize..range.end as usize] {
+                    assert_eq!(index / facets_per_face, face_id as u32);
+                    assert_eq!(instances[index as usize].kind, kind as u32);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn particle_instances_repeat_each_sticker_by_its_kind_count() {
+        let facets_per_face = 27;
+        let instances = test_instances(facets_per_face);
+        let order = build_sticker_order(&instances, facets_per_face);
+
+        let mut counts = [0u32; 8];
+        for (kind, count) in counts.iter_mut().enumerate() {
+            *count = kind as u32 + 1;
         }
 
-        assert_eq!(expected_start, 8 * facets_per_face * PARTICLES_PER_STICKER);
+        let (expanded, ranges) = build_particle_instances(&order, &counts);
+
+        for (face_id, kind_ranges) in ranges.iter().enumerate() {
+            for (kind, range) in kind_ranges.iter().enumerate() {
+                let sticker_range = order.ranges[face_id][kind].clone();
+                let expected_len = (sticker_range.end - sticker_range.start) * counts[kind];
+                assert_eq!(range.end - range.start, expected_len);
+                for &sticker_index in &expanded[range.start as usize..range.end as usize] {
+                    assert_eq!(instances[sticker_index as usize].kind, kind as u32);
+                }
+            }
+        }
+        assert_eq!(expanded.len(), ranges[7][7].end as usize);
     }
 
     #[test]
