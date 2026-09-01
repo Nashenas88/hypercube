@@ -11,8 +11,7 @@
   "containerUser": "dev",
   "runArgs": ["--device=/dev/dri"],
   "mounts": [
-    "source=hypercube-cargo-registry,target=/home/dev/.cargo/registry,type=volume",
-    "source=hypercube-cargo-git,target=/home/dev/.cargo/git,type=volume",
+    "source=hypercube-cargo-cache,target=/usr/local/cargo,type=volume",
     "source=hypercube-target-${localWorkspaceFolderBasename},target=/workspace/target,type=volume",
     "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
     "source=${localEnv:XDG_RUNTIME_DIR},target=${localEnv:XDG_RUNTIME_DIR},type=bind"
