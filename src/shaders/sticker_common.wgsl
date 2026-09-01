@@ -1,4 +1,5 @@
-// Lighting and hover-highlighting state shared by sticker material shaders.
+// Per-sticker identity, lighting and hover-highlighting state shared by
+// sticker material shaders and the particle pipeline.
 #define_import_path sticker_common
 
 struct LightUniform {
@@ -20,8 +21,14 @@ struct HighlightingUniform {
     piece_highlight_color: vec4<f32>, // rgb = color, a = intensity
 };
 
+// Which piece slot each `instances` entry currently occupies, indexed by
+// instance index. Bindings are ordered by descending readership across the
+// classic/elemental/particle pipelines; this is read by all three.
 @group(0) @binding(3)
-var<uniform> light: LightUniform;
+var<storage, read> piece_slots: array<u32>;
 
 @group(0) @binding(4)
 var<uniform> highlighting: HighlightingUniform;
+
+@group(0) @binding(5)
+var<uniform> light: LightUniform;

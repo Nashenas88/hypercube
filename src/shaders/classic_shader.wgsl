@@ -1,15 +1,12 @@
 // Vertex shader using instanced rendering with static cube geometry
 #import math4d::{CameraUniform, compute_vertex_geometry, instances}
-#import sticker_common::{HighlightingUniform, LightUniform, light, highlighting}
+#import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
 
 struct KindColors {
     colors: array<vec4<f32>, 8>,
 };
 
-@group(0) @binding(5)
-var<storage, read> piece_slots: array<u32>;
-
-@group(0) @binding(6)
+@group(0) @binding(7)
 var<uniform> kind_colors: KindColors;
 
 struct VertexOutput {

@@ -562,7 +562,10 @@ impl Renderer {
                 label: Some("Skybox Bind Group Layout"),
             });
 
-        // Main shader bind group layout (transform, camera, instances, light, highlighting, piece_slots, kind_colors)
+        // Main shader bind group layout, ordered by descending readership
+        // across the classic/elemental/particle pipelines: transform,
+        // camera, instances, piece_slots, highlighting, light, (6 reserved
+        // for the particle pipeline's sticker_order), kind_colors.
         let main_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -598,9 +601,9 @@ impl Renderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -618,16 +621,16 @@ impl Renderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 5,
-                        visibility: wgpu::ShaderStages::VERTEX,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 6,
+                        binding: 7,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -777,7 +780,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: light_buffer.as_entire_binding(),
+                    resource: piece_slot_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -785,10 +788,10 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: piece_slot_buffer.as_entire_binding(),
+                    resource: light_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 6,
+                    binding: 7,
                     resource: kind_colors_buffer.as_entire_binding(),
                 },
             ],

@@ -1,9 +1,6 @@
 #import math4d::{compute_vertex_geometry, instances, transform}
-#import sticker_common::{HighlightingUniform, LightUniform, light, highlighting}
+#import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
 #import elemental_common::{ICE_TWINKLE_HZ, LIGHTNING_STROBE_HZ, hash11, hash21, value_noise1, fresnel, strobe}
-
-@group(0) @binding(5)
-var<storage, read> piece_slots: array<u32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
