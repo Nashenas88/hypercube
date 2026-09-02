@@ -40,6 +40,28 @@ var<uniform> camera: CameraUniform;
 @group(0) @binding(2)
 var<storage, read> instances: array<StickerInstance>;
 
+// Inverse of a 3x3 matrix, by cofactor expansion. A singular `m` yields
+// infinities rather than an error, so callers whose matrix can degenerate
+// have to test for that themselves.
+fn inverse3(m: mat3x3<f32>) -> mat3x3<f32> {
+    let a = m[0];
+    let b = m[1];
+    let c = m[2];
+
+    // Rows of the adjugate, which are the cofactors of `m`'s columns.
+    let r0 = cross(b, c);
+    let r1 = cross(c, a);
+    let r2 = cross(a, b);
+
+    let inv_determinant = 1.0 / dot(a, r0);
+
+    return mat3x3<f32>(
+        vec3<f32>(r0.x, r1.x, r2.x),
+        vec3<f32>(r0.y, r1.y, r2.y),
+        vec3<f32>(r0.z, r1.z, r2.z),
+    ) * inv_determinant;
+}
+
 // Projects a 4D point to 3D space using perspective projection
 fn project_4d_to_3d(point_4d: vec4<f32>, viewer_distance: f32) -> vec3<f32> {
     let w_distance = viewer_distance - point_4d.w;

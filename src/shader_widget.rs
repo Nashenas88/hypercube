@@ -21,8 +21,8 @@ use crate::geometry::{
 };
 use crate::math::{
     GRID_EXTENT, VIEWER_DISTANCE, compose_so4, create_4d_plane_rotation, decompose_so4,
-    process_4d_rotation, project_cube_point, quat_slerp_exact, shortest_arc_plane,
-    sticker_world_center, visible_faces,
+    depth_preserving_push, face_push_offset_3d, process_4d_rotation, project_4d_to_3d,
+    project_cube_point, quat_slerp_exact, shortest_arc_plane, visible_faces,
 };
 use crate::moves::{base_angle, clockwise_sign, rotate_local_position};
 use crate::piece::{
@@ -269,28 +269,73 @@ pub(crate) struct UiControls {
     pub(crate) theme: Theme,
 }
 
-/// The order Fire's stickers are drawn in under `Theme::Elemental`: every
-/// instance of `ELEMENTAL_FIRE_KIND` on a visible face, farthest from the
-/// camera first.
+/// The position one fire sticker is sorted by: its face's center placed
+/// exactly where the renderer puts it, displaced by the sticker's own lattice
+/// offset within that face, projected as if the face sat at the 4D origin.
 ///
-/// Fire draws in a blended pass that writes no depth, so where two fire
-/// stickers overlap on screen the result depends on the order they are drawn
-/// in. At most `instances.len() / 8` of them exist, so the sort runs on the
-/// CPU each frame.
+/// The in-face term is what keeps the key from collapsing. Subtracting
+/// `face_normal_4d` strips the face's `±1` along its fixed axis, leaving a
+/// small offset centered on the origin, so its perspective divide stays
+/// well-conditioned however flat a 4D rotation has squashed the real face -
+/// where the 27 rendered positions converge on each other and any quantity
+/// measured from them turns into a near-tie.
+///
+/// The face term carries both gap pushes, because they are what separate the
+/// eight faces on screen: each goes along its own face's outward normal, so
+/// they move two faces' *relative* depth by far more than separates two
+/// stickers meeting near the puzzle's center.
+///
+/// Both fields come from the instance rather than the static tables, so the
+/// result stays right while a move animation sweeps a facet toward a
+/// different cell.
+fn fire_sort_position(
+    instance: &StickerInstance,
+    rotation_4d: &Matrix4<f32>,
+    face_gap: f32,
+    face_gap_4d: f32,
+    viewer_distance: f32,
+) -> Point3<f32> {
+    let face_normal_4d = Vector4::from(instance.face_normal_4d);
+    let in_face_offset = Vector4::from(instance.position_4d) - face_normal_4d;
+
+    // `project_4d_to_3d` rotates its own argument, so the divide on the
+    // already-pushed center is inlined here instead.
+    let rotated = rotation_4d * face_normal_4d
+        + depth_preserving_push(face_normal_4d, rotation_4d, face_gap_4d - 1.0);
+    let scale = viewer_distance / (viewer_distance - rotated.w);
+    let face_center = Point3::new(rotated.x * scale, rotated.y * scale, rotated.z * scale)
+        + face_push_offset_3d(face_normal_4d, rotation_4d, viewer_distance) * face_gap;
+
+    face_center + project_4d_to_3d(in_face_offset, rotation_4d, viewer_distance).coords
+}
+
+/// The order Fire's stickers are drawn in under `Theme::Elemental`: every
+/// instance of `ELEMENTAL_FIRE_KIND` on a visible face, farthest first.
+///
+/// Fire draws blended and writes no depth, so where two of its balls overlap
+/// on screen the result depends on the order they are drawn in. Stickers are
+/// ranked by their `fire_sort_position`'s depth along the camera's view axis,
+/// not by its distance from the eye: distance ranks a laterally-offset ball
+/// behind one dead ahead at the same depth, and two balls a lattice cell
+/// apart still overlap on screen, so that misranking is reachable and swaps
+/// as the camera orbits.
+///
+/// At most `instances.len() / 8` stickers are sorted, so this runs on the CPU
+/// each frame.
 ///
 /// # Arguments
 /// * `instances` - this frame's full instance list, in face-major order
 /// * `visible_faces` - per-`face_id` visibility (see `math::visible_faces`)
 /// * `rotation_4d` - 4D rotation matrix
-/// * `camera_eye` - world-space camera position to sort distances against
+/// * `camera` - the 3D camera, for its eye point and view axis
 /// * `face_gap`/`face_gap_4d`/`viewer_distance` - the same placement
-///   parameters the vertex shader is given, so centers land where the
-///   stickers actually render
+///   parameters the vertex shader is given, so the face centers land where
+///   the faces actually render
 pub(crate) fn fire_draw_order(
     instances: &[StickerInstance],
     visible_faces: &[bool; 8],
     rotation_4d: &Matrix4<f32>,
-    camera_eye: Point3<f32>,
+    camera: &Camera,
     face_gap: f32,
     face_gap_4d: f32,
     viewer_distance: f32,
@@ -299,7 +344,9 @@ pub(crate) fn fire_draw_order(
         return Vec::new();
     }
 
+    let forward = (camera.target - camera.eye).normalize();
     let facets_per_face = instances.len() / 8;
+
     let mut order: Vec<(u32, f32)> = instances
         .iter()
         .enumerate()
@@ -307,15 +354,14 @@ pub(crate) fn fire_draw_order(
             instance.kind == ELEMENTAL_FIRE_KIND && visible_faces[index / facets_per_face]
         })
         .map(|(index, instance)| {
-            let center = sticker_world_center(
-                Vector4::from(instance.position_4d),
-                Vector4::from(instance.face_normal_4d),
+            let position = fire_sort_position(
+                instance,
                 rotation_4d,
                 face_gap,
                 face_gap_4d,
                 viewer_distance,
             );
-            (index as u32, (center - camera_eye).norm_squared())
+            (index as u32, (position - camera.eye).dot(&forward))
         })
         .collect();
 
@@ -861,7 +907,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                     &state.cached_sticker_instances,
                     &face_visibility,
                     &state.rotation_4d,
-                    state.camera.eye,
+                    &state.camera,
                     face_gap,
                     face_gap_4d,
                     self.viewer_distance,
@@ -2608,17 +2654,17 @@ mod clockwise_sign_tests {
         }
     }
 
-    /// The instances, camera and placement parameters `fire_draw_order` is
-    /// exercised against, all taken from a freshly-solved puzzle.
-    fn fire_order_fixture() -> (Vec<StickerInstance>, Point3<f32>, Matrix4<f32>) {
+    /// The instances, camera and 4D rotation `fire_draw_order` is exercised
+    /// against, all taken from a freshly-solved puzzle.
+    fn fire_order_fixture() -> (Vec<StickerInstance>, Camera, Matrix4<f32>) {
         let state = HypercubeShaderState::default();
         let instances = sticker_instances_for_render(&state);
-        (instances, state.camera.eye, state.rotation_4d)
+        (instances, state.camera.clone(), state.rotation_4d)
     }
 
     fn fire_order_for(
         instances: &[StickerInstance],
-        camera_eye: Point3<f32>,
+        camera: &Camera,
         rotation_4d: &Matrix4<f32>,
         visible: &[bool; 8],
     ) -> Vec<u32> {
@@ -2626,17 +2672,39 @@ mod clockwise_sign_tests {
             instances,
             visible,
             rotation_4d,
-            camera_eye,
+            camera,
             SECONDARY_FACE_GAP,
             SECONDARY_FACE_GAP_4D,
             VIEWER_DISTANCE,
         )
     }
 
+    /// One sticker's depth along the camera's view axis, rebuilt from the
+    /// face and in-face terms directly rather than by calling back into
+    /// `fire_sort_position`.
+    fn sort_depth(instance: &StickerInstance, camera: &Camera, rotation_4d: &Matrix4<f32>) -> f32 {
+        let face_normal_4d = Vector4::from(instance.face_normal_4d);
+
+        let rotated = rotation_4d * face_normal_4d
+            + depth_preserving_push(face_normal_4d, rotation_4d, SECONDARY_FACE_GAP_4D - 1.0);
+        let scale = VIEWER_DISTANCE / (VIEWER_DISTANCE - rotated.w);
+        let face = Point3::new(rotated.x * scale, rotated.y * scale, rotated.z * scale)
+            + face_push_offset_3d(face_normal_4d, rotation_4d, VIEWER_DISTANCE)
+                * SECONDARY_FACE_GAP;
+
+        let in_face = project_4d_to_3d(
+            Vector4::from(instance.position_4d) - face_normal_4d,
+            rotation_4d,
+            VIEWER_DISTANCE,
+        );
+
+        ((face + in_face.coords) - camera.eye).dot(&(camera.target - camera.eye).normalize())
+    }
+
     #[test]
     fn fire_order_covers_every_fire_sticker_exactly_once() {
-        let (instances, camera_eye, rotation_4d) = fire_order_fixture();
-        let order = fire_order_for(&instances, camera_eye, &rotation_4d, &[true; 8]);
+        let (instances, camera, rotation_4d) = fire_order_fixture();
+        let drawn = fire_order_for(&instances, &camera, &rotation_4d, &[true; 8]);
 
         let mut expected: Vec<u32> = instances
             .iter()
@@ -2649,7 +2717,7 @@ mod clockwise_sign_tests {
             "a solved puzzle should have fire stickers to draw"
         );
 
-        let mut sorted = order.clone();
+        let mut sorted = drawn.clone();
         sorted.sort_unstable();
         expected.sort_unstable();
         assert_eq!(sorted, expected);
@@ -2657,49 +2725,38 @@ mod clockwise_sign_tests {
 
     #[test]
     fn fire_order_is_sorted_back_to_front() {
-        let (instances, camera_eye, rotation_4d) = fire_order_fixture();
-        let order = fire_order_for(&instances, camera_eye, &rotation_4d, &[true; 8]);
+        let (instances, camera, rotation_4d) = fire_order_fixture();
+        let drawn = fire_order_for(&instances, &camera, &rotation_4d, &[true; 8]);
 
-        let distances: Vec<f32> = order
+        let distances: Vec<f32> = drawn
             .iter()
-            .map(|&index| {
-                let instance = &instances[index as usize];
-                let center = sticker_world_center(
-                    Vector4::from(instance.position_4d),
-                    Vector4::from(instance.face_normal_4d),
-                    &rotation_4d,
-                    SECONDARY_FACE_GAP,
-                    SECONDARY_FACE_GAP_4D,
-                    VIEWER_DISTANCE,
-                );
-                (center - camera_eye).norm()
-            })
+            .map(|&index| sort_depth(&instances[index as usize], &camera, &rotation_4d))
             .collect();
 
         for pair in distances.windows(2) {
             assert!(
                 pair[0] >= pair[1],
-                "expected non-increasing camera distance, got {pair:?}"
+                "expected non-increasing sort distance, got {pair:?}"
             );
         }
     }
 
     #[test]
     fn fire_order_skips_stickers_on_invisible_faces() {
-        let (instances, camera_eye, rotation_4d) = fire_order_fixture();
+        let (instances, camera, rotation_4d) = fire_order_fixture();
         let mut visible = [true; 8];
         visible[0] = false;
 
-        let order = fire_order_for(&instances, camera_eye, &rotation_4d, &visible);
+        let drawn = fire_order_for(&instances, &camera, &rotation_4d, &visible);
         let facets_per_face = instances.len() / 8;
         assert!(
-            order
+            drawn
                 .iter()
                 .all(|&index| index as usize / facets_per_face != 0),
             "face 0 is hidden, so none of its stickers should be drawn"
         );
         assert!(
-            !order.is_empty(),
+            !drawn.is_empty(),
             "hiding one face should not hide every fire sticker"
         );
     }

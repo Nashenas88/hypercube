@@ -1,6 +1,6 @@
-#import math4d::{camera, compute_vertex_geometry, instances, transform}
+#import math4d::{camera, compute_sticker_anchor, compute_vertex_geometry, instances, inverse3, transform}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
-#import elemental_common::{ICE_TWINKLE_HZ, LIGHTNING_STROBE_HZ, hash11, hash21, value_noise1, fresnel, strobe}
+#import elemental_common::{ICE_TWINKLE_HZ, LIGHTNING_STROBE_HZ, hash11, hash21, hash31, value_noise1, value_noise3, fresnel, strobe}
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -41,23 +41,17 @@ fn vs_main(
 
 // Fragment shader
 
-fn fire_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    let seed = f32(instance_index);
-    let flicker = value_noise1(seed * 3.7 + transform.elapsed_seconds * 4.0);
-    let base = mix(vec3<f32>(0.8, 0.1, 0.0), vec3<f32>(1.0, 0.75, 0.15), flicker);
-    let view_dir = normalize(camera.eye_position.xyz - world_position);
-    let rim = fresnel(world_normal, view_dir, 2.0);
-    return base + rim * vec3<f32>(1.0, 0.6, 0.2) * 0.5;
-}
-
 // Blends the hovered-sticker and hovered-piece tints into an already-shaded
 // color, the sticker taking precedence over the piece it belongs to.
-fn apply_highlight(color: vec3<f32>, instance_index: u32, piece_slot: u32) -> vec3<f32> {
+// `coverage` scales the tint the way the color it is mixed into is scaled:
+// 1.0 for an opaque material, and the fragment's own alpha for one whose
+// color is premultiplied by it.
+fn apply_highlight(color: vec3<f32>, coverage: f32, instance_index: u32, piece_slot: u32) -> vec3<f32> {
     if (instance_index == highlighting.hovered_sticker_index) {
-        return mix(color, highlighting.highlight_color.rgb, highlighting.highlight_color.a);
+        return mix(color, highlighting.highlight_color.rgb * coverage, highlighting.highlight_color.a);
     }
     if (piece_slot == highlighting.hovered_piece_slot) {
-        return mix(color, highlighting.piece_highlight_color.rgb, highlighting.piece_highlight_color.a);
+        return mix(color, highlighting.piece_highlight_color.rgb * coverage, highlighting.piece_highlight_color.a);
     }
     return color;
 }
@@ -222,22 +216,267 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    return vec4<f32>(apply_highlight(final_color, in.instance_index, in.piece_slot), 1.0);
+    return vec4<f32>(apply_highlight(final_color, 1.0, in.instance_index, in.piece_slot), 1.0);
+}
+
+// Fire: a small sun inscribed in each sticker cube, raymarched in the
+// sticker's own local frame.
+
+// Half-extent of a sticker's mesh cube before `transform.sticker_scale`.
+// Must match `BASE_STICKER_SIZE` in math.rs, which renderer.rs premultiplies
+// into the cube vertices.
+const FIRE_HALF_EXTENT: f32 = 0.33333334;
+
+// The ball's radius in local units, where 1.0 is the sticker cube's own
+// half-extent. `FIRE_BASE_RADIUS + FIRE_SURFACE_DISPLACEMENT` stays under
+// 1.0 so the ball is inscribed: it never pokes out of the facet it belongs
+// to, and the cube's front faces are guaranteed to cover it on screen.
+const FIRE_BASE_RADIUS: f32 = 0.62;
+const FIRE_SURFACE_DISPLACEMENT: f32 = 0.32;
+
+// Samples taken across the ball. The dominant cost of the whole theme: each
+// one evaluates four octaves of trilinear value noise, and a scrambled cube
+// can show 27 fire facets at once.
+const FIRE_STEPS: i32 = 16;
+
+// Optical depth accumulated per ball-radius travelled at unit density.
+const FIRE_ABSORPTION: f32 = 3.75;
+
+// Scales local positions into the noise domain. A facet covers few enough
+// pixels that features much finer than this stop resolving into anything
+// legible and only cost octaves to produce.
+const FIRE_NOISE_SCALE: f32 = 0.8;
+
+// How near to degenerate the sticker's projected frame may get before Fire
+// gives up on it, as a fraction of the volume three edges of the same
+// lengths would span if they were perpendicular. A 4D rotation can squash a
+// facet flat, collapsing the frame toward a plane and sending its inverse -
+// and with it the ball's shape - to infinity; such a facet is edge-on and
+// covers almost no pixels anyway.
+const FIRE_MIN_FRAME_VOLUME: f32 = 0.05;
+
+// Multiplier on `elapsed_seconds` for the plasma's churn, and the wrap
+// applied first. Convection translates the noise domain without bound, so
+// the input has to be kept small enough that the hash still resolves detail;
+// the churn hides the periodic reset.
+const FIRE_CHURN_SPEED: f32 = 1.5;
+const FIRE_TIME_WRAP: f32 = 60.0;
+
+// Rotates and rescales the sample position between octaves, so the octaves
+// stack at unrelated orientations instead of reinforcing each other's axis
+// alignment into a visible grid.
+const m3 = mat3x3<f32>(
+    vec3<f32>(0.00, 0.80, 0.60),
+    vec3<f32>(-0.80, 0.36, -0.48),
+    vec3<f32>(-0.60, -0.48, 0.64),
+);
+
+// Ridged noise: `1 - |2n - 1|` creases the noise along its own mid-level, so
+// the octaves stack into filaments and sheets rather than the soft blobs
+// plain FBM gives. The two-octave form warps the domain the three-octave
+// form is then sampled in.
+fn ridged_warp(p_in: vec3<f32>) -> f32 {
+    var p = p_in;
+    var f = 0.0;
+    var amplitude = 0.5;
+    for (var i = 0; i < 2; i++) {
+        f += amplitude * (1.0 - abs(value_noise3(p) * 2.0 - 1.0));
+        p = m3 * p * 2.05;
+        amplitude *= 0.5;
+    }
+    return f;
+}
+
+fn ridged_detail(p_in: vec3<f32>) -> f32 {
+    var p = p_in;
+    var f = 0.0;
+    var amplitude = 0.5;
+    for (var i = 0; i < 2; i++) {
+        f += amplitude * (1.0 - abs(value_noise3(p) * 2.0 - 1.0));
+        p = m3 * p * 2.05;
+        amplitude *= 0.5;
+    }
+    return f;
+}
+
+// The plasma field at one point of the ball. The volume turns slowly about
+// two axes while the noise domain drifts along -y, which reads as convection
+// rising through it. Both are expressed in the sticker's own local frame, so
+// "up" turns with the puzzle rather than pointing at a world direction a 4D
+// puzzle has no fixed version of.
+fn solar_plasma(p_in: vec3<f32>, time: f32) -> f32 {
+    var p = p_in;
+    let c = cos(time * 0.15);
+    let s = sin(time * 0.15);
+
+    let rotated_x = p.x * c - p.z * s;
+    let rotated_z = p.x * s + p.z * c;
+    p.x = rotated_x;
+    p.z = rotated_z;
+
+    let tilted_x = p.x * c - p.y * s;
+    let tilted_y = p.x * s + p.y * c;
+    p.x = tilted_x;
+    p.y = tilted_y;
+
+    let convected = p - vec3<f32>(0.0, time * 0.8, 0.0);
+    let warp = ridged_warp(convected * 1.5);
+
+    let detailed = p + vec3<f32>(warp) * 0.4 - vec3<f32>(0.0, time * 1.2, 0.0);
+    return ridged_detail(detailed * 1.8);
+}
+
+// Exposure, folded into the palette rather than applied to the composite -
+// which would dim every other element by the same factor.
+const FIRE_EXPOSURE: f32 = 0.18;
+
+// Blackbody-ish ramp from a dim red shell to a white fusion core. The stops
+// run far above 1.0 on purpose: that range is what the Elemental composite's
+// tonemap turns into visible interior shape instead of one flat disc.
+fn sun_palette(t: f32) -> vec3<f32> {
+    let dark_red = vec3<f32>(1.2, 0.05, 0.0);
+    let bright_orange = vec3<f32>(12.0, 3.5, 0.1);
+    let yellow_core = vec3<f32>(45.0, 25.0, 5.0);
+    let white_fusion = vec3<f32>(90.0, 85.0, 95.0);
+
+    var color = mix(dark_red, bright_orange, smoothstep(0.0, 0.35, t));
+    color = mix(color, yellow_core, smoothstep(0.35, 0.65, t));
+    color = mix(color, white_fusion, smoothstep(0.65, 1.0, t));
+    return color * FIRE_EXPOSURE;
+}
+
+// Entry and exit distances along a normalized `rd` from `ro` for the sphere
+// of `radius` centered on the origin, clamped so the span starts no earlier
+// than the ray does. Returns a negative entry when the ray misses it, or
+// leaves it entirely behind.
+fn ray_sphere(ro: vec3<f32>, rd: vec3<f32>, radius: f32) -> vec2<f32> {
+    let b = dot(ro, rd);
+    let c = dot(ro, ro) - radius * radius;
+    let discriminant = b * b - c;
+    if (discriminant < 0.0) {
+        return vec2<f32>(-1.0);
+    }
+
+    let root = sqrt(discriminant);
+    let far = -b + root;
+    if (far < 0.0) {
+        return vec2<f32>(-1.0);
+    }
+    return vec2<f32>(max(-b - root, 0.0), far);
 }
 
 // Fire's own entry point, drawn per sticker in back-to-front order over a
-// pipeline with premultiplied blending and no depth write. Nothing writes
-// this cube's depth, so its own back faces are discarded here by their
-// current normal rather than by `cull_mode` (which stays `None` everywhere):
-// `world_normal` is derived fresh from the instance's own basis and so never
-// goes stale mid-move the way the index winding `cull_mode` relies on can.
+// pipeline with premultiplied blending and no depth write. Emission is
+// accumulated against a transmittance along a ray through the ball, so the
+// result is a premultiplied color and the coverage it was multiplied by.
+//
+// Every fragment of the cube on one pixel yields the same ray, so shading
+// both its faces would march the ball twice and blend the result over
+// itself; back faces are discarded here by their current normal rather than
+// by `cull_mode` (which stays `None` everywhere), since `world_normal` is
+// derived fresh from the instance's own basis and so never goes stale
+// mid-move the way the index winding `cull_mode` relies on can.
 @fragment
 fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
     let view_dir = normalize(camera.eye_position.xyz - in.world_position);
     if (dot(normalize(in.world_normal), view_dir) <= 0.0) {
         discard;
+        return vec4<f32>(0.0);
     }
 
-    let color = fire_color(in.instance_index, in.world_position, in.world_normal);
-    return vec4<f32>(apply_highlight(color, in.instance_index, in.piece_slot), 1.0);
+    let anchor = compute_sticker_anchor(in.instance_index, FIRE_HALF_EXTENT * transform.sticker_scale);
+
+    // The sticker's own frame. Its three edges are unequal in length and no
+    // longer mutually perpendicular once the 4D perspective divide has
+    // warped the cube, so a sphere marched in the local space `to_local`
+    // maps into comes out stretched in world space exactly as its facet is.
+    // Mapping through the edges is a linearization of a projection that
+    // isn't linear, but across one sticker's own span the error is far below
+    // what a volume of noise resolves.
+    let to_world = mat3x3<f32>(anchor.edge_x, anchor.edge_y, anchor.edge_z);
+
+    let frame_volume = dot(anchor.edge_x, cross(anchor.edge_y, anchor.edge_z));
+    let edge_volume = length(anchor.edge_x) * length(anchor.edge_y) * length(anchor.edge_z);
+    if (abs(frame_volume) < edge_volume * FIRE_MIN_FRAME_VOLUME) {
+        discard;
+        return vec4<f32>(0.0);
+    }
+
+    let to_local = inverse3(to_world);
+
+    // The ray starts at the fragment, on the cube's own front face, rather
+    // than at the eye: `to_local` scales by the inverse of a sticker's size,
+    // so an eye-relative origin lands hundreds of ball radii out at small
+    // sticker scales and the sphere test loses the ball entirely to
+    // cancellation. Both vectors below are world-space differences of
+    // comparable magnitude, and the ball sits within a radius of the origin.
+    let ray_origin = to_local * (in.world_position - anchor.world_center);
+    let ray_direction = normalize(to_local * (in.world_position - camera.eye_position.xyz));
+
+    let span = ray_sphere(ray_origin, ray_direction, FIRE_BASE_RADIUS + FIRE_SURFACE_DISPLACEMENT);
+    if (span.x < 0.0) {
+        discard;
+        return vec4<f32>(0.0);
+    }
+
+    let time = transform.elapsed_seconds % FIRE_TIME_WRAP;
+    // Seeded by `piece_slot` rather than instance index, so a piece keeps its
+    // own flame pattern when a move relocates it to a different slot. The
+    // hash bounds the offset instead of scaling the slot directly, keeping
+    // every sticker's noise domain in the same well-resolved range.
+    let seed = hash11(f32(in.piece_slot) * 0.073) * 4.0;
+    let seed_offset = vec3<f32>(seed, seed * 1.3, seed * 0.7);
+
+    let step_size = (span.y - span.x) / f32(FIRE_STEPS);
+    // Densities below are expressed per ball radius, so the integration
+    // length is too - which keeps them independent of the ball's own size.
+    let step_radii = step_size / FIRE_BASE_RADIUS;
+    // Offsetting each ray's first sample by a per-pixel fraction of a step
+    // trades this step count's banding for noise. Hashed on the pixel alone,
+    // so the pattern is fixed in screen space instead of crawling frame to
+    // frame.
+    let jitter = hash31(vec3<f32>(in.clip_position.xy, 0.0));
+    var travelled = span.x + step_size * jitter;
+
+    var accumulated = vec3<f32>(0.0);
+    var transmittance = 1.0;
+
+    for (var i = 0; i < FIRE_STEPS; i++) {
+        if (transmittance < 0.01) {
+            break;
+        }
+
+        let p = ray_origin + ray_direction * travelled;
+        travelled += step_size;
+
+        let center_distance = length(p);
+        let plasma = solar_plasma(p * FIRE_NOISE_SCALE + seed_offset, time * FIRE_CHURN_SPEED);
+        let surface_radius = FIRE_BASE_RADIUS + plasma * FIRE_SURFACE_DISPLACEMENT;
+        if (center_distance > surface_radius) {
+            continue;
+        }
+
+        // A dense core falling off exponentially, plus the plasma's own
+        // filaments faded in over the outer half, all tapered to nothing at
+        // the displaced surface so the ball has no hard edge.
+        let normalized_distance = center_distance / FIRE_BASE_RADIUS;
+        let core_density = exp(-normalized_distance * 3.5) * 14.0;
+        let surface_density = plasma * 4.5;
+        var density = core_density + surface_density * smoothstep(1.3, 0.4, normalized_distance);
+        density *= smoothstep(surface_radius, surface_radius - 0.15, center_distance);
+        if (density <= 0.01) {
+            continue;
+        }
+
+        transmittance *= exp(-density * FIRE_ABSORPTION * step_radii);
+
+        let temperature = (1.0 - normalized_distance) * 1.8 + plasma * 0.8;
+        accumulated += sun_palette(temperature) * density * transmittance * step_radii;
+    }
+
+    let coverage = 1.0 - transmittance;
+    return vec4<f32>(
+        apply_highlight(accumulated, coverage, in.instance_index, in.piece_slot),
+        coverage,
+    );
 }

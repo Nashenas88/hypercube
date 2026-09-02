@@ -11,8 +11,8 @@ pub(crate) enum Theme {
 }
 
 /// Particles emitted per sticker under `Theme::Elemental`, indexed by `kind`.
-/// Currently one shared budget for every element; per-element budgets land
-/// once particle emission is reauthored per element.
+/// One shared budget for every element that still emits; Fire's own material
+/// carries its whole look, so it emits none.
 const ELEMENTAL_PARTICLES_PER_STICKER: u32 = 24;
 
 /// The `kind` `Theme::Elemental` renders as Fire, matching `case 3u` in
@@ -28,7 +28,11 @@ impl Theme {
     pub(crate) fn particles_per_kind(&self) -> [u32; 8] {
         match self {
             Theme::Classic => [0; 8],
-            Theme::Elemental => [ELEMENTAL_PARTICLES_PER_STICKER; 8],
+            Theme::Elemental => {
+                let mut counts = [ELEMENTAL_PARTICLES_PER_STICKER; 8];
+                counts[ELEMENTAL_FIRE_KIND as usize] = 0;
+                counts
+            }
         }
     }
 }

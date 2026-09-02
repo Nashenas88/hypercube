@@ -890,7 +890,7 @@ impl Renderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
-                        visibility: wgpu::ShaderStages::VERTEX,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
@@ -1513,10 +1513,17 @@ impl Renderer {
         });
 
         // Fire's material accumulates emission against a transmittance, which
-        // needs alpha blending; the opaque elemental pipeline above cannot
-        // provide one, so Fire gets its own over the same layout and module.
-        // Depth is tested but not written, since a blended surface has no
-        // single depth for anything drawn after it to sort against.
+        // needs blending; the opaque elemental pipeline above cannot provide
+        // one, so Fire gets its own over the same layout and module.
+        //
+        // Depth is tested but not written, which is what the back-to-front
+        // draw order pays for: a farther ball still blends through a nearer
+        // one's translucent rim, the ball's edge fades out instead of being
+        // cut where it stops claiming depth, and the particles drawn
+        // afterward stay visible where they pass behind a ball. Writing
+        // depth here would also write the wrong value - the rasterized
+        // fragment sits on the cube's front face, up to a good fraction of a
+        // half-width nearer than the ball surface it shades.
         let fire_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Fire Pipeline"),
             layout: Some(&classic_pipeline_layout),
