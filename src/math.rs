@@ -206,6 +206,42 @@ pub(crate) fn transform_sticker_vertices_to_3d(
     world_vertices
 }
 
+/// The world-space center of one sticker cube, mirroring the placement
+/// `math4d.wgsl`'s `compute_sticker_anchor` performs on the GPU: rotate the
+/// 4D center, add the depth-preserving push along the face normal, project,
+/// then push outward in 3D by `gap_distance`.
+///
+/// `face_normal_4d` is the instance's own current normal rather than its
+/// static `FACE_CENTERS` entry, so the result stays correct while a move
+/// animation sweeps a facet toward a different tesseract cell.
+///
+/// # Arguments
+/// * `sticker_position_4d` - 4D position of the sticker (nominal, unpushed)
+/// * `face_normal_4d` - the sticker's outward 4D face normal
+/// * `rotation_4d` - 4D rotation matrix
+/// * `gap_distance` - 3D distance to push outward after projection
+/// * `gap_distance_4d` - slider value (1.0 = no push), see `depth_preserving_push`
+/// * `viewer_distance` - Distance of 4D viewer from W=0 plane
+pub(crate) fn sticker_world_center(
+    sticker_position_4d: Vector4<f32>,
+    face_normal_4d: Vector4<f32>,
+    rotation_4d: &Matrix4<f32>,
+    gap_distance: f32,
+    gap_distance_4d: f32,
+    viewer_distance: f32,
+) -> Point3<f32> {
+    let rotated_4d = rotation_4d * sticker_position_4d
+        + depth_preserving_push(face_normal_4d, rotation_4d, gap_distance_4d - 1.0);
+    let scale = viewer_distance / (viewer_distance - rotated_4d.w);
+    let center = Point3::new(
+        rotated_4d.x * scale,
+        rotated_4d.y * scale,
+        rotated_4d.z * scale,
+    );
+
+    center + face_push_offset_3d(face_normal_4d, rotation_4d, viewer_distance) * gap_distance
+}
+
 pub(crate) fn project_cube_point(
     local_vertex: Vector3<f32>,
     center_vertex: Vector4<f32>,

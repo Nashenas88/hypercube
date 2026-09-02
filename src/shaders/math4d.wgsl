@@ -18,6 +18,8 @@ struct Transform4D {
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     view_proj_inv: mat4x4<f32>,
+    // World-space camera position; `w` is padding.
+    eye_position: vec4<f32>,
 }
 
 // Instance data for each sticker

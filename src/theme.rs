@@ -15,6 +15,11 @@ pub(crate) enum Theme {
 /// once particle emission is reauthored per element.
 const ELEMENTAL_PARTICLES_PER_STICKER: u32 = 24;
 
+/// The `kind` `Theme::Elemental` renders as Fire, matching `case 3u` in
+/// `elemental_shader.wgsl`. Fire is the one element drawn in its own blended
+/// pass, so the CPU has to recognize it to build that pass's draw order.
+pub(crate) const ELEMENTAL_FIRE_KIND: u32 = 3;
+
 impl Theme {
     pub(crate) const ALL: [Theme; 2] = [Theme::Classic, Theme::Elemental];
 

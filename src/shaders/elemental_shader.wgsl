@@ -1,4 +1,4 @@
-#import math4d::{compute_vertex_geometry, instances, transform}
+#import math4d::{camera, compute_vertex_geometry, instances, transform}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
 #import elemental_common::{ICE_TWINKLE_HZ, LIGHTNING_STROBE_HZ, hash11, hash21, value_noise1, fresnel, strobe}
 
@@ -45,9 +45,21 @@ fn fire_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3
     let seed = f32(instance_index);
     let flicker = value_noise1(seed * 3.7 + transform.elapsed_seconds * 4.0);
     let base = mix(vec3<f32>(0.8, 0.1, 0.0), vec3<f32>(1.0, 0.75, 0.15), flicker);
-    let view_dir = normalize(-world_position);
+    let view_dir = normalize(camera.eye_position.xyz - world_position);
     let rim = fresnel(world_normal, view_dir, 2.0);
     return base + rim * vec3<f32>(1.0, 0.6, 0.2) * 0.5;
+}
+
+// Blends the hovered-sticker and hovered-piece tints into an already-shaded
+// color, the sticker taking precedence over the piece it belongs to.
+fn apply_highlight(color: vec3<f32>, instance_index: u32, piece_slot: u32) -> vec3<f32> {
+    if (instance_index == highlighting.hovered_sticker_index) {
+        return mix(color, highlighting.highlight_color.rgb, highlighting.highlight_color.a);
+    }
+    if (piece_slot == highlighting.hovered_piece_slot) {
+        return mix(color, highlighting.piece_highlight_color.rgb, highlighting.piece_highlight_color.a);
+    }
+    return color;
 }
 
 fn water_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
@@ -187,8 +199,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         case 2u: {
             final_color = lightning_color(in.instance_index, in.world_position, in.world_normal);
         }
+        // Fire is drawn by `fs_fire` in its own blended pass, so this one
+        // skips it rather than shading it twice.
         case 3u: {
-            final_color = fire_color(in.instance_index, in.world_position, in.world_normal);
+            discard;
+            return vec4<f32>(0.0);
         }
         case 4u: {
             final_color = sand_color(in.instance_index, in.world_position, in.world_normal);
@@ -207,11 +222,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    if (in.instance_index == highlighting.hovered_sticker_index) {
-        final_color = mix(final_color, highlighting.highlight_color.rgb, highlighting.highlight_color.a);
-    } else if (in.piece_slot == highlighting.hovered_piece_slot) {
-        final_color = mix(final_color, highlighting.piece_highlight_color.rgb, highlighting.piece_highlight_color.a);
+    return vec4<f32>(apply_highlight(final_color, in.instance_index, in.piece_slot), 1.0);
+}
+
+// Fire's own entry point, drawn per sticker in back-to-front order over a
+// pipeline with premultiplied blending and no depth write. Nothing writes
+// this cube's depth, so its own back faces are discarded here by their
+// current normal rather than by `cull_mode` (which stays `None` everywhere):
+// `world_normal` is derived fresh from the instance's own basis and so never
+// goes stale mid-move the way the index winding `cull_mode` relies on can.
+@fragment
+fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
+    let view_dir = normalize(camera.eye_position.xyz - in.world_position);
+    if (dot(normalize(in.world_normal), view_dir) <= 0.0) {
+        discard;
     }
 
-    return vec4<f32>(final_color, 1.0);
+    let color = fire_color(in.instance_index, in.world_position, in.world_normal);
+    return vec4<f32>(apply_highlight(color, in.instance_index, in.piece_slot), 1.0);
 }

@@ -193,6 +193,9 @@ pub(crate) struct CameraUniform {
     /// Inverse of the translation-free view-projection matrix, used by the skybox
     /// to reproject screen position back to a world-space direction.
     pub(crate) view_proj_inv: [[f32; 4]; 4],
+    /// World-space camera position, `w` padded to 0. Used by materials that
+    /// need a true per-fragment view ray rather than a direction to shade with.
+    pub(crate) eye_position: [f32; 4],
 }
 
 impl CameraUniform {
@@ -201,13 +204,15 @@ impl CameraUniform {
         Self {
             view_proj: nalgebra::Matrix4::identity().into(),
             view_proj_inv: nalgebra::Matrix4::identity().into(),
+            eye_position: [0.0; 4],
         }
     }
 
     /// Updates the uniform with current camera and projection matrices.
     ///
     /// Combines the projection and view matrices for efficient GPU transformation,
-    /// and derives the translation-free inverse used by the skybox pass.
+    /// derives the translation-free inverse used by the skybox pass, and
+    /// records the camera's world-space position.
     ///
     /// # Arguments
     /// * `camera` - Current camera state for view matrix
@@ -221,6 +226,8 @@ impl CameraUniform {
             .try_inverse()
             .unwrap_or_else(Matrix4::identity)
             .into();
+
+        self.eye_position = [camera.eye.x, camera.eye.y, camera.eye.z, 0.0];
     }
 }
 

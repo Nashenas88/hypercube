@@ -119,6 +119,9 @@ pub(crate) struct Renderer {
     classic_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for the Elemental theme's sticker materials
     elemental_pipeline: wgpu::RenderPipeline,
+    /// Graphics pipeline for the Elemental theme's Fire stickers, blended
+    /// rather than opaque
+    fire_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for the Elemental theme's billboarded particles
     particle_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for normal visualization
@@ -872,7 +875,7 @@ impl Renderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: wgpu::ShaderStages::VERTEX,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -1504,6 +1507,75 @@ impl Renderer {
             multiview: None,
         });
 
+        // Fire's material accumulates emission against a transmittance, which
+        // needs alpha blending; the opaque elemental pipeline above cannot
+        // provide one, so Fire gets its own over the same layout and module.
+        // Depth is tested but not written, since a blended surface has no
+        // single depth for anything drawn after it to sort against.
+        let fire_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Fire Pipeline"),
+            layout: Some(&classic_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &elemental_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &elemental_shader,
+                entry_point: Some("fs_fire"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    // Premultiplied: `fs_fire` returns emission already
+                    // scaled by its own coverage, so the source is added
+                    // whole and only the destination is attenuated.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
         let particle_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Particle Shader"),
             source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
@@ -1891,6 +1963,7 @@ impl Renderer {
             sky_pipeline,
             classic_pipeline,
             elemental_pipeline,
+            fire_pipeline,
             particle_pipeline,
             normal_pipeline,
             depth_pipeline,
@@ -2189,7 +2262,15 @@ impl Renderer {
     /// * `visible_faces` - Per-`face_id` visibility (see `math::visible_faces`);
     ///   faces marked invisible are skipped entirely, issuing no draw call
     ///   and no vertex-shader invocations for their 27 instances.
-    pub(crate) fn render(&self, encoder: &mut CommandEncoder, visible_faces: &[bool; 8]) {
+    /// * `fire_order` - back-to-front instance indices for the Elemental
+    ///   theme's blended Fire pass (see `shader_widget::fire_draw_order`);
+    ///   ignored under any other render mode or theme.
+    pub(crate) fn render(
+        &self,
+        encoder: &mut CommandEncoder,
+        visible_faces: &[bool; 8],
+        fire_order: &[u32],
+    ) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Render Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2276,11 +2357,23 @@ impl Renderer {
             );
         }
 
-        // Particles are drawn last, into the same pass, so the sticker depth
-        // they test against is already written.
         if (self.current_render_mode, self.current_theme)
             == (RenderMode::Standard, Theme::Elemental)
         {
+            // Fire's blended stickers come after the opaque ones, so the
+            // depth they test against is complete, and before the particles,
+            // whose additive blending then glows over them instead of being
+            // overwritten by them.
+            render_pass.set_pipeline(&self.fire_pipeline);
+            for &instance_index in fire_order {
+                let index_start = (instance_index / facets_per_face) * indices_per_face;
+                render_pass.draw_indexed(
+                    index_start..index_start + indices_per_face,
+                    0,
+                    instance_index..instance_index + 1,
+                );
+            }
+
             render_pass.set_pipeline(&self.particle_pipeline);
             for (face_id, visible) in visible_faces.iter().enumerate() {
                 if !visible {
@@ -2578,7 +2671,7 @@ mod tests {
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        renderer.render(&mut encoder, &[true; 8]);
+        renderer.render(&mut encoder, &[true; 8], &[0, 1, 2]);
         renderer.composite(&mut encoder, &target_view);
         queue.submit(Some(encoder.finish()));
     }
