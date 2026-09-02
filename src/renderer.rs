@@ -139,6 +139,11 @@ pub(crate) struct Renderer {
     blur_h_pipeline: wgpu::RenderPipeline,
     blur_v_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
+    /// The composite variant `Theme::Elemental` uses instead, applying an
+    /// ACES tonemap on the way out so the emission its materials write above
+    /// 1.0 keeps its shape rather than clipping flat at the surface format's
+    /// range.
+    composite_tonemapped_pipeline: wgpu::RenderPipeline,
     /// Current rendering mode
     current_render_mode: RenderMode,
     /// Currently selected sticker theme
@@ -1891,45 +1896,54 @@ impl Renderer {
         let blur_h_pipeline = post_process_pipeline("Blur H Pipeline", "fs_blur_h");
         let blur_v_pipeline = post_process_pipeline("Blur V Pipeline", "fs_blur_v");
 
-        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Composite Pipeline"),
-            layout: Some(&composite_pipeline_layout),
-            cache: None,
-            vertex: wgpu::VertexState {
-                module: &post_process_shader,
-                entry_point: Some("vs_fullscreen"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &[],
-                    zero_initialize_workgroup_memory: false,
+        // Both composite variants differ only in their fragment entry point:
+        // one writes the linear sum straight out, the other rolls it through
+        // a tonemapping curve first.
+        let composite_pipeline_variant = |label: &str, entry_point: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&composite_pipeline_layout),
+                cache: None,
+                vertex: wgpu::VertexState {
+                    module: &post_process_shader,
+                    entry_point: Some("vs_fullscreen"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[],
+                        zero_initialize_workgroup_memory: false,
+                    },
                 },
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &post_process_shader,
-                entry_point: Some("fs_composite"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &[],
-                    zero_initialize_workgroup_memory: false,
+                fragment: Some(wgpu::FragmentState {
+                    module: &post_process_shader,
+                    entry_point: Some(entry_point),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[],
+                        zero_initialize_workgroup_memory: false,
+                    },
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
                 },
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+            })
+        };
+
+        let composite_pipeline = composite_pipeline_variant("Composite Pipeline", "fs_composite");
+        let composite_tonemapped_pipeline =
+            composite_pipeline_variant("Tonemapped Composite Pipeline", "fs_composite_tonemapped");
 
         // Load skybox cubemap texture
         let (_skybox_texture, skybox_view, skybox_sampler) =
@@ -1972,6 +1986,7 @@ impl Renderer {
             blur_h_pipeline,
             blur_v_pipeline,
             composite_pipeline,
+            composite_tonemapped_pipeline,
             current_render_mode: ui_controls.render_mode,
             current_theme: ui_controls.theme,
             vertex_buffer,
@@ -2391,11 +2406,14 @@ impl Renderer {
 
     /// Blits `scene_view` into `target`, within `self.bounds`. Under
     /// `Theme::Elemental` this first runs a bright-pass and a two-pass
-    /// separable blur so bloom is added in; otherwise the bloom input is
-    /// cleared to black rather than sampled stale. Debug AABBs are drawn
-    /// afterward, directly onto `target`, so they're excluded from bloom.
+    /// separable blur so bloom is added in, and tonemaps on the way out;
+    /// otherwise the bloom input is cleared to black rather than sampled
+    /// stale and the scene is written through unchanged. Debug AABBs are
+    /// drawn afterward, directly onto `target`, so they're excluded from
+    /// bloom.
     pub(crate) fn composite(&self, encoder: &mut CommandEncoder, target: &TextureView) {
-        if self.current_theme == Theme::Elemental {
+        let elemental = self.current_theme == Theme::Elemental;
+        if elemental {
             draw_fullscreen_pass(
                 encoder,
                 "Bright Pass",
@@ -2424,10 +2442,15 @@ impl Renderer {
             clear_texture(encoder, "Clear Bloom", &self.bloom_view_a);
         }
 
+        let composite_pipeline = if elemental {
+            &self.composite_tonemapped_pipeline
+        } else {
+            &self.composite_pipeline
+        };
         draw_fullscreen_pass(
             encoder,
             "Composite Pass",
-            &self.composite_pipeline,
+            composite_pipeline,
             &self.composite_bind_group,
             target,
             Some(self.bounds),

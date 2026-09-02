@@ -91,13 +91,43 @@ var bloom_texture: texture_2d<f32>;
 @group(0) @binding(2)
 var composite_sampler: sampler;
 
-@fragment
-fn fs_composite(in: FullscreenOutput) -> @location(0) vec4<f32> {
+// The scene plus its bloom, still in the unbounded linear range the HDR
+// scene target holds them in.
+fn composite_color(clip_position: vec4<f32>) -> vec3<f32> {
     let dims = vec2<f32>(textureDimensions(scene_texture));
-    let uv = in.clip_position.xy / dims;
+    let uv = clip_position.xy / dims;
     let scene = textureSample(scene_texture, composite_sampler, uv).rgb;
     // Bilinear-sampled from the half-res bloom texture, upsampling it back
     // to scene resolution for free.
     let bloom = textureSample(bloom_texture, composite_sampler, uv).rgb;
-    return vec4<f32>(scene + bloom, 1.0);
+    return scene + bloom;
+}
+
+@fragment
+fn fs_composite(in: FullscreenOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(composite_color(in.clip_position), 1.0);
+}
+
+// Narkowicz's curve fit to the ACES filmic tonemap: maps the whole positive
+// range into 0..1, rolling highlights off along a shoulder rather than
+// clipping them flat where the surface format's range ends.
+fn aces_tonemap(color: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp(
+        (color * (a * color + b)) / (color * (c * color + d) + e),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+}
+
+// The composite a theme whose materials write emission above 1.0 needs: the
+// detail they put up there survives as shape instead of one flat clipped
+// patch.
+@fragment
+fn fs_composite_tonemapped(in: FullscreenOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(aces_tonemap(composite_color(in.clip_position)), 1.0);
 }
