@@ -206,6 +206,46 @@ pub(crate) fn transform_sticker_vertices_to_3d(
     world_vertices
 }
 
+/// Where one 4D point of a sticker's own face lands in world space, following
+/// the exact path `math4d.wgsl`'s `compute_sticker_anchor` places a sticker's
+/// center along: rotate, add the depth-preserving push along the face normal,
+/// apply the single perspective divide, then push outward in 3D by
+/// `gap_distance`.
+///
+/// The one divide is the point. It is not linear, so projecting a position's
+/// parts separately and summing the results lands somewhere else entirely -
+/// and its denominator, `viewer_distance - w` of the *whole* rotated point,
+/// is what spreads a face's cells along the view axis and makes them differ
+/// so much in size.
+///
+/// `face_normal_4d` is the instance's own current normal rather than its
+/// static `FACE_CENTERS` entry, so the result stays correct while a move
+/// animation sweeps a facet toward a different tesseract cell.
+///
+/// # Arguments
+/// * `point_4d` - a 4D point on the sticker's face, typically an instance's
+///   `position_4d`
+/// * `face_normal_4d` - the sticker's outward 4D face normal
+/// * `rotation_4d` - 4D rotation matrix
+/// * `gap_distance` - 3D distance to push outward after projection
+/// * `gap_distance_4d` - slider value (1.0 = no push), see `depth_preserving_push`
+/// * `viewer_distance` - Distance of 4D viewer from W=0 plane
+pub(crate) fn project_face_point(
+    point_4d: Vector4<f32>,
+    face_normal_4d: Vector4<f32>,
+    rotation_4d: &Matrix4<f32>,
+    gap_distance: f32,
+    gap_distance_4d: f32,
+    viewer_distance: f32,
+) -> Point3<f32> {
+    let rotated = rotation_4d * point_4d
+        + depth_preserving_push(face_normal_4d, rotation_4d, gap_distance_4d - 1.0);
+    let scale = viewer_distance / (viewer_distance - rotated.w);
+
+    Point3::new(rotated.x * scale, rotated.y * scale, rotated.z * scale)
+        + face_push_offset_3d(face_normal_4d, rotation_4d, viewer_distance) * gap_distance
+}
+
 pub(crate) fn project_cube_point(
     local_vertex: Vector3<f32>,
     center_vertex: Vector4<f32>,

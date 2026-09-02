@@ -5,6 +5,7 @@
 //! where the shader widget manages its own state independently.
 
 use std::cell::Cell;
+use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,8 +22,8 @@ use crate::geometry::{
 };
 use crate::math::{
     GRID_EXTENT, VIEWER_DISTANCE, compose_so4, create_4d_plane_rotation, decompose_so4,
-    depth_preserving_push, face_push_offset_3d, process_4d_rotation, project_4d_to_3d,
-    project_cube_point, quat_slerp_exact, shortest_arc_plane, visible_faces,
+    process_4d_rotation, project_cube_point, project_face_point, quat_slerp_exact,
+    shortest_arc_plane, visible_faces,
 };
 use crate::moves::{base_angle, clockwise_sign, rotate_local_position};
 use crate::piece::{
@@ -269,58 +270,161 @@ pub(crate) struct UiControls {
     pub(crate) theme: Theme,
 }
 
-/// The position one fire sticker is sorted by: its face's center placed
-/// exactly where the renderer puts it, displaced by the sticker's own lattice
-/// offset within that face, projected as if the face sat at the 4D origin.
-///
-/// The in-face term is what keeps the key from collapsing. Subtracting
-/// `face_normal_4d` strips the face's `±1` along its fixed axis, leaving a
-/// small offset centered on the origin, so its perspective divide stays
-/// well-conditioned however flat a 4D rotation has squashed the real face -
-/// where the 27 rendered positions converge on each other and any quantity
-/// measured from them turns into a near-tie.
-///
-/// The face term carries both gap pushes, because they are what separate the
-/// eight faces on screen: each goes along its own face's outward normal, so
-/// they move two faces' *relative* depth by far more than separates two
-/// stickers meeting near the puzzle's center.
-///
-/// Both fields come from the instance rather than the static tables, so the
-/// result stays right while a move animation sweeps a facet toward a
-/// different cell.
-fn fire_sort_position(
-    instance: &StickerInstance,
-    rotation_4d: &Matrix4<f32>,
-    face_gap: f32,
-    face_gap_4d: f32,
-    viewer_distance: f32,
-) -> Point3<f32> {
-    let face_normal_4d = Vector4::from(instance.face_normal_4d);
-    let in_face_offset = Vector4::from(instance.position_4d) - face_normal_4d;
+/// Where one free axis of a face divides its 3 cells, in the units
+/// `position_4d` is expressed in: cells sit at `-GRID_EXTENT`, `0` and
+/// `+GRID_EXTENT`, so the two boundaries between them fall halfway.
+const SLAB_BOUNDARY: f32 = GRID_EXTENT / 2.0;
 
-    // `project_4d_to_3d` rotates its own argument, so the divide on the
-    // already-pushed center is inlined here instead.
-    let rotated = rotation_4d * face_normal_4d
-        + depth_preserving_push(face_normal_4d, rotation_4d, face_gap_4d - 1.0);
-    let scale = viewer_distance / (viewer_distance - rotated.w);
-    let face_center = Point3::new(rotated.x * scale, rotated.y * scale, rotated.z * scale)
-        + face_push_offset_3d(face_normal_4d, rotation_4d, viewer_distance) * face_gap;
+/// The 6 planes that divide one face's cells from each other - two per free
+/// axis - each paired with which side of it the camera is on.
+///
+/// These are genuine planes. `project_4d_to_3d` is central projection from
+/// the 4D viewer onto the `w = 0` hyperplane, which carries a 2-flat `F` to
+/// `span(eye, F)` intersected with that hyperplane: a plane, so long as the
+/// viewer is not on `F` - and it never is, since a point of the puzzle
+/// satisfies `|R*p| <= sqrt(1 + 3 * GRID_EXTENT^2)`, comfortably inside
+/// `viewer_distance`. Both pushes preserve it too: the 4D one translates the
+/// face's whole 3-flat before the divide, the 3D one translates its image
+/// after.
+///
+/// A boundary whose image degenerates - the three sample points turning
+/// collinear as a 4D rotation squashes the face toward a plane - is dropped
+/// rather than trusted, leaving the cells it would have separated tied.
+struct FaceSlabs {
+    /// Origin, normal, and the sign of the camera's side, per boundary.
+    planes: Vec<(Point3<f32>, Vector3<f32>, f32)>,
+}
 
-    face_center + project_4d_to_3d(in_face_offset, rotation_4d, viewer_distance).coords
+impl FaceSlabs {
+    fn new(
+        face_id: usize,
+        rotation_4d: &Matrix4<f32>,
+        camera_eye: Point3<f32>,
+        face_gap: f32,
+        face_gap_4d: f32,
+        viewer_distance: f32,
+    ) -> Self {
+        let face_normal_4d = FACE_CENTERS[face_id];
+        let free_axes: Vec<usize> = (0..4).filter(|&axis| axis != FIXED_DIMS[face_id]).collect();
+        let mut planes = Vec::with_capacity(6);
+
+        for (i, &axis) in free_axes.iter().enumerate() {
+            let spanning = [free_axes[(i + 1) % 3], free_axes[(i + 2) % 3]];
+
+            for boundary in [-SLAB_BOUNDARY, SLAB_BOUNDARY] {
+                // Three points spanning the boundary 2-flat, placed through
+                // the same path the renderer places a sticker through.
+                let sample = |offsets: [f32; 2]| {
+                    let mut point = face_normal_4d;
+                    point[axis] = boundary;
+                    point[spanning[0]] = offsets[0];
+                    point[spanning[1]] = offsets[1];
+                    project_face_point(
+                        point,
+                        face_normal_4d,
+                        rotation_4d,
+                        face_gap,
+                        face_gap_4d,
+                        viewer_distance,
+                    )
+                };
+
+                let origin = sample([0.0, 0.0]);
+                let normal = (sample([GRID_EXTENT, 0.0]) - origin)
+                    .cross(&(sample([0.0, GRID_EXTENT]) - origin));
+                if normal.norm() < f32::EPSILON {
+                    continue;
+                }
+
+                let eye_side = (camera_eye - origin).dot(&normal);
+                if eye_side == 0.0 {
+                    continue;
+                }
+                planes.push((origin, normal, eye_side.signum()));
+            }
+        }
+
+        Self { planes }
+    }
+
+    /// How many of the boundaries `center` shares a side with the camera.
+    /// Higher means nearer the camera, so this ranks the face's own cells
+    /// exactly: any two are separated by one of these planes, and the one on
+    /// the camera's side of it is in front.
+    fn score(&self, center: Point3<f32>) -> usize {
+        self.planes
+            .iter()
+            .filter(|(origin, normal, eye_side)| {
+                (center - origin).dot(normal).signum() == *eye_side
+            })
+            .count()
+    }
+}
+
+/// One fire sticker as the draw order sees it.
+struct FireSticker {
+    instance_index: u32,
+    face_id: usize,
+    /// Depth along the camera's view axis of the sticker's rendered center.
+    depth: f32,
+    /// Its `FaceSlabs` score, or `None` while a move animation has left the
+    /// face's lattice no longer axis-aligned within its own 3-flat.
+    slab_score: Option<usize>,
+}
+
+impl FireSticker {
+    /// Whether this sticker must be drawn before `other` - that is, whether
+    /// it is behind it.
+    ///
+    /// Within one face the slab score decides, and decides exactly. Across
+    /// faces there is no shared set of separating planes to appeal to (a
+    /// tesseract's separating hyperplane does not project to a separating
+    /// plane, since a 3-flat maps onto all of 3-space), so depth decides,
+    /// which is right for all but a small fraction of pairs.
+    fn is_behind(&self, other: &Self) -> Option<Ordering> {
+        let ordering = match (
+            self.face_id == other.face_id,
+            self.slab_score,
+            other.slab_score,
+        ) {
+            (true, Some(own), Some(theirs)) => own.cmp(&theirs).reverse(),
+            _ => self.depth.total_cmp(&other.depth),
+        };
+
+        match ordering {
+            Ordering::Equal => None,
+            other => Some(other),
+        }
+    }
 }
 
 /// The order Fire's stickers are drawn in under `Theme::Elemental`: every
 /// instance of `ELEMENTAL_FIRE_KIND` on a visible face, farthest first.
 ///
 /// Fire draws blended and writes no depth, so where two of its balls overlap
-/// on screen the result depends on the order they are drawn in. Stickers are
-/// ranked by their `fire_sort_position`'s depth along the camera's view axis,
-/// not by its distance from the eye: distance ranks a laterally-offset ball
-/// behind one dead ahead at the same depth, and two balls a lattice cell
-/// apart still overlap on screen, so that misranking is reachable and swaps
-/// as the camera orbits.
+/// on screen the result depends on the order they are drawn in. Two criteria
+/// decide that order, because no single number can:
 ///
-/// At most `instances.len() / 8` stickers are sorted, so this runs on the CPU
+/// - **Within a face**, `FaceSlabs` gives an exact answer: the cells of a
+///   face are separated from each other by planes, and the one on the
+///   camera's side of the plane between them is in front.
+/// - **Across faces**, the sticker's rendered center's depth along the view
+///   axis. The center comes from `math::project_face_point`, which follows
+///   the same single perspective divide `compute_sticker_anchor` places the
+///   sticker with - projecting a position's parts separately and summing them
+///   lands somewhere else, since that divide is not linear. Depth along the
+///   view axis rather than distance from the eye, since distance ranks a
+///   laterally-offset ball behind one dead ahead at the same depth.
+///
+/// The two disagree about what a comparison even means, so they cannot be
+/// folded into one sort key. They are combined instead by topologically
+/// sorting the "is behind" relation they induce, taking the farthest of the
+/// currently-unblocked stickers at each step so the result stays
+/// deterministic and close to depth order. Should the relation ever contain a
+/// cycle, the stickers caught in it fall back to depth order rather than
+/// being dropped.
+///
+/// At most `instances.len() / 8` stickers take part, so this runs on the CPU
 /// each frame.
 ///
 /// # Arguments
@@ -328,14 +432,19 @@ fn fire_sort_position(
 /// * `visible_faces` - per-`face_id` visibility (see `math::visible_faces`)
 /// * `rotation_4d` - 4D rotation matrix
 /// * `camera` - the 3D camera, for its eye point and view axis
+/// * `lattice_is_aligned` - false while a move animation is sweeping a slab,
+///   which leaves that face's cells no longer axis-aligned within its own
+///   3-flat and so invalidates `FaceSlabs`; depth alone is used instead
 /// * `face_gap`/`face_gap_4d`/`viewer_distance` - the same placement
-///   parameters the vertex shader is given, so the face centers land where
-///   the faces actually render
+///   parameters the vertex shader is given, so the centers and the planes
+///   land where the stickers actually render
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fire_draw_order(
     instances: &[StickerInstance],
     visible_faces: &[bool; 8],
     rotation_4d: &Matrix4<f32>,
     camera: &Camera,
+    lattice_is_aligned: bool,
     face_gap: f32,
     face_gap_4d: f32,
     viewer_distance: f32,
@@ -347,26 +456,99 @@ pub(crate) fn fire_draw_order(
     let forward = (camera.target - camera.eye).normalize();
     let facets_per_face = instances.len() / 8;
 
-    let mut order: Vec<(u32, f32)> = instances
+    // One set of planes per face, shared by all of its stickers.
+    let slabs: Vec<Option<FaceSlabs>> = (0..8)
+        .map(|face_id| {
+            (lattice_is_aligned && visible_faces[face_id]).then(|| {
+                FaceSlabs::new(
+                    face_id,
+                    rotation_4d,
+                    camera.eye,
+                    face_gap,
+                    face_gap_4d,
+                    viewer_distance,
+                )
+            })
+        })
+        .collect();
+
+    let stickers: Vec<FireSticker> = instances
         .iter()
         .enumerate()
         .filter(|(index, instance)| {
             instance.kind == ELEMENTAL_FIRE_KIND && visible_faces[index / facets_per_face]
         })
         .map(|(index, instance)| {
-            let position = fire_sort_position(
-                instance,
+            let face_id = index / facets_per_face;
+            let center = project_face_point(
+                Vector4::from(instance.position_4d),
+                Vector4::from(instance.face_normal_4d),
                 rotation_4d,
                 face_gap,
                 face_gap_4d,
                 viewer_distance,
             );
-            (index as u32, (position - camera.eye).dot(&forward))
+
+            FireSticker {
+                instance_index: index as u32,
+                face_id,
+                depth: (center - camera.eye).dot(&forward),
+                slab_score: slabs[face_id].as_ref().map(|slabs| slabs.score(center)),
+            }
         })
         .collect();
 
-    order.sort_by(|(_, a), (_, b)| b.total_cmp(a));
-    order.into_iter().map(|(index, _)| index).collect()
+    topological_draw_order(&stickers)
+}
+
+/// Linearizes the "is behind" relation over `stickers` into a draw order,
+/// farthest first. Ties and unrelated pairs are broken by depth, so the
+/// result is deterministic; a cycle - which the relation should not contain,
+/// since the sticker cubes never intersect - degrades to depth order for the
+/// stickers caught in it rather than losing them.
+fn topological_draw_order(stickers: &[FireSticker]) -> Vec<u32> {
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); stickers.len()];
+    let mut blocked_by = vec![0usize; stickers.len()];
+
+    for (i, sticker) in stickers.iter().enumerate() {
+        for (j, other) in stickers.iter().enumerate().skip(i + 1) {
+            let (before, after) = match sticker.is_behind(other) {
+                Some(Ordering::Greater) => (i, j),
+                Some(Ordering::Less) => (j, i),
+                _ => continue,
+            };
+            successors[before].push(after);
+            blocked_by[after] += 1;
+        }
+    }
+
+    let mut order = Vec::with_capacity(stickers.len());
+    let mut drawn = vec![false; stickers.len()];
+
+    while order.len() < stickers.len() {
+        let farthest = |candidates: &mut dyn Iterator<Item = usize>| {
+            candidates.max_by(|&a, &b| stickers[a].depth.total_cmp(&stickers[b].depth))
+        };
+
+        // The farthest sticker nothing is still waiting on. Only once none is
+        // unblocked - which takes a cycle, and the relation should have none,
+        // since the sticker cubes never intersect - does the farthest
+        // remaining sticker go next instead, to break it.
+        let next = farthest(&mut (0..stickers.len()).filter(|&i| !drawn[i] && blocked_by[i] == 0))
+            .or_else(|| farthest(&mut (0..stickers.len()).filter(|&i| !drawn[i])));
+
+        let Some(next) = next else {
+            break;
+        };
+
+        drawn[next] = true;
+        order.push(stickers[next].instance_index);
+        for &successor in &successors[next] {
+            blocked_by[successor] = blocked_by[successor].saturating_sub(1);
+        }
+    }
+
+    order
 }
 
 fn scale_bounds(bounds: &Rectangle, scale: f32) -> Rectangle {
@@ -908,6 +1090,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                     &face_visibility,
                     &state.rotation_4d,
                     &state.camera,
+                    state.animating_move.is_none(),
                     face_gap,
                     face_gap_4d,
                     self.viewer_distance,
@@ -2573,8 +2756,11 @@ mod tests {
 #[cfg(test)]
 mod clockwise_sign_tests {
     use super::*;
+    use crate::geometry::FACE_CENTERS;
     use crate::math::project_4d_to_3d;
     use crate::moves::clockwise_sign;
+    use nalgebra::Point3;
+    use std::collections::HashMap;
 
     /// For every actionable facet, `moves::clockwise_sign` must agree with
     /// an oracle built independently of the cofactor formula it uses
@@ -2673,32 +2859,30 @@ mod clockwise_sign_tests {
             visible,
             rotation_4d,
             camera,
+            true,
             SECONDARY_FACE_GAP,
             SECONDARY_FACE_GAP_4D,
             VIEWER_DISTANCE,
         )
     }
 
-    /// One sticker's depth along the camera's view axis, rebuilt from the
-    /// face and in-face terms directly rather than by calling back into
-    /// `fire_sort_position`.
-    fn sort_depth(instance: &StickerInstance, camera: &Camera, rotation_4d: &Matrix4<f32>) -> f32 {
-        let face_normal_4d = Vector4::from(instance.face_normal_4d);
-
-        let rotated = rotation_4d * face_normal_4d
-            + depth_preserving_push(face_normal_4d, rotation_4d, SECONDARY_FACE_GAP_4D - 1.0);
-        let scale = VIEWER_DISTANCE / (VIEWER_DISTANCE - rotated.w);
-        let face = Point3::new(rotated.x * scale, rotated.y * scale, rotated.z * scale)
-            + face_push_offset_3d(face_normal_4d, rotation_4d, VIEWER_DISTANCE)
-                * SECONDARY_FACE_GAP;
-
-        let in_face = project_4d_to_3d(
-            Vector4::from(instance.position_4d) - face_normal_4d,
+    /// Places a 4D point of `face_id` in world space the way the renderer
+    /// does, at the fixture's slider values.
+    fn place(point_4d: Vector4<f32>, face_id: usize, rotation_4d: &Matrix4<f32>) -> Point3<f32> {
+        project_face_point(
+            point_4d,
+            FACE_CENTERS[face_id],
             rotation_4d,
+            SECONDARY_FACE_GAP,
+            SECONDARY_FACE_GAP_4D,
             VIEWER_DISTANCE,
-        );
+        )
+    }
 
-        ((face + in_face.coords) - camera.eye).dot(&(camera.target - camera.eye).normalize())
+    /// Which side of the plane through `a`, `b` and `c` the point `p` lies on,
+    /// as a signed volume. Zero means coplanar.
+    fn side_of_plane(p: Point3<f32>, a: Point3<f32>, b: Point3<f32>, c: Point3<f32>) -> f32 {
+        (p - a).dot(&(b - a).cross(&(c - a)))
     }
 
     #[test]
@@ -2723,22 +2907,138 @@ mod clockwise_sign_tests {
         assert_eq!(sorted, expected);
     }
 
+    /// Two cells of one face that neighbour each other along a single free
+    /// axis are separated by the lattice slab boundary between them, and under
+    /// the 4D projection that boundary is a genuine plane: restricted to a
+    /// face's own 3-flat, projection from the 4D viewer is a projectivity -
+    /// the flat never approaches the `viewer_distance - w = 0` singularity,
+    /// since a point of the puzzle has `|R*p| <= sqrt(1 + 3 * GRID_EXTENT^2)`,
+    /// well under `VIEWER_DISTANCE` - and a projectivity carries 2-flats to
+    /// planes. Both pushes preserve that: the 4D one translates the flat
+    /// before the divide, the 3D one translates the whole face after it.
+    ///
+    /// So whichever of the two cells lies on the camera's side of that plane
+    /// is in front of the other and must be drawn later. This asserts that
+    /// geometry rather than the ranking `fire_draw_order` happens to use, so
+    /// unlike a test that recomputes the key it can actually catch a wrong
+    /// one.
     #[test]
-    fn fire_order_is_sorted_back_to_front() {
-        let (instances, camera, rotation_4d) = fire_order_fixture();
-        let drawn = fire_order_for(&instances, &camera, &rotation_4d, &[true; 8]);
+    fn fire_order_respects_separating_planes() {
+        let (instances, base_camera, base_rotation) = fire_order_fixture();
 
-        let distances: Vec<f32> = drawn
+        // One orientation proves very little: a key can satisfy every
+        // separating plane from one viewpoint and invert pairs from the next.
+        // Sweep a few 4D rotations against a ring of camera azimuths.
+        for (plane_a, plane_b) in [(0, 3), (1, 3), (0, 1), (2, 3)] {
+            for turn in 0..4 {
+                let mut axis_a = Vector4::zeros();
+                let mut axis_b = Vector4::zeros();
+                axis_a[plane_a] = 1.0;
+                axis_b[plane_b] = 1.0;
+                let rotation_4d = create_4d_plane_rotation(
+                    axis_a,
+                    axis_b,
+                    std::f32::consts::FRAC_PI_2 * 0.37 * turn as f32,
+                ) * base_rotation;
+
+                for azimuth in 0..6 {
+                    let angle = std::f32::consts::TAU * azimuth as f32 / 6.0;
+                    let radius = (base_camera.eye - base_camera.target).norm();
+                    let mut camera = base_camera.clone();
+                    camera.eye = base_camera.target
+                        + Vector3::new(radius * angle.cos(), radius * 0.4, radius * angle.sin());
+
+                    assert_separating_planes_respected(&instances, &camera, &rotation_4d);
+                }
+            }
+        }
+    }
+
+    fn assert_separating_planes_respected(
+        instances: &[StickerInstance],
+        camera: &Camera,
+        rotation_4d: &Matrix4<f32>,
+    ) {
+        let drawn = fire_order_for(instances, camera, rotation_4d, &[true; 8]);
+
+        let rank: HashMap<u32, usize> = drawn
             .iter()
-            .map(|&index| sort_depth(&instances[index as usize], &camera, &rotation_4d))
+            .enumerate()
+            .map(|(rank, &index)| (index, rank))
             .collect();
 
-        for pair in distances.windows(2) {
-            assert!(
-                pair[0] >= pair[1],
-                "expected non-increasing sort distance, got {pair:?}"
-            );
+        let facets_per_face = instances.len() / 8;
+        let mut checked = 0;
+
+        for (&a_index, &a_rank) in &rank {
+            for (&b_index, &b_rank) in &rank {
+                let face_id = a_index as usize / facets_per_face;
+                if b_index as usize / facets_per_face != face_id {
+                    continue;
+                }
+
+                let a_position = Vector4::from(instances[a_index as usize].position_4d);
+                let b_position = Vector4::from(instances[b_index as usize].position_4d);
+
+                // Neighbours along exactly one free axis, one lattice step
+                // apart, so exactly one boundary separates them.
+                let free_axes: Vec<usize> =
+                    (0..4).filter(|&axis| axis != FIXED_DIMS[face_id]).collect();
+                let differing: Vec<usize> = free_axes
+                    .iter()
+                    .copied()
+                    .filter(|&axis| a_position[axis] != b_position[axis])
+                    .collect();
+                let [axis] = differing[..] else {
+                    continue;
+                };
+                if (a_position[axis] - b_position[axis]).abs() > GRID_EXTENT * 1.5 {
+                    continue;
+                }
+
+                // Three points spanning the boundary 2-flat: fixed at the
+                // midpoint along `axis`, swept along the other two free axes.
+                let spanning: Vec<usize> = free_axes
+                    .iter()
+                    .copied()
+                    .filter(|&other| other != axis)
+                    .collect();
+                let boundary = (a_position[axis] + b_position[axis]) / 2.0;
+                let corner = |offsets: [f32; 2]| {
+                    let mut point = a_position;
+                    point[axis] = boundary;
+                    point[spanning[0]] = offsets[0];
+                    point[spanning[1]] = offsets[1];
+                    place(point, face_id, rotation_4d)
+                };
+                let (p, q, r) = (corner([0.0, 0.0]), corner([1.0, 0.0]), corner([0.0, 1.0]));
+
+                let eye_side = side_of_plane(camera.eye, p, q, r);
+                let a_side = side_of_plane(place(a_position, face_id, rotation_4d), p, q, r);
+                let b_side = side_of_plane(place(b_position, face_id, rotation_4d), p, q, r);
+
+                // The plane has to actually separate the two cells, and the
+                // camera has to be off it, for the comparison to mean
+                // anything. Only assert for the cell facing the camera.
+                if a_side * b_side >= 0.0 || eye_side == 0.0 || a_side.signum() != eye_side.signum()
+                {
+                    continue;
+                }
+
+                checked += 1;
+                assert!(
+                    a_rank > b_rank,
+                    "instance {a_index} is on the camera's side of the boundary separating it \
+                     from {b_index} on face {face_id}, so it is in front and must be drawn \
+                     later, but its rank is {a_rank} against {b_rank}"
+                );
+            }
         }
+
+        assert!(
+            checked > 0,
+            "the fixture produced no separated neighbour pairs to check"
+        );
     }
 
     #[test]
