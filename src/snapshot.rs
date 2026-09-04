@@ -18,10 +18,6 @@ use crate::theme::Theme;
 /// Everything needed to reproduce one rendered view: the puzzle arrangement,
 /// the 4D rotation, the 3D camera (including zoom, via `camera_controller`),
 /// and every render-affecting slider/toggle.
-///
-/// Not yet constructed outside tests - the Save Snapshot debug feature that
-/// builds one from live state lands in a follow-up commit.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ViewSnapshot {
     pub(crate) puzzle: Hypercube,
@@ -40,7 +36,7 @@ pub(crate) struct ViewSnapshot {
 }
 
 impl ViewSnapshot {
-    #[allow(dead_code, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn capture(
         puzzle: Hypercube,
         rotation_4d: Matrix4<f32>,
@@ -78,7 +74,6 @@ impl ViewSnapshot {
     }
 }
 
-#[allow(dead_code)]
 fn snapshot_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "hypercube")
         .map(|dirs| dirs.data_dir().join("snapshots"))
@@ -87,10 +82,6 @@ fn snapshot_dir() -> Option<PathBuf> {
 /// Persists a snapshot's state as `<timestamp>.json` and its pixels as
 /// `<timestamp>.png` alongside it, logging a warning on failure rather than
 /// propagating an error, mirroring `puzzle_state::save`.
-///
-/// Not yet called - wired into `Primitive::prepare` by the Save Snapshot
-/// debug feature in a follow-up commit.
-#[allow(dead_code)]
 pub(crate) fn save(snapshot: &ViewSnapshot, rgba: &[u8], width: u32, height: u32) {
     let Some(dir) = snapshot_dir() else {
         log::warn!("Could not determine data directory; snapshot not saved");

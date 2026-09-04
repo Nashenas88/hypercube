@@ -101,6 +101,121 @@ fn build_particle_instances(
     (expanded, ranges)
 }
 
+/// Copies `texture`'s full extent back to CPU memory as tightly-packed RGBA8
+/// rows, converting from `format`'s BGRA channel order if that's what the
+/// caller's surface turned out to be (the `image` crate, and every caller
+/// here, wants RGBA8).
+///
+/// wgpu requires a texture-to-buffer copy's `bytes_per_row` to be a multiple
+/// of `COPY_BYTES_PER_ROW_ALIGNMENT` (256), which a texture's actual row
+/// width usually isn't, so the buffer holds each row padded out to that
+/// alignment and this strips the padding back out on the way to `pixels`.
+///
+/// Blocks the calling thread on `device.poll` until the copy completes -
+/// fine for the occasional caller `capture_frame` has, wrong for a hot path.
+fn read_texture_rgba8(
+    device: &Device,
+    queue: &Queue,
+    texture: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+) -> Vec<u8> {
+    let size = texture.size();
+    let bytes_per_pixel = format
+        .block_copy_size(None)
+        .expect("readback format must be an uncompressed color format");
+
+    let unpadded_bytes_per_row = size.width * bytes_per_pixel;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+
+    let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Texture Readback Buffer"),
+        size: (padded_bytes_per_row * size.height) as wgpu::BufferAddress,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback_buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(size.height),
+            },
+        },
+        wgpu::Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+
+    let slice = readback_buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device.poll failed while reading back a texture");
+    rx.recv()
+        .expect("map_async callback never fired")
+        .expect("failed to map texture readback buffer");
+
+    let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * size.height) as usize);
+    {
+        let padded = slice.get_mapped_range();
+        for row in 0..size.height {
+            let start = (row * padded_bytes_per_row) as usize;
+            let end = start + unpadded_bytes_per_row as usize;
+            pixels.extend_from_slice(&padded[start..end]);
+        }
+    }
+    readback_buffer.unmap();
+
+    match format {
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                pixel.swap(0, 2);
+            }
+        }
+        wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => {}
+        // Compositors that support HDR/wide-gamut output (confirmed via a
+        // live run: iced_wgpu logged "Selected format: Rgb10a2Unorm") can
+        // negotiate this as the window surface format instead of an 8-bit
+        // one. It's still 4 bytes per pixel, but packed as one little-endian
+        // u32 - Vulkan's `A2B10G10R10_UNORM_PACK32`, per wgpu-hal's format
+        // table - rather than four independent one-byte channels, so it
+        // needs unpacking rather than a byte reorder.
+        wgpu::TextureFormat::Rgb10a2Unorm => {
+            let scale10 = |bits: u32| ((bits * 255 + 511) / 1023) as u8;
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                let packed = u32::from_le_bytes(*pixel);
+                let r = scale10(packed & 0x3ff);
+                let g = scale10((packed >> 10) & 0x3ff);
+                let b = scale10((packed >> 20) & 0x3ff);
+                let a = (((packed >> 30) & 0x3) * 255 / 3) as u8;
+                *pixel = [r, g, b, a];
+            }
+        }
+        other => log::warn!(
+            "read_texture_rgba8: unrecognized 4-byte-per-pixel format {other:?}; \
+             assuming byte order R,G,B,A - colors may come out wrong"
+        ),
+    }
+
+    pixels
+}
+
 /// GPU renderer for the hypercube visualization.
 ///
 /// Manages all graphics resources including buffers, textures, pipelines, and rendering state.
@@ -114,11 +229,6 @@ pub(crate) struct Renderer {
     /// created against it and a wgpu render pipeline's target format is
     /// fixed at creation time. Needed by `capture_frame`, which draws into a
     /// scratch texture of its own rather than iced's surface.
-    ///
-    /// Only read by `capture_frame` today, which itself is only called from
-    /// tests until the Save Snapshot debug feature lands in a follow-up
-    /// change.
-    #[allow(dead_code)]
     target_format: TextureFormat,
     /// Vertex buffer for sky quad
     sky_vertex_buffer: wgpu::Buffer,
@@ -2492,10 +2602,6 @@ impl Renderer {
     /// Blocks the calling thread on `device.poll` until the copy completes.
     /// Fine for an occasional manual capture or a test; wrong for a hot
     /// path.
-    ///
-    /// Only called from tests until the Save Snapshot debug feature lands in
-    /// a follow-up change.
-    #[allow(dead_code)]
     pub(crate) fn capture_frame(
         &mut self,
         device: &Device,
@@ -2504,10 +2610,12 @@ impl Renderer {
         fire_order: &[u32],
     ) -> (Vec<u8>, u32, u32) {
         let size = self.scene_texture.size();
-        let bytes_per_pixel = self
-            .target_format
-            .block_copy_size(None)
-            .expect("capture target format must be an uncompressed color format");
+        log::info!(
+            "Capturing a {}x{} frame at surface format {:?}",
+            size.width,
+            size.height,
+            self.target_format
+        );
 
         let capture_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Frame Capture Target"),
@@ -2524,79 +2632,9 @@ impl Renderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         self.render(&mut encoder, visible_faces, fire_order);
         self.composite(&mut encoder, &capture_view);
-
-        let unpadded_bytes_per_row = size.width * bytes_per_pixel;
-        let padded_bytes_per_row = unpadded_bytes_per_row
-            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-
-        let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Frame Capture Readback"),
-            size: (padded_bytes_per_row * size.height) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &capture_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(size.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: size.width,
-                height: size.height,
-                depth_or_array_layers: 1,
-            },
-        );
-
         queue.submit(Some(encoder.finish()));
 
-        let slice = readback_buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("device.poll failed while capturing a frame");
-        rx.recv()
-            .expect("map_async callback never fired")
-            .expect("failed to map frame capture readback buffer");
-
-        let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * size.height) as usize);
-        {
-            let padded = slice.get_mapped_range();
-            for row in 0..size.height {
-                let start = (row * padded_bytes_per_row) as usize;
-                let end = start + unpadded_bytes_per_row as usize;
-                pixels.extend_from_slice(&padded[start..end]);
-            }
-        }
-        readback_buffer.unmap();
-
-        // The surface format iced hands us on some platforms is BGRA rather
-        // than RGBA; every caller of this method wants RGBA8 bytes (the
-        // `image` crate's convention), so swap here once rather than
-        // burdening every caller with the platform's channel order.
-        if matches!(
-            self.target_format,
-            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-        ) {
-            for pixel in pixels.as_chunks_mut::<4>().0 {
-                pixel.swap(0, 2);
-            }
-        }
-
+        let pixels = read_texture_rgba8(device, queue, &capture_texture, self.target_format);
         (pixels, size.width, size.height)
     }
 
@@ -2834,5 +2872,188 @@ mod tests {
                 .any(|pixel| pixel != &first_pixel),
             "expected more than one distinct color across the frame (skybox alone should vary)"
         );
+    }
+
+    #[test]
+    fn read_texture_rgba8_reconstructs_a_non_aligned_width_pattern() {
+        // 64x64 (the smoke test above) has 64 * 4 = 256 bytes per row, which
+        // is already wgpu's copy alignment - it can't exercise row
+        // unpadding at all. This width's row (100 * 4 = 400 bytes) needs
+        // padding out to 512, so a stride bug in `read_texture_rgba8` would
+        // show up here as a mismatch against the known input pattern.
+        let (width, height) = (100u32, 37u32);
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("no GPU adapter available to run this smoke test");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .expect("failed to request a device for this smoke test");
+
+        let pattern: Vec<u8> = (0..height)
+            .flat_map(|y| {
+                (0..width).flat_map(move |x| [(x % 256) as u8, (y % 256) as u8, 128, 255])
+            })
+            .collect();
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Pattern Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pattern,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let pixels = read_texture_rgba8(&device, &queue, &texture, format);
+
+        assert_eq!(pixels, pattern);
+    }
+
+    #[test]
+    fn read_texture_rgba8_unpacks_rgb10a2() {
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("no GPU adapter available to run this smoke test");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .expect("failed to request a device for this smoke test");
+
+        let format = wgpu::TextureFormat::Rgb10a2Unorm;
+        // Packed as Vulkan's A2B10G10R10_UNORM_PACK32: R in bits 0-9, G in
+        // 10-19, B in 20-29, A in 30-31 of a little-endian u32.
+        let packed: [u32; 6] = [
+            0,                                           // black, transparent
+            0x3ff,                                       // full red
+            0x3ff << 10,                                 // full green
+            0x3ff << 20,                                 // full blue
+            0x3 << 30,                                   // opaque black
+            (2 << 30) | (512 << 20) | (512 << 10) | 512, // mid gray, a=2/3
+        ];
+        let expected: [[u8; 4]; 6] = [
+            [0, 0, 0, 0],
+            [255, 0, 0, 0],
+            [0, 255, 0, 0],
+            [0, 0, 255, 0],
+            [0, 0, 0, 255],
+            [128, 128, 128, 170],
+        ];
+        let bytes: Vec<u8> = packed.iter().flat_map(|p| p.to_le_bytes()).collect();
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Rgb10a2 Pattern Texture"),
+            size: wgpu::Extent3d {
+                width: packed.len() as u32,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(packed.len() as u32 * 4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: packed.len() as u32,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let pixels = read_texture_rgba8(&device, &queue, &texture, format);
+
+        assert_eq!(pixels, expected.concat());
+    }
+
+    /// Diagnostic, not a regression test: dumps a real rendered frame,
+    /// captured at `Rgb10a2Unorm` (confirmed via a live run to be the
+    /// surface format this HDR-capable Linux setup actually negotiates), to
+    /// a PNG for visual inspection - to check `capture_frame`'s handling
+    /// against a real render rather than the synthetic pattern the tests
+    /// above use.
+    #[test]
+    #[ignore]
+    fn dump_capture_at_hdr_surface_format() {
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("no GPU adapter available");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .expect("failed to request a device");
+
+        let format = wgpu::TextureFormat::Rgb10a2Unorm;
+        let mut renderer = Renderer::new(
+            &device,
+            &queue,
+            format,
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 256.0,
+                height: 256.0,
+            },
+            Size::new(256, 256),
+            UiControls {
+                sticker_scale: 0.5,
+                face_gap: 0.1,
+                face_gap_4d: 1.0,
+                viewer_distance: crate::math::VIEWER_DISTANCE,
+                render_mode: RenderMode::Standard,
+                theme: Theme::Elemental,
+            },
+        );
+
+        let (pixels, width, height) =
+            renderer.capture_frame(&device, &queue, &[true; 8], &[0, 1, 2]);
+
+        let path = std::env::var("DUMP_PATH").unwrap_or_else(|_| "/tmp/capture_dump.png".into());
+        image::RgbaImage::from_raw(width, height, pixels)
+            .expect("pixel buffer size mismatch")
+            .save(&path)
+            .expect("failed to write diagnostic dump");
+        eprintln!("wrote {path}");
     }
 }

@@ -32,6 +32,7 @@ use crate::piece::{
 use crate::ray_casting::{calculate_mouse_ray, find_intersected_sticker};
 use crate::renderer::{DebugInstanceWithDistance, Renderer};
 use crate::settings::RotateButton;
+use crate::snapshot::{self, ViewSnapshot};
 use crate::theme::{ELEMENTAL_FIRE_KIND, Theme};
 
 /// An in-progress move's animation: piece state has already been committed
@@ -579,6 +580,9 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) fire_order: Vec<u32>,
     /// Wall-clock seconds since the app started, wrapped modulo 3600.
     pub(crate) elapsed_seconds: f32,
+    /// Set by a `save_snapshot_generation` mismatch; `prepare()` captures
+    /// this frame's pixels and writes both to disk alongside it when present.
+    pub(crate) snapshot_request: Option<ViewSnapshot>,
 }
 
 impl shader::Primitive for HypercubePrimitive {
@@ -612,6 +616,12 @@ impl shader::Primitive for HypercubePrimitive {
         pipeline.update_sticker_instances(queue, &self.sticker_instances, self.sticker_generation);
         pipeline.set_render_mode(self.ui_controls.render_mode);
         pipeline.set_theme(self.ui_controls.theme);
+
+        if let Some(request) = &self.snapshot_request {
+            let (rgba, width, height) =
+                pipeline.capture_frame(device, queue, &self.visible_faces, &self.fire_order);
+            snapshot::save(request, &rgba, width, height);
+        }
     }
 
     fn render(
@@ -684,6 +694,12 @@ pub struct HypercubeShaderState {
     reveal_generation: u64,
     save_generation: u64,
     load_generation: u64,
+    save_snapshot_generation: u64,
+    /// A snapshot request built by `Program::update` on a
+    /// `save_snapshot_generation` mismatch, for `draw()` to attach to the
+    /// next `HypercubePrimitive` - `Cell` because `draw()` only gets
+    /// `&State`, mirroring `HypercubeShaderProgram::pending_load`.
+    pending_snapshot: Cell<Option<ViewSnapshot>>,
 }
 
 impl HypercubeShaderState {
@@ -723,6 +739,7 @@ pub struct HypercubeShaderProgram {
     load_generation: u64,
     /// Puzzle state loaded by a `LoadPuzzle` press, if any.
     pending_load: Cell<Option<Hypercube>>,
+    save_snapshot_generation: u64,
 }
 
 impl HypercubeShaderProgram {
@@ -746,6 +763,7 @@ impl HypercubeShaderProgram {
         save_generation: u64,
         load_generation: u64,
         pending_load: Option<Hypercube>,
+        save_snapshot_generation: u64,
     ) -> Self {
         Self {
             sticker_scale,
@@ -765,6 +783,7 @@ impl HypercubeShaderProgram {
             save_generation,
             load_generation,
             pending_load: Cell::new(pending_load),
+            save_snapshot_generation,
         }
     }
 }
@@ -845,6 +864,25 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 state.set_cached_sticker_instances(instances);
                 return Some(Action::request_redraw());
             }
+        }
+
+        if self.save_snapshot_generation != state.save_snapshot_generation {
+            state.save_snapshot_generation = self.save_snapshot_generation;
+            state.pending_snapshot.set(Some(ViewSnapshot::capture(
+                state.hypercube.clone(),
+                state.rotation_4d,
+                state.camera.clone(),
+                state.camera_controller,
+                state.projection,
+                self.sticker_scale,
+                self.face_gap,
+                self.face_gap_4d,
+                self.viewer_distance,
+                self.render_mode,
+                self.theme,
+                self.aabb_mode,
+            )));
+            return None;
         }
 
         // Once `HypercubeApp` has caught up to a completed reveal/hide
@@ -1099,6 +1137,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 Vec::new()
             },
             elapsed_seconds: state.elapsed_seconds,
+            snapshot_request: state.pending_snapshot.take(),
         }
     }
 }
@@ -1664,6 +1703,8 @@ impl Default for HypercubeShaderState {
             reveal_generation: 0,
             save_generation: 0,
             load_generation: 0,
+            save_snapshot_generation: 0,
+            pending_snapshot: Cell::new(None),
         }
     }
 }
@@ -2081,6 +2122,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -2153,6 +2195,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -2199,6 +2242,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -2239,6 +2283,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -2285,6 +2330,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
@@ -2340,6 +2386,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -2481,6 +2528,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -2530,6 +2578,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         program.update(
@@ -2578,6 +2627,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
         stale_program.update(
             &mut state,
@@ -2606,6 +2656,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
         caught_up_program.update(
             &mut state,
@@ -2657,6 +2708,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let action = program.update(
@@ -2722,6 +2774,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));

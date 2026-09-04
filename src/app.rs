@@ -200,6 +200,7 @@ pub(crate) struct HypercubeApp {
     save_generation: u64,
     load_generation: u64,
     pending_load: Option<Hypercube>,
+    save_snapshot_generation: u64,
 }
 
 /// Number of scripted flourishes still to run, after the one the boot task
@@ -259,6 +260,9 @@ pub(crate) enum Message {
     SavePuzzle,
     PuzzleReadyToSave(Hypercube),
     LoadPuzzle,
+    /// Debug-only: captures the current frame and full view state to a
+    /// timestamped file pair on disk (see `snapshot.rs`).
+    SaveSnapshot,
     Quit,
     OpenAbout,
     CloseAbout,
@@ -296,6 +300,7 @@ impl HypercubeApp {
             save_generation: 0,
             load_generation: 0,
             pending_load: None,
+            save_snapshot_generation: 0,
         }
     }
 
@@ -457,6 +462,9 @@ impl HypercubeApp {
             Message::PuzzleReadyToSave(hypercube) => {
                 puzzle_state::save(&hypercube);
             }
+            Message::SaveSnapshot => {
+                self.save_snapshot_generation = self.save_snapshot_generation.wrapping_add(1);
+            }
             Message::LoadPuzzle => {
                 self.pending_load = puzzle_state::load();
                 self.load_generation = self.load_generation.wrapping_add(1);
@@ -560,7 +568,8 @@ impl HypercubeApp {
                             )
                             .width(250),
                         ),
-                );
+                )
+                .push(Button::new("Save Snapshot").on_press(Message::SaveSnapshot));
         }
 
         let sliders = Column::new()
@@ -705,6 +714,7 @@ impl HypercubeApp {
             self.save_generation,
             self.load_generation,
             self.pending_load.clone(),
+            self.save_snapshot_generation,
         ))
         .width(Length::Fill)
         .height(Length::Fill);
