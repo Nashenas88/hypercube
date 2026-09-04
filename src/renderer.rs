@@ -109,6 +109,17 @@ fn build_particle_instances(
 pub(crate) struct Renderer {
     /// Bounds within the viewport to render to.
     bounds: Rectangle<f32>,
+    /// Format `composite`'s target must be, since the pipelines it draws
+    /// with (`composite_pipeline`/`composite_tonemapped_pipeline`) were
+    /// created against it and a wgpu render pipeline's target format is
+    /// fixed at creation time. Needed by `capture_frame`, which draws into a
+    /// scratch texture of its own rather than iced's surface.
+    ///
+    /// Only read by `capture_frame` today, which itself is only called from
+    /// tests until the Save Snapshot debug feature lands in a follow-up
+    /// change.
+    #[allow(dead_code)]
+    target_format: TextureFormat,
     /// Vertex buffer for sky quad
     sky_vertex_buffer: wgpu::Buffer,
     /// Index buffer for sky quad
@@ -1979,6 +1990,7 @@ impl Renderer {
 
         Self {
             bounds,
+            target_format: format,
             sky_vertex_buffer,
             sky_index_buffer,
             sky_pipeline,
@@ -2464,6 +2476,130 @@ impl Renderer {
         );
     }
 
+    /// Renders one full frame - `render` then `composite`, as
+    /// `HypercubePrimitive::render` does - into a scratch texture of its
+    /// own, then reads the result back to CPU memory as tightly-packed
+    /// RGBA8 rows.
+    ///
+    /// The scratch texture is sized to the full render target (matching
+    /// `scene_texture`/`depth_texture`, not just `self.bounds`), since
+    /// `composite`'s own viewport is a sub-rectangle at `self.bounds`'s
+    /// offset within that larger target - a texture sized to `bounds` alone
+    /// could clip it. wgpu zero-initializes a texture's content on first
+    /// use, so pixels outside `bounds` read back as transparent black rather
+    /// than garbage.
+    ///
+    /// Blocks the calling thread on `device.poll` until the copy completes.
+    /// Fine for an occasional manual capture or a test; wrong for a hot
+    /// path.
+    ///
+    /// Only called from tests until the Save Snapshot debug feature lands in
+    /// a follow-up change.
+    #[allow(dead_code)]
+    pub(crate) fn capture_frame(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        visible_faces: &[bool; 8],
+        fire_order: &[u32],
+    ) -> (Vec<u8>, u32, u32) {
+        let size = self.scene_texture.size();
+        let bytes_per_pixel = self
+            .target_format
+            .block_copy_size(None)
+            .expect("capture target format must be an uncompressed color format");
+
+        let capture_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Frame Capture Target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.target_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let capture_view = capture_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        self.render(&mut encoder, visible_faces, fire_order);
+        self.composite(&mut encoder, &capture_view);
+
+        let unpadded_bytes_per_row = size.width * bytes_per_pixel;
+        let padded_bytes_per_row = unpadded_bytes_per_row
+            .div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+
+        let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Frame Capture Readback"),
+            size: (padded_bytes_per_row * size.height) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &capture_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(size.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: size.width,
+                height: size.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        queue.submit(Some(encoder.finish()));
+
+        let slice = readback_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device.poll failed while capturing a frame");
+        rx.recv()
+            .expect("map_async callback never fired")
+            .expect("failed to map frame capture readback buffer");
+
+        let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * size.height) as usize);
+        {
+            let padded = slice.get_mapped_range();
+            for row in 0..size.height {
+                let start = (row * padded_bytes_per_row) as usize;
+                let end = start + unpadded_bytes_per_row as usize;
+                pixels.extend_from_slice(&padded[start..end]);
+            }
+        }
+        readback_buffer.unmap();
+
+        // The surface format iced hands us on some platforms is BGRA rather
+        // than RGBA; every caller of this method wants RGBA8 bytes (the
+        // `image` crate's convention), so swap here once rather than
+        // burdening every caller with the platform's channel order.
+        if matches!(
+            self.target_format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        ) {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                pixel.swap(0, 2);
+            }
+        }
+
+        (pixels, size.width, size.height)
+    }
+
     /// Renders transparent debug AABB visualization
     ///
     /// # Arguments
@@ -2663,7 +2799,7 @@ mod tests {
                 .expect("failed to request a device for this smoke test");
 
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             &device,
             &queue,
             format,
@@ -2684,25 +2820,19 @@ mod tests {
             },
         );
 
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Smoke Test Target"),
-            size: wgpu::Extent3d {
-                width: 64,
-                height: 64,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let (pixels, width, height) =
+            renderer.capture_frame(&device, &queue, &[true; 8], &[0, 1, 2]);
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        renderer.render(&mut encoder, &[true; 8], &[0, 1, 2]);
-        renderer.composite(&mut encoder, &target_view);
-        queue.submit(Some(encoder.finish()));
+        assert_eq!((width, height), (64, 64));
+        assert_eq!(pixels.len(), (width * height * 4) as usize);
+        let first_pixel: [u8; 4] = pixels[0..4].try_into().unwrap();
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel != &first_pixel),
+            "expected more than one distinct color across the frame (skybox alone should vary)"
+        );
     }
 }
