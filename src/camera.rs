@@ -4,6 +4,7 @@
 //! the hypercube origin and zoom in/out for better viewing angles.
 
 use nalgebra::{Matrix4, Point3, Vector3};
+use serde::{Deserialize, Serialize};
 
 /// Mouse rotation sensitivity for camera controls
 const MOUSE_SENSITIVITY: f32 = 0.5;
@@ -26,7 +27,7 @@ const INITIAL_PITCH: f32 = 15.0;
 /// 3D camera representing the viewer's position and orientation in space.
 ///
 /// Uses a standard look-at camera model with eye position, target point, and up vector.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Camera {
     /// Camera position in 3D space
     pub(crate) eye: Point3<f32>,
@@ -88,6 +89,7 @@ impl Camera {
 ///
 /// Provides mouse-controlled rotation around the target with distance-based zoom.
 /// Uses spherical coordinates (yaw/pitch) for intuitive orbital movement.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct CameraController {
     /// Distance from camera to target point
     pub(crate) distance: f32,
@@ -158,7 +160,7 @@ impl CameraController {
 /// 3D perspective projection parameters for rendering.
 ///
 /// Defines the viewing frustum and field of view for the camera.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct Projection {
     /// Aspect ratio (width/height) of the viewport
     pub(crate) aspect: f32,

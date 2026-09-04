@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use iced::widget::{Button, Checkbox, Column, PickList, Row, Shader, Slider, Space};
 use iced::{Element, Length, Subscription, Task, window};
+use serde::{Deserialize, Serialize};
 
 use crate::animation::{ease, lerp};
 use crate::menu_overlay;
@@ -17,7 +18,7 @@ use crate::shader_widget::{
 use crate::theme::Theme;
 
 /// Rendering modes for visualization
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum RenderMode {
     Standard,
     Normals,
@@ -25,7 +26,7 @@ pub(crate) enum RenderMode {
 }
 
 /// AABB visualization modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum AABBMode {
     None,
     Face,
