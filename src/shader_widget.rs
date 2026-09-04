@@ -269,6 +269,8 @@ pub(crate) struct UiControls {
     pub(crate) viewer_distance: f32,
     pub(crate) render_mode: RenderMode,
     pub(crate) theme: Theme,
+    /// See `Renderer::set_ground_truth_debug_face`.
+    pub(crate) ground_truth_debug_face: Option<u32>,
 }
 
 /// Where one free axis of a face divides its 3 cells, in the units
@@ -397,6 +399,43 @@ impl FireSticker {
             other => Some(other),
         }
     }
+}
+
+/// How long the Fire ground-truth debug inset spends on each face before
+/// cycling to the next, in seconds.
+const GROUND_TRUTH_DEBUG_FACE_CYCLE_SECONDS: f32 = 2.0;
+
+/// Which face_id, if any, the Fire ground-truth debug inset should draw this
+/// frame: `None` when the feature is off, the theme has no Fire pass, or no
+/// instance is currently kind `ELEMENTAL_FIRE_KIND`; otherwise cycles
+/// through every face_id currently holding a Fire sticker in ascending
+/// order, `GROUND_TRUTH_DEBUG_FACE_CYCLE_SECONDS` per face, looping forever.
+/// Driven by `elapsed_seconds` rather than its own timer, since Fire's
+/// continuous animation already forces a redraw every tick under
+/// `Theme::Elemental`.
+fn ground_truth_debug_face(
+    enabled: bool,
+    theme: Theme,
+    instances: &[StickerInstance],
+    elapsed_seconds: f32,
+) -> Option<u32> {
+    if !enabled || theme != Theme::Elemental || instances.is_empty() {
+        return None;
+    }
+
+    let facets_per_face = instances.len() / 8;
+    let fire_faces: Vec<u32> = (0..8u32)
+        .filter(|&face_id| {
+            let start = face_id as usize * facets_per_face;
+            instances[start..start + facets_per_face]
+                .iter()
+                .any(|instance| instance.kind == ELEMENTAL_FIRE_KIND)
+        })
+        .collect();
+
+    let cycle_index = (elapsed_seconds / GROUND_TRUTH_DEBUG_FACE_CYCLE_SECONDS) as usize
+        % fire_faces.len().max(1);
+    fire_faces.get(cycle_index).copied()
 }
 
 /// The order Fire's stickers are drawn in under `Theme::Elemental`: every
@@ -616,6 +655,7 @@ impl shader::Primitive for HypercubePrimitive {
         pipeline.update_sticker_instances(queue, &self.sticker_instances, self.sticker_generation);
         pipeline.set_render_mode(self.ui_controls.render_mode);
         pipeline.set_theme(self.ui_controls.theme);
+        pipeline.set_ground_truth_debug_face(self.ui_controls.ground_truth_debug_face);
 
         if let Some(request) = &self.snapshot_request {
             let (rgba, width, height) =
@@ -728,6 +768,7 @@ pub struct HypercubeShaderProgram {
     render_mode: RenderMode,
     theme: Theme,
     aabb_mode: AABBMode,
+    fire_ground_truth_debug: bool,
     rotate_button: RotateButton,
     animation_duration_ms: u32,
     reset_generation: u64,
@@ -753,6 +794,7 @@ impl HypercubeShaderProgram {
         render_mode: RenderMode,
         theme: Theme,
         aabb_mode: AABBMode,
+        fire_ground_truth_debug: bool,
         rotate_button: RotateButton,
         animation_duration_ms: u32,
         reset_generation: u64,
@@ -773,6 +815,7 @@ impl HypercubeShaderProgram {
             render_mode,
             theme,
             aabb_mode,
+            fire_ground_truth_debug,
             rotate_button,
             animation_duration_ms,
             reset_generation,
@@ -1114,6 +1157,12 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 viewer_distance: self.viewer_distance,
                 render_mode: self.render_mode,
                 theme: self.theme,
+                ground_truth_debug_face: ground_truth_debug_face(
+                    self.fire_ground_truth_debug,
+                    self.theme,
+                    &state.cached_sticker_instances,
+                    state.elapsed_seconds,
+                ),
             },
             cached_indices: state.cached_indices.clone(),
             indices_generation: state.indices_generation,
@@ -2112,6 +2161,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             RotateButton::default(),
             250,
             1,
@@ -2185,6 +2235,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             RotateButton::default(),
             250,
             0,
@@ -2232,6 +2283,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             RotateButton::default(),
             250,
             0,
@@ -2273,6 +2325,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             RotateButton::default(),
             250,
             state.reset_generation,
@@ -2320,6 +2373,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             rotate_button,
             250,
             state.reset_generation,
@@ -2376,6 +2430,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             RotateButton::default(),
             250,
             state.reset_generation,
@@ -2518,6 +2573,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             RotateButton::default(),
             250,
             0,
@@ -2568,6 +2624,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             RotateButton::default(),
             250,
             0,
@@ -2617,6 +2674,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             RotateButton::default(),
             250,
             0,
@@ -2646,6 +2704,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             RotateButton::default(),
             250,
             0,
@@ -2698,6 +2757,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             RotateButton::default(),
             250,
             0,
@@ -2764,6 +2824,7 @@ mod tests {
             RenderMode::Standard,
             Theme::Classic,
             AABBMode::None,
+            false,
             rotate_button,
             250,
             0,
@@ -3111,6 +3172,89 @@ mod clockwise_sign_tests {
         assert!(
             !drawn.is_empty(),
             "hiding one face should not hide every fire sticker"
+        );
+    }
+
+    /// One instance per face_id, kind `ELEMENTAL_FIRE_KIND` on `fire_faces`
+    /// and an arbitrary non-Fire kind everywhere else.
+    fn fire_kind_instances(fire_faces: &[u32]) -> Vec<StickerInstance> {
+        (0..8u32)
+            .map(|face_id| StickerInstance {
+                position_4d: [0.0; 4],
+                basis: [[0.0; 4]; 3],
+                face_normal_4d: [0.0; 4],
+                kind: if fire_faces.contains(&face_id) {
+                    ELEMENTAL_FIRE_KIND
+                } else {
+                    0
+                },
+                _padding: [0; 3],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ground_truth_debug_face_is_none_when_disabled() {
+        let instances = fire_kind_instances(&[3]);
+        assert_eq!(
+            ground_truth_debug_face(false, Theme::Elemental, &instances, 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn ground_truth_debug_face_is_none_under_classic_theme() {
+        let instances = fire_kind_instances(&[3]);
+        assert_eq!(
+            ground_truth_debug_face(true, Theme::Classic, &instances, 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn ground_truth_debug_face_is_none_with_no_fire_stickers() {
+        let instances = fire_kind_instances(&[]);
+        assert_eq!(
+            ground_truth_debug_face(true, Theme::Elemental, &instances, 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn ground_truth_debug_face_cycles_through_fire_faces_in_order() {
+        let instances = fire_kind_instances(&[2, 5, 7]);
+
+        assert_eq!(
+            ground_truth_debug_face(true, Theme::Elemental, &instances, 0.0),
+            Some(2)
+        );
+        assert_eq!(
+            ground_truth_debug_face(
+                true,
+                Theme::Elemental,
+                &instances,
+                GROUND_TRUTH_DEBUG_FACE_CYCLE_SECONDS
+            ),
+            Some(5)
+        );
+        assert_eq!(
+            ground_truth_debug_face(
+                true,
+                Theme::Elemental,
+                &instances,
+                GROUND_TRUTH_DEBUG_FACE_CYCLE_SECONDS * 2.0
+            ),
+            Some(7)
+        );
+        // Wraps back to the first face after the last.
+        assert_eq!(
+            ground_truth_debug_face(
+                true,
+                Theme::Elemental,
+                &instances,
+                GROUND_TRUTH_DEBUG_FACE_CYCLE_SECONDS * 3.0
+            ),
+            Some(2)
         );
     }
 }

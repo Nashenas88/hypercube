@@ -31,6 +31,10 @@ const QUAD_VERTICES: u32 = 6;
 /// render to `target` would.
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// Side length of the Fire ground-truth debug inset, as a fraction of
+/// `bounds`' shorter side.
+const GROUND_TRUTH_DEBUG_INSET_FRACTION: f32 = 0.2;
+
 /// Sticker indices grouped into contiguous `(face_id, kind)` blocks, plus the
 /// sub-range each block occupies.
 ///
@@ -269,6 +273,15 @@ pub(crate) struct Renderer {
     current_render_mode: RenderMode,
     /// Currently selected sticker theme
     current_theme: Theme,
+    /// When set, draws every cell of this `face_id` - not just Fire ones -
+    /// opaque and depth-tested, in a small inset in the corner of the main
+    /// scene, using the exact same live camera/instance/transform data the
+    /// main pass used. Reusing those buffers rather than recomputing
+    /// anything means the inset can never drift from what `fire_order`'s
+    /// `FaceSlabs` actually scored - the same transform decides the
+    /// geometry either way. `shader_widget.rs` cycles this through whichever
+    /// faces currently hold a Fire sticker.
+    current_ground_truth_debug_face: Option<u32>,
     /// Buffer containing cube vertex positions
     vertex_buffer: wgpu::Buffer,
     /// Number of stickers (each generates 36 vertices)
@@ -322,6 +335,11 @@ pub(crate) struct Renderer {
     depth_texture: wgpu::Texture,
     /// Depth texture view for rendering
     depth_view: wgpu::TextureView,
+    /// Dedicated depth buffer for the Fire ground-truth debug inset, kept
+    /// separate from `depth_texture` so clearing it can't disturb the main
+    /// scene's depth values that `render_debug_aabb` reads back afterward.
+    debug_inset_depth_texture: wgpu::Texture,
+    debug_inset_depth_view: wgpu::TextureView,
     /// Offscreen HDR target every pipeline but the final composite renders
     /// into, resized alongside `depth_texture`.
     scene_texture: wgpu::Texture,
@@ -615,6 +633,34 @@ fn load_cross_cubemap(
     Ok((cubemap_texture, view, sampler))
 }
 
+/// Creates one `Depth32Float` depth-stencil attachment, sized to the full
+/// viewport regardless of what fraction of it a pass restricts its viewport
+/// to - a render pass's attachments must all share one size, even when a
+/// `set_viewport` call inside it only touches part of them.
+fn create_depth_texture(
+    device: &Device,
+    label: &str,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 /// Creates one `HDR_FORMAT` render target usable both as a pass's color
 /// attachment and as a later pass's sampled input.
 fn create_hdr_target(
@@ -805,22 +851,23 @@ impl Renderer {
             _padding3: 0.0,
         };
 
-        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Depth Texture"),
-            size: wgpu::Extent3d {
-                width: viewport_size.width,
-                height: viewport_size.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
+        let (depth_texture, depth_view) = create_depth_texture(
+            device,
+            "Depth Texture",
+            viewport_size.width,
+            viewport_size.height,
+        );
 
-        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // A second depth buffer dedicated to the Fire ground-truth debug
+        // inset, so clearing it for that pass can never disturb `depth_view`
+        // - which `render_debug_aabb` reads back after `composite()`, long
+        // after the inset pass has run.
+        let (debug_inset_depth_texture, debug_inset_depth_view) = create_depth_texture(
+            device,
+            "Fire Ground Truth Debug Inset Depth Texture",
+            viewport_size.width,
+            viewport_size.height,
+        );
 
         // Offscreen HDR scene target every pipeline but the final composite
         // renders into, plus a half-res ping-pong pair for the separable
@@ -2118,6 +2165,7 @@ impl Renderer {
             composite_tonemapped_pipeline,
             current_render_mode: ui_controls.render_mode,
             current_theme: ui_controls.theme,
+            current_ground_truth_debug_face: None,
             vertex_buffer,
             face_index_buffer,
             last_indices_generation: None,
@@ -2140,6 +2188,8 @@ impl Renderer {
             debug_aabb_bind_group,
             depth_texture,
             depth_view,
+            debug_inset_depth_texture,
+            debug_inset_depth_view,
             scene_texture,
             scene_view,
             bloom_texture_a,
@@ -2180,25 +2230,14 @@ impl Renderer {
             && (self.depth_texture.size().width != new_size.width
                 || self.depth_texture.size().height != new_size.height)
         {
-            self.depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Depth Texture"),
-                size: wgpu::Extent3d {
-                    width: new_size.width,
-                    height: new_size.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-
-            self.depth_view = self
-                .depth_texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
+            (self.depth_texture, self.depth_view) =
+                create_depth_texture(device, "Depth Texture", new_size.width, new_size.height);
+            (self.debug_inset_depth_texture, self.debug_inset_depth_view) = create_depth_texture(
+                device,
+                "Fire Ground Truth Debug Inset Depth Texture",
+                new_size.width,
+                new_size.height,
+            );
 
             (self.scene_texture, self.scene_view) =
                 create_hdr_target(device, "Scene Texture", new_size.width, new_size.height);
@@ -2258,6 +2297,12 @@ impl Renderer {
     /// Sets the current sticker theme
     pub(crate) fn set_theme(&mut self, theme: Theme) {
         self.current_theme = theme;
+    }
+
+    /// Sets which face_id, if any, the Fire ground-truth debug inset draws
+    /// this frame.
+    pub(crate) fn set_ground_truth_debug_face(&mut self, face_id: Option<u32>) {
+        self.current_ground_truth_debug_face = face_id;
     }
 
     /// Updates the instance buffer using compute shaders for 4D transformations.
@@ -2415,25 +2460,173 @@ impl Renderer {
         visible_faces: &[bool; 8],
         fire_order: &[u32],
     ) {
+        // Scoped so `render_pass` (whose `Drop` ends the wgpu pass) is
+        // finished before `render_ground_truth_debug_inset` opens a second
+        // one on the same encoder below.
+        let (indices_per_face, facets_per_face) = {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.scene_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // No clear needed: the skybox pass right below always
+                        // draws an opaque fullscreen quad over the whole
+                        // viewport first, so every pixel `composite` will later
+                        // read gets fully overwritten regardless of what was in
+                        // `scene_view` before this pass.
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    // TODO new field. validate
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_viewport(
+                self.bounds.x,
+                self.bounds.y,
+                self.bounds.width,
+                self.bounds.height,
+                0.0,
+                1.0,
+            );
+
+            // First render the skybox
+            render_pass.set_pipeline(&self.sky_pipeline);
+            render_pass.set_bind_group(0, &self.skybox_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.sky_vertex_buffer.slice(..));
+            render_pass
+                .set_index_buffer(self.sky_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..6, 0, 0..1);
+
+            // Then render the hypercube
+            let (pipeline, bind_group) = match (self.current_render_mode, self.current_theme) {
+                (RenderMode::Standard, Theme::Classic) => {
+                    (&self.classic_pipeline, &self.main_bind_group)
+                }
+                (RenderMode::Standard, Theme::Elemental) => {
+                    (&self.elemental_pipeline, &self.main_bind_group)
+                }
+                (RenderMode::Normals, _) => (&self.normal_pipeline, &self.normal_bind_group),
+                (RenderMode::Depth, _) => (&self.depth_pipeline, &self.debug_bind_group),
+            };
+            render_pass.set_pipeline(pipeline);
+            render_pass.set_bind_group(0, bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass
+                .set_index_buffer(self.face_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+
+            // One draw per 4D face: `face_index_buffer` holds 8 winding-corrected
+            // 36-index chunks (one per face_id, see `calculate_indices`), and
+            // `FACET_TABLE` (piece.rs) is built in matching face-major blocks of
+            // 27, so chunk N only ever reaches the instances it was computed
+            // for. A single draw over all 288 indices and 216 instances would
+            // feed every chunk to every instance, relying on backface culling to
+            // silently discard the wrong ones (the bug perf_improvements.md #1
+            // describes); slicing per face keeps culling meaningful instead.
+            // Faces `visible_faces` marks invisible skip the draw call entirely,
+            // rather than issuing it and relying on the vertex shader to cull.
+            let indices_per_face = VERTEX_NORMAL_INDICES.len() as u32;
+            let facets_per_face = self.num_stickers as u32 / 8;
+            for face_id in 0..8u32 {
+                if !visible_faces[face_id as usize] {
+                    continue;
+                }
+                let index_start = face_id * indices_per_face;
+                let instance_start = face_id * facets_per_face;
+                render_pass.draw_indexed(
+                    index_start..index_start + indices_per_face,
+                    0,
+                    instance_start..instance_start + facets_per_face,
+                );
+            }
+
+            if (self.current_render_mode, self.current_theme)
+                == (RenderMode::Standard, Theme::Elemental)
+            {
+                // Fire's blended stickers come after the opaque ones, so the
+                // depth they test against is complete, and before the particles,
+                // whose additive blending then glows over them instead of being
+                // overwritten by them.
+                render_pass.set_pipeline(&self.fire_pipeline);
+                for &instance_index in fire_order {
+                    let index_start = (instance_index / facets_per_face) * indices_per_face;
+                    render_pass.draw_indexed(
+                        index_start..index_start + indices_per_face,
+                        0,
+                        instance_index..instance_index + 1,
+                    );
+                }
+
+                render_pass.set_pipeline(&self.particle_pipeline);
+                for (face_id, visible) in visible_faces.iter().enumerate() {
+                    if !visible {
+                        continue;
+                    }
+                    for range in &self.particle_ranges[face_id] {
+                        if range.is_empty() {
+                            continue;
+                        }
+                        render_pass.draw(0..QUAD_VERTICES, range.clone());
+                    }
+                }
+            }
+
+            (indices_per_face, facets_per_face)
+        };
+
+        if let Some(face_id) = self.current_ground_truth_debug_face {
+            self.render_ground_truth_debug_inset(
+                encoder,
+                face_id,
+                indices_per_face,
+                facets_per_face,
+            );
+        }
+    }
+
+    /// Draws every cell of `face_id` - not just Fire ones - opaque and
+    /// depth-tested, restricted to a small square viewport in the corner of
+    /// `scene_view`, regardless of `visible_faces`. Reuses `classic_pipeline`
+    /// and the same live vertex/instance/transform buffers `render` just
+    /// drew with, so the inset can never drift from what `fire_order`'s
+    /// `FaceSlabs` actually scored - the exact same transform decides the
+    /// geometry either way. Loads `scene_view` rather than clearing it, so
+    /// the main scene this pass draws over survives; clears its own
+    /// dedicated `debug_inset_depth_view` rather than `depth_view`, so it
+    /// can't disturb the depth values `render_debug_aabb` reads back after
+    /// `composite()`.
+    fn render_ground_truth_debug_inset(
+        &self,
+        encoder: &mut CommandEncoder,
+        face_id: u32,
+        indices_per_face: u32,
+        facets_per_face: u32,
+    ) {
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Render Pass"),
+            label: Some("Fire Ground Truth Debug Inset"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &self.scene_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    // No clear needed: the skybox pass right below always
-                    // draws an opaque fullscreen quad over the whole
-                    // viewport first, so every pixel `composite` will later
-                    // read gets fully overwritten regardless of what was in
-                    // `scene_view` before this pass.
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-                // TODO new field. validate
                 depth_slice: None,
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth_view,
+                view: &self.debug_inset_depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
@@ -2444,93 +2637,29 @@ impl Renderer {
             occlusion_query_set: None,
         });
 
+        let inset_extent =
+            GROUND_TRUTH_DEBUG_INSET_FRACTION * self.bounds.width.min(self.bounds.height);
         render_pass.set_viewport(
             self.bounds.x,
             self.bounds.y,
-            self.bounds.width,
-            self.bounds.height,
+            inset_extent,
+            inset_extent,
             0.0,
             1.0,
         );
 
-        // First render the skybox
-        render_pass.set_pipeline(&self.sky_pipeline);
-        render_pass.set_bind_group(0, &self.skybox_bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.sky_vertex_buffer.slice(..));
-        render_pass.set_index_buffer(self.sky_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-        render_pass.draw_indexed(0..6, 0, 0..1);
-
-        // Then render the hypercube
-        let (pipeline, bind_group) = match (self.current_render_mode, self.current_theme) {
-            (RenderMode::Standard, Theme::Classic) => {
-                (&self.classic_pipeline, &self.main_bind_group)
-            }
-            (RenderMode::Standard, Theme::Elemental) => {
-                (&self.elemental_pipeline, &self.main_bind_group)
-            }
-            (RenderMode::Normals, _) => (&self.normal_pipeline, &self.normal_bind_group),
-            (RenderMode::Depth, _) => (&self.depth_pipeline, &self.debug_bind_group),
-        };
-        render_pass.set_pipeline(pipeline);
-        render_pass.set_bind_group(0, bind_group, &[]);
+        render_pass.set_pipeline(&self.classic_pipeline);
+        render_pass.set_bind_group(0, &self.main_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.face_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
-        // One draw per 4D face: `face_index_buffer` holds 8 winding-corrected
-        // 36-index chunks (one per face_id, see `calculate_indices`), and
-        // `FACET_TABLE` (piece.rs) is built in matching face-major blocks of
-        // 27, so chunk N only ever reaches the instances it was computed
-        // for. A single draw over all 288 indices and 216 instances would
-        // feed every chunk to every instance, relying on backface culling to
-        // silently discard the wrong ones (the bug perf_improvements.md #1
-        // describes); slicing per face keeps culling meaningful instead.
-        // Faces `visible_faces` marks invisible skip the draw call entirely,
-        // rather than issuing it and relying on the vertex shader to cull.
-        let indices_per_face = VERTEX_NORMAL_INDICES.len() as u32;
-        let facets_per_face = self.num_stickers as u32 / 8;
-        for face_id in 0..8u32 {
-            if !visible_faces[face_id as usize] {
-                continue;
-            }
-            let index_start = face_id * indices_per_face;
-            let instance_start = face_id * facets_per_face;
-            render_pass.draw_indexed(
-                index_start..index_start + indices_per_face,
-                0,
-                instance_start..instance_start + facets_per_face,
-            );
-        }
-
-        if (self.current_render_mode, self.current_theme)
-            == (RenderMode::Standard, Theme::Elemental)
-        {
-            // Fire's blended stickers come after the opaque ones, so the
-            // depth they test against is complete, and before the particles,
-            // whose additive blending then glows over them instead of being
-            // overwritten by them.
-            render_pass.set_pipeline(&self.fire_pipeline);
-            for &instance_index in fire_order {
-                let index_start = (instance_index / facets_per_face) * indices_per_face;
-                render_pass.draw_indexed(
-                    index_start..index_start + indices_per_face,
-                    0,
-                    instance_index..instance_index + 1,
-                );
-            }
-
-            render_pass.set_pipeline(&self.particle_pipeline);
-            for (face_id, visible) in visible_faces.iter().enumerate() {
-                if !visible {
-                    continue;
-                }
-                for range in &self.particle_ranges[face_id] {
-                    if range.is_empty() {
-                        continue;
-                    }
-                    render_pass.draw(0..QUAD_VERTICES, range.clone());
-                }
-            }
-        }
+        let index_start = face_id * indices_per_face;
+        let instance_start = face_id * facets_per_face;
+        render_pass.draw_indexed(
+            index_start..index_start + indices_per_face,
+            0,
+            instance_start..instance_start + facets_per_face,
+        );
     }
 
     /// Blits `scene_view` into `target`, within `self.bounds`. Under
@@ -2717,6 +2846,7 @@ impl shader::Pipeline for Renderer {
                 viewer_distance: crate::math::VIEWER_DISTANCE,
                 render_mode: RenderMode::Standard,
                 theme: Theme::Classic,
+                ground_truth_debug_face: None,
             },
         )
     }
@@ -2859,6 +2989,7 @@ mod tests {
                 viewer_distance: crate::math::VIEWER_DISTANCE,
                 render_mode: RenderMode::Standard,
                 theme: Theme::Elemental,
+                ground_truth_debug_face: None,
             },
         );
 
@@ -3052,6 +3183,7 @@ mod tests {
                 viewer_distance: crate::math::VIEWER_DISTANCE,
                 render_mode: RenderMode::Standard,
                 theme,
+                ground_truth_debug_face: None,
             },
         );
 
@@ -3230,6 +3362,7 @@ mod tests {
                 viewer_distance: crate::math::VIEWER_DISTANCE,
                 render_mode: RenderMode::Standard,
                 theme: Theme::Elemental,
+                ground_truth_debug_face: None,
             },
         );
 

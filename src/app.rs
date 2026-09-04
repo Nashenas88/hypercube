@@ -164,6 +164,11 @@ pub(crate) struct HypercubeApp {
     viewer_distance: f32,
     render_mode: RenderMode,
     aabb_mode: AABBMode,
+    /// Shows a small inset with one face's cells rendered opaque and
+    /// depth-tested (cycling through whichever faces hold a Fire sticker),
+    /// to eyeball whether `fire_draw_order` got the occlusion right against
+    /// the GPU's own depth buffer.
+    fire_ground_truth_debug: bool,
     debug_mode: bool,
     settings: AppSettings,
     reset_generation: u64,
@@ -240,6 +245,10 @@ pub(crate) enum Message {
     ViewerDistanceReleased,
     RenderMode(RenderMode),
     AABBMode(AABBMode),
+    /// Debug-only: toggles a small inset showing one face's cells opaque and
+    /// depth-tested, cycling through whichever faces hold a Fire sticker
+    /// (see `shader_widget::ground_truth_debug_face`).
+    FireGroundTruthDebug(bool),
     DebugMode(bool),
     RotateButton(RotateButton),
     Theme(Theme),
@@ -279,6 +288,7 @@ impl HypercubeApp {
             viewer_distance: DEFAULT_VIEWER_DISTANCE,
             render_mode: RenderMode::Standard,
             aabb_mode: AABBMode::None,
+            fire_ground_truth_debug: false,
             debug_mode: false,
             settings: settings::load(),
             reset_generation: 0,
@@ -365,6 +375,9 @@ impl HypercubeApp {
             }
             Message::AABBMode(mode) => {
                 self.aabb_mode = mode;
+            }
+            Message::FireGroundTruthDebug(enabled) => {
+                self.fire_ground_truth_debug = enabled;
             }
             Message::DebugMode(enabled) => {
                 self.debug_mode = enabled;
@@ -569,6 +582,11 @@ impl HypercubeApp {
                             .width(250),
                         ),
                 )
+                .push(
+                    Checkbox::new(self.fire_ground_truth_debug)
+                        .label("Fire Ground Truth Debug")
+                        .on_toggle(Message::FireGroundTruthDebug),
+                )
                 .push(Button::new("Save Snapshot").on_press(Message::SaveSnapshot));
         }
 
@@ -704,6 +722,7 @@ impl HypercubeApp {
             self.render_mode,
             self.settings.theme,
             self.aabb_mode,
+            self.fire_ground_truth_debug,
             self.settings.rotate_button,
             self.settings.animation_duration_ms,
             self.reset_generation,
