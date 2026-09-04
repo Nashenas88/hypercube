@@ -2725,6 +2725,10 @@ impl shader::Pipeline for Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::camera::CameraController;
+    use crate::shader_widget::{
+        SECONDARY_FACE_GAP, SECONDARY_FACE_GAP_4D, SECONDARY_STICKER_SCALE,
+    };
 
     #[test]
     fn transform4d_size_is_16_byte_aligned() {
@@ -3005,6 +3009,189 @@ mod tests {
         let pixels = read_texture_rgba8(&device, &queue, &texture, format);
 
         assert_eq!(pixels, expected.concat());
+    }
+
+    /// Renders a fully deterministic scene at 1920x1080 - a solved cube,
+    /// the app's default camera angle, the "revealed" sticker scale/face gap
+    /// (spreading the 8 cells apart so all of them are visible instead of
+    /// the collapsed default), and `elapsed_seconds` pinned to `0.0`
+    /// (Elemental's materials, Fire's raymarched noise especially, are
+    /// driven by it) - for golden-image comparison.
+    ///
+    /// The 4D rotation is a 90-degree turn in the XW plane rather than
+    /// identity, so Fire (kind 3, the X=-1 face) lands in the near,
+    /// unoccluded "center" slot (W=-1) instead of one of the six
+    /// cross-arranged side cells, which - at this camera angle - it would
+    /// otherwise render mostly hidden behind its neighbor.
+    fn render_fixed_scene(theme: Theme) -> (Vec<u8>, u32, u32) {
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("no GPU adapter available to run this test");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .expect("failed to request a device for this test");
+
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let (width, height) = (1920u32, 1080u32);
+        let mut renderer = Renderer::new(
+            &device,
+            &queue,
+            format,
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: width as f32,
+                height: height as f32,
+            },
+            Size::new(width, height),
+            UiControls {
+                sticker_scale: SECONDARY_STICKER_SCALE,
+                face_gap: SECONDARY_FACE_GAP,
+                face_gap_4d: SECONDARY_FACE_GAP_4D,
+                viewer_distance: crate::math::VIEWER_DISTANCE,
+                render_mode: RenderMode::Standard,
+                theme,
+            },
+        );
+
+        let mut camera = Camera {
+            eye: nalgebra::Point3::new(0.0, 0.0, 15.0),
+            target: nalgebra::Point3::new(0.0, 0.0, 0.0),
+            up: nalgebra::Vector3::new(0.0, 1.0, 0.0),
+        };
+        CameraController::new(15.0).update_camera(&mut camera);
+        let projection = Projection {
+            aspect: width as f32 / height as f32,
+            fovy: std::f32::consts::FRAC_PI_4,
+            znear: 0.1,
+            zfar: 100.0,
+        };
+        #[rustfmt::skip]
+        let rotation_4d = nalgebra::Matrix4::new(
+            0.0, 0.0, 0.0, -1.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            1.0, 0.0, 0.0, 0.0,
+        );
+        renderer.update_camera(&queue, &camera, &projection);
+        renderer.update_light(&queue, &camera);
+        renderer.update_instances(
+            &queue,
+            &rotation_4d,
+            SECONDARY_STICKER_SCALE,
+            SECONDARY_FACE_GAP,
+            SECONDARY_FACE_GAP_4D,
+            crate::math::VIEWER_DISTANCE,
+            0.0,
+        );
+
+        let visible_faces = [true; 8];
+        let fire_order = if theme == Theme::Elemental {
+            crate::shader_widget::fire_draw_order(
+                &generate_sticker_instances(&Hypercube::solved()),
+                &visible_faces,
+                &rotation_4d,
+                &camera,
+                true,
+                SECONDARY_FACE_GAP,
+                SECONDARY_FACE_GAP_4D,
+                crate::math::VIEWER_DISTANCE,
+            )
+        } else {
+            Vec::new()
+        };
+
+        renderer.capture_frame(&device, &queue, &visible_faces, &fire_order)
+    }
+
+    /// Compares `rgba` against a golden PNG checked into
+    /// `test_fixtures/golden/<name>.png`. A missing golden is bootstrapped -
+    /// written, then failed, so a first run doesn't silently trust its own
+    /// output as correct baseline. `UPDATE_GOLDEN=1` overwrites the golden
+    /// with `rgba` unconditionally, for intentionally accepting a new
+    /// baseline.
+    ///
+    /// Compares per-channel bytes against `tolerance` rather than requiring
+    /// an exact match: raymarched noise and float rounding can differ
+    /// subtly across GPU vendors and drivers even for identical inputs, so
+    /// exact-match golden images are not realistically portable between
+    /// machines. On mismatch, writes `<name>.actual.png` alongside the
+    /// golden for diffing.
+    fn assert_matches_golden(name: &str, rgba: &[u8], width: u32, height: u32, tolerance: u8) {
+        let golden_path = golden_dir().join(format!("{name}.png"));
+
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            write_golden_png(&golden_path, rgba, width, height);
+            return;
+        }
+
+        if !golden_path.exists() {
+            write_golden_png(&golden_path, rgba, width, height);
+            panic!(
+                "no golden image at {golden_path:?}; wrote the current render as a baseline - \
+                 inspect it, then re-run to confirm it matches before committing it"
+            );
+        }
+
+        let golden = image::open(&golden_path)
+            .unwrap_or_else(|err| panic!("failed to read golden image {golden_path:?}: {err}"))
+            .to_rgba8();
+
+        assert_eq!(
+            (golden.width(), golden.height()),
+            (width, height),
+            "golden image {golden_path:?} is {}x{}, but the render is {width}x{height}",
+            golden.width(),
+            golden.height(),
+        );
+
+        let mut max_diff = 0u8;
+        let mut diff_count = 0usize;
+        for (golden_byte, actual_byte) in golden.as_raw().iter().zip(rgba) {
+            let diff = golden_byte.abs_diff(*actual_byte);
+            max_diff = max_diff.max(diff);
+            if diff > tolerance {
+                diff_count += 1;
+            }
+        }
+
+        if diff_count > 0 {
+            let actual_path = golden_dir().join(format!("{name}.actual.png"));
+            write_golden_png(&actual_path, rgba, width, height);
+            panic!(
+                "render doesn't match golden {golden_path:?}: {diff_count} byte(s) differ by \
+                 more than {tolerance} (max diff {max_diff}); wrote the mismatch to \
+                 {actual_path:?} for comparison"
+            );
+        }
+    }
+
+    fn golden_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_fixtures/golden")
+    }
+
+    fn write_golden_png(path: &std::path::Path, rgba: &[u8], width: u32, height: u32) {
+        let dir = path
+            .parent()
+            .expect("golden path must have a parent directory");
+        std::fs::create_dir_all(dir).expect("failed to create golden image directory");
+        image::RgbaImage::from_raw(width, height, rgba.to_vec())
+            .expect("pixel buffer size mismatch")
+            .save(path)
+            .unwrap_or_else(|err| panic!("failed to write {path:?}: {err}"));
+    }
+
+    #[test]
+    fn golden_solved_cube_classic_theme() {
+        let (pixels, width, height) = render_fixed_scene(Theme::Classic);
+        assert_matches_golden("solved_cube_classic", &pixels, width, height, 2);
+    }
+
+    #[test]
+    fn golden_solved_cube_elemental_theme() {
+        let (pixels, width, height) = render_fixed_scene(Theme::Elemental);
+        assert_matches_golden("solved_cube_elemental", &pixels, width, height, 2);
     }
 
     /// Diagnostic, not a regression test: dumps a real rendered frame,
