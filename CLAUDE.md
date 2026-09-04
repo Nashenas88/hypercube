@@ -31,7 +31,7 @@ short pointer:
 - `main.rs` — one-line binary entry point. See `context/main.md`.
 - `lib.rs` — declares modules, exposes `run()`, wires up `HypercubeApp`; no UI/3D logic itself. See `context/lib.md`.
 - `app.rs` — UI-control state only (sliders, render mode, menu bar, About modal); no 3D/4D logic. See `context/app.md`.
-- `menu_common.rs` — File/Puzzle/View/Help menu content and layout constants for `menu_overlay.rs`. See `context/menu_common.md`.
+- `menu_layout.rs` — File/Puzzle/View/Help menu content and layout constants for `menu_overlay.rs`. See `context/menu_layout.md`.
 - `menu_overlay.rs` — the menu bar, built on the lower-level `overlay::menu::Menu` primitive via a hand-written `advanced::Widget`. See `context/menu_overlay.md`.
 - `puzzle_state.rs` — explicit save/load of the puzzle's piece arrangement to `puzzle_state.json`. See `context/puzzle_state.md`.
 - `shader_widget.rs` — owns rendering/interaction state and input handling, independent of `HypercubeApp`. See `context/shader_widget.md`.

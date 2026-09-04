@@ -275,7 +275,7 @@ pub(crate) enum Message {
     Quit,
     OpenAbout,
     CloseAbout,
-    /// Target of the Puzzle menu's inert spacer rows (`menu_common::puzzle_items`).
+    /// Target of the Puzzle menu's inert spacer rows (`menu_layout::puzzle_items`).
     NoOp,
 }
 
