@@ -219,7 +219,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(apply_highlight(final_color, 1.0, in.instance_index, in.piece_slot), 1.0);
 }
 
-// Fire: a small sun inscribed in each sticker cube, raymarched in the
+// Fire: a small cube of flame inset in each sticker cube, raymarched in the
 // sticker's own local frame.
 
 // Half-extent of a sticker's mesh cube before `transform.sticker_scale`.
@@ -227,19 +227,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 // into the cube vertices.
 const FIRE_HALF_EXTENT: f32 = 0.33333334;
 
-// The ball's radius in local units, where 1.0 is the sticker cube's own
-// half-extent. `FIRE_BASE_RADIUS + FIRE_SURFACE_DISPLACEMENT` stays under
-// 1.0 so the ball is inscribed: it never pokes out of the facet it belongs
-// to, and the cube's front faces are guaranteed to cover it on screen.
-const FIRE_BASE_RADIUS: f32 = 0.62;
-const FIRE_SURFACE_DISPLACEMENT: f32 = 0.32;
+// The flame cube's half-extent in local units, where 1.0 is the sticker
+// mesh cube's own half-extent. `FIRE_BASE_EXTENT + FIRE_SURFACE_DISPLACEMENT`
+// sits close to, and can run past, that 1.0: the displaced surface is
+// pushed nearly to the facet's own edge rather than fading out well short of
+// it. This never bleeds past the facet on screen regardless, since the only
+// fragments shaded are the ones the sticker's own front face rasterizes to.
+const FIRE_BASE_EXTENT: f32 = 0.9;
+const FIRE_SURFACE_DISPLACEMENT: f32 = 0.22;
 
-// Samples taken across the ball. The dominant cost of the whole theme: each
-// one evaluates four octaves of trilinear value noise, and a scrambled cube
-// can show 27 fire facets at once.
+// Samples taken across the flame cube. The dominant cost of the whole theme:
+// each one evaluates four octaves of trilinear value noise, and a scrambled
+// cube can show 27 fire facets at once.
 const FIRE_STEPS: i32 = 16;
 
-// Optical depth accumulated per ball-radius travelled at unit density.
+// Optical depth accumulated per flame-extent travelled at unit density.
 const FIRE_ABSORPTION: f32 = 3.75;
 
 // Scales local positions into the noise domain. A facet covers few enough
@@ -251,7 +253,7 @@ const FIRE_NOISE_SCALE: f32 = 0.8;
 // gives up on it, as a fraction of the volume three edges of the same
 // lengths would span if they were perpendicular. A 4D rotation can squash a
 // facet flat, collapsing the frame toward a plane and sending its inverse -
-// and with it the ball's shape - to infinity; such a facet is edge-on and
+// and with it the flame's shape - to infinity; such a facet is edge-on and
 // covers almost no pixels anyway.
 const FIRE_MIN_FRAME_VOLUME: f32 = 0.05;
 
@@ -299,7 +301,7 @@ fn ridged_detail(p_in: vec3<f32>) -> f32 {
     return f;
 }
 
-// The plasma field at one point of the ball. The volume turns slowly about
+// The plasma field at one point of the flame cube. The volume turns slowly about
 // two axes while the noise domain drifts along -y, which reads as convection
 // rising through it. Both are expressed in the sticker's own local frame, so
 // "up" turns with the puzzle rather than pointing at a world direction a 4D
@@ -345,33 +347,31 @@ fn sun_palette(t: f32) -> vec3<f32> {
     return color * FIRE_EXPOSURE;
 }
 
-// Entry and exit distances along a normalized `rd` from `ro` for the sphere
-// of `radius` centered on the origin, clamped so the span starts no earlier
-// than the ray does. Returns a negative entry when the ray misses it, or
-// leaves it entirely behind.
-fn ray_sphere(ro: vec3<f32>, rd: vec3<f32>, radius: f32) -> vec2<f32> {
-    let b = dot(ro, rd);
-    let c = dot(ro, ro) - radius * radius;
-    let discriminant = b * b - c;
-    if (discriminant < 0.0) {
+// Entry and exit distances along a normalized `rd` from `ro` for the
+// axis-aligned cube of `half_extent` centered on the origin, clamped so the
+// span starts no earlier than the ray does. Returns a negative entry when
+// the ray misses it, or leaves it entirely behind.
+fn ray_box(ro: vec3<f32>, rd: vec3<f32>, half_extent: f32) -> vec2<f32> {
+    let inv_rd = 1.0 / rd;
+    let t0 = (vec3<f32>(-half_extent) - ro) * inv_rd;
+    let t1 = (vec3<f32>(half_extent) - ro) * inv_rd;
+    let tmin = min(t0, t1);
+    let tmax = max(t0, t1);
+    let near = max(max(tmin.x, tmin.y), tmin.z);
+    let far = min(min(tmax.x, tmax.y), tmax.z);
+    if (far < 0.0 || near > far) {
         return vec2<f32>(-1.0);
     }
-
-    let root = sqrt(discriminant);
-    let far = -b + root;
-    if (far < 0.0) {
-        return vec2<f32>(-1.0);
-    }
-    return vec2<f32>(max(-b - root, 0.0), far);
+    return vec2<f32>(max(near, 0.0), far);
 }
 
 // Fire's own entry point, drawn per sticker in back-to-front order over a
 // pipeline with premultiplied blending and no depth write. Emission is
-// accumulated against a transmittance along a ray through the ball, so the
-// result is a premultiplied color and the coverage it was multiplied by.
+// accumulated against a transmittance along a ray through the flame cube, so
+// the result is a premultiplied color and the coverage it was multiplied by.
 //
 // Every fragment of the cube on one pixel yields the same ray, so shading
-// both its faces would march the ball twice and blend the result over
+// both its faces would march the flame twice and blend the result over
 // itself; back faces are discarded here by their current normal rather than
 // by `cull_mode` (which stays `None` everywhere), since `world_normal` is
 // derived fresh from the instance's own basis and so never goes stale
@@ -388,8 +388,8 @@ fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // The sticker's own frame. Its three edges are unequal in length and no
     // longer mutually perpendicular once the 4D perspective divide has
-    // warped the cube, so a sphere marched in the local space `to_local`
-    // maps into comes out stretched in world space exactly as its facet is.
+    // warped the cube, so a cube marched in the local space `to_local` maps
+    // into comes out stretched in world space exactly as its facet is.
     // Mapping through the edges is a linearization of a projection that
     // isn't linear, but across one sticker's own span the error is far below
     // what a volume of noise resolves.
@@ -406,14 +406,15 @@ fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // The ray starts at the fragment, on the cube's own front face, rather
     // than at the eye: `to_local` scales by the inverse of a sticker's size,
-    // so an eye-relative origin lands hundreds of ball radii out at small
-    // sticker scales and the sphere test loses the ball entirely to
+    // so an eye-relative origin lands hundreds of flame extents out at small
+    // sticker scales and the box test loses the flame entirely to
     // cancellation. Both vectors below are world-space differences of
-    // comparable magnitude, and the ball sits within a radius of the origin.
+    // comparable magnitude, and the flame sits within its extent of the
+    // origin.
     let ray_origin = to_local * (in.world_position - anchor.world_center);
     let ray_direction = normalize(to_local * (in.world_position - camera.eye_position.xyz));
 
-    let span = ray_sphere(ray_origin, ray_direction, FIRE_BASE_RADIUS + FIRE_SURFACE_DISPLACEMENT);
+    let span = ray_box(ray_origin, ray_direction, FIRE_BASE_EXTENT + FIRE_SURFACE_DISPLACEMENT);
     if (span.x < 0.0) {
         discard;
         return vec4<f32>(0.0);
@@ -428,9 +429,9 @@ fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
     let seed_offset = vec3<f32>(seed, seed * 1.3, seed * 0.7);
 
     let step_size = (span.y - span.x) / f32(FIRE_STEPS);
-    // Densities below are expressed per ball radius, so the integration
-    // length is too - which keeps them independent of the ball's own size.
-    let step_radii = step_size / FIRE_BASE_RADIUS;
+    // Densities below are expressed per flame extent, so the integration
+    // length is too - which keeps them independent of the flame's own size.
+    let step_radii = step_size / FIRE_BASE_EXTENT;
     // Offsetting each ray's first sample by a per-pixel fraction of a step
     // trades this step count's banding for noise. Hashed on the pixel alone,
     // so the pattern is fixed in screen space instead of crawling frame to
@@ -449,28 +450,28 @@ fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
         let p = ray_origin + ray_direction * travelled;
         travelled += step_size;
 
-        let center_distance = length(p);
+        let center_extent = max(max(abs(p.x), abs(p.y)), abs(p.z));
         let plasma = solar_plasma(p * FIRE_NOISE_SCALE + seed_offset, time * FIRE_CHURN_SPEED);
-        let surface_radius = FIRE_BASE_RADIUS + plasma * FIRE_SURFACE_DISPLACEMENT;
-        if (center_distance > surface_radius) {
+        let surface_extent = FIRE_BASE_EXTENT + plasma * FIRE_SURFACE_DISPLACEMENT;
+        if (center_extent > surface_extent) {
             continue;
         }
 
         // A dense core falling off exponentially, plus the plasma's own
         // filaments faded in over the outer half, all tapered to nothing at
-        // the displaced surface so the ball has no hard edge.
-        let normalized_distance = center_distance / FIRE_BASE_RADIUS;
-        let core_density = exp(-normalized_distance * 3.5) * 14.0;
+        // the displaced surface so the flame cube has no hard edge.
+        let normalized_extent = center_extent / FIRE_BASE_EXTENT;
+        let core_density = exp(-normalized_extent * 3.5) * 14.0;
         let surface_density = plasma * 4.5;
-        var density = core_density + surface_density * smoothstep(1.3, 0.4, normalized_distance);
-        density *= smoothstep(surface_radius, surface_radius - 0.15, center_distance);
+        var density = core_density + surface_density * smoothstep(1.3, 0.4, normalized_extent);
+        density *= smoothstep(surface_extent, surface_extent - 0.15, center_extent);
         if (density <= 0.01) {
             continue;
         }
 
         transmittance *= exp(-density * FIRE_ABSORPTION * step_radii);
 
-        let temperature = (1.0 - normalized_distance) * 1.8 + plasma * 0.8;
+        let temperature = (1.0 - normalized_extent) * 1.8 + plasma * 0.8;
         accumulated += sun_palette(temperature) * density * transmittance * step_radii;
     }
 
