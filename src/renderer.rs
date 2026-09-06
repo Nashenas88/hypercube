@@ -3226,6 +3226,7 @@ mod tests {
                 &rotation_4d,
                 &camera,
                 true,
+                SECONDARY_STICKER_SCALE,
                 SECONDARY_FACE_GAP,
                 SECONDARY_FACE_GAP_4D,
                 crate::math::VIEWER_DISTANCE,

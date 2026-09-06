@@ -127,7 +127,7 @@ pub(crate) fn ray_intersects_aabb(ray: &Ray, aabb: &AABB) -> bool {
 
 /// Test ray intersection with actual sticker geometry using transformed vertices
 /// Returns Some(distance) if ray intersects any triangle of the sticker
-fn ray_sticker_intersection(ray: &Ray, world_vertices: &[Point3<f32>]) -> Option<f32> {
+pub(crate) fn ray_sticker_intersection(ray: &Ray, world_vertices: &[Point3<f32>]) -> Option<f32> {
     let mut closest_distance = f32::INFINITY;
     let mut hit = false;
 
@@ -206,7 +206,7 @@ fn ray_triangle_intersection(
 }
 
 /// Calculate sticker-level AABB using actual transformed vertices
-fn calculate_sticker_aabb(world_vertices: &[Point3<f32>]) -> AABB {
+pub(crate) fn calculate_sticker_aabb(world_vertices: &[Point3<f32>]) -> AABB {
     // Find min and max bounds from all transformed vertices
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;

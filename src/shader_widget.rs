@@ -23,13 +23,16 @@ use crate::geometry::{
 use crate::math::{
     GRID_EXTENT, VIEWER_DISTANCE, compose_so4, create_4d_plane_rotation, decompose_so4,
     process_4d_rotation, project_cube_point, project_face_point, quat_slerp_exact,
-    shortest_arc_plane, visible_faces,
+    shortest_arc_plane, transform_sticker_vertices_to_3d, visible_faces,
 };
 use crate::moves::{base_angle, clockwise_sign, rotate_local_position};
 use crate::piece::{
     FACET_TABLE, Hypercube, Piece, StickerInstance, free_axes, generate_sticker_instances,
 };
-use crate::ray_casting::{calculate_mouse_ray, find_intersected_sticker};
+use crate::ray_casting::{
+    AABB, Ray, calculate_mouse_ray, calculate_sticker_aabb, find_intersected_sticker,
+    ray_intersects_aabb, ray_sticker_intersection,
+};
 use crate::renderer::{DebugInstanceWithDistance, Renderer};
 use crate::settings::RotateButton;
 use crate::snapshot::{self, ViewSnapshot};
@@ -273,131 +276,94 @@ pub(crate) struct UiControls {
     pub(crate) ground_truth_debug_face: Option<u32>,
 }
 
-/// Where one free axis of a face divides its 3 cells, in the units
-/// `position_4d` is expressed in: cells sit at `-GRID_EXTENT`, `0` and
-/// `+GRID_EXTENT`, so the two boundaries between them fall halfway.
-const SLAB_BOUNDARY: f32 = GRID_EXTENT / 2.0;
-
-/// The 6 planes that divide one face's cells from each other - two per free
-/// axis - each paired with which side of it the camera is on.
-///
-/// These are genuine planes. `project_4d_to_3d` is central projection from
-/// the 4D viewer onto the `w = 0` hyperplane, which carries a 2-flat `F` to
-/// `span(eye, F)` intersected with that hyperplane: a plane, so long as the
-/// viewer is not on `F` - and it never is, since a point of the puzzle
-/// satisfies `|R*p| <= sqrt(1 + 3 * GRID_EXTENT^2)`, comfortably inside
-/// `viewer_distance`. Both pushes preserve it too: the 4D one translates the
-/// face's whole 3-flat before the divide, the 3D one translates its image
-/// after.
-///
-/// A boundary whose image degenerates - the three sample points turning
-/// collinear as a 4D rotation squashes the face toward a plane - is dropped
-/// rather than trusted, leaving the cells it would have separated tied.
-struct FaceSlabs {
-    /// Origin, normal, and the sign of the camera's side, per boundary.
-    planes: Vec<(Point3<f32>, Vector3<f32>, f32)>,
-}
-
-impl FaceSlabs {
-    fn new(
-        face_id: usize,
-        rotation_4d: &Matrix4<f32>,
-        camera_eye: Point3<f32>,
-        face_gap: f32,
-        face_gap_4d: f32,
-        viewer_distance: f32,
-    ) -> Self {
-        let face_normal_4d = FACE_CENTERS[face_id];
-        let free_axes: Vec<usize> = (0..4).filter(|&axis| axis != FIXED_DIMS[face_id]).collect();
-        let mut planes = Vec::with_capacity(6);
-
-        for (i, &axis) in free_axes.iter().enumerate() {
-            let spanning = [free_axes[(i + 1) % 3], free_axes[(i + 2) % 3]];
-
-            for boundary in [-SLAB_BOUNDARY, SLAB_BOUNDARY] {
-                // Three points spanning the boundary 2-flat, placed through
-                // the same path the renderer places a sticker through.
-                let sample = |offsets: [f32; 2]| {
-                    let mut point = face_normal_4d;
-                    point[axis] = boundary;
-                    point[spanning[0]] = offsets[0];
-                    point[spanning[1]] = offsets[1];
-                    project_face_point(
-                        point,
-                        face_normal_4d,
-                        rotation_4d,
-                        face_gap,
-                        face_gap_4d,
-                        viewer_distance,
-                    )
-                };
-
-                let origin = sample([0.0, 0.0]);
-                let normal = (sample([GRID_EXTENT, 0.0]) - origin)
-                    .cross(&(sample([0.0, GRID_EXTENT]) - origin));
-                if normal.norm() < f32::EPSILON {
-                    continue;
-                }
-
-                let eye_side = (camera_eye - origin).dot(&normal);
-                if eye_side == 0.0 {
-                    continue;
-                }
-                planes.push((origin, normal, eye_side.signum()));
-            }
-        }
-
-        Self { planes }
-    }
-
-    /// How many of the boundaries `center` shares a side with the camera.
-    /// Higher means nearer the camera, so this ranks the face's own cells
-    /// exactly: any two are separated by one of these planes, and the one on
-    /// the camera's side of it is in front.
-    fn score(&self, center: Point3<f32>) -> usize {
-        self.planes
-            .iter()
-            .filter(|(origin, normal, eye_side)| {
-                (center - origin).dot(normal).signum() == *eye_side
-            })
-            .count()
-    }
-}
+/// How much a ray's hit distance against another sticker's geometry may
+/// differ from a tested corner's own distance from the camera before the
+/// two count as actually separated, rather than the same point restated by
+/// floating-point noise.
+const DEPTH_TIE_EPSILON: f32 = 1e-4;
 
 /// One fire sticker as the draw order sees it.
 struct FireSticker {
     instance_index: u32,
-    face_id: usize,
     /// Depth along the camera's view axis of the sticker's rendered center.
     depth: f32,
-    /// Its `FaceSlabs` score, or `None` while a move animation has left the
-    /// face's lattice no longer axis-aligned within its own 3-flat.
-    slab_score: Option<usize>,
+    /// The sticker's 8 world-space corners, placed the same way the vertex
+    /// shader places them (see `transform_sticker_vertices_to_3d`).
+    world_vertices: Vec<Point3<f32>>,
+    /// Bounding box of `world_vertices`, checked before the exact per-corner
+    /// ray test.
+    aabb: AABB,
 }
 
 impl FireSticker {
     /// Whether this sticker must be drawn before `other` - that is, whether
     /// it is behind it.
     ///
-    /// Within one face the slab score decides, and decides exactly. Across
-    /// faces there is no shared set of separating planes to appeal to (a
-    /// tesseract's separating hyperplane does not project to a separating
-    /// plane, since a 3-flat maps onto all of 3-space), so depth decides,
-    /// which is right for all but a small fraction of pairs.
-    fn is_behind(&self, other: &Self) -> Option<Ordering> {
-        let ordering = match (
-            self.face_id == other.face_id,
-            self.slab_score,
-            other.slab_score,
-        ) {
-            (true, Some(own), Some(theirs)) => own.cmp(&theirs).reverse(),
-            _ => self.depth.total_cmp(&other.depth),
+    /// For each of this sticker's 8 corners, casts a ray from the camera eye
+    /// through that corner and tests it against `other`'s real geometry with
+    /// `ray_sticker_intersection` - the same exact ray-vs-cube test hover and
+    /// click picking already use. A nearer hit means `other` occludes this
+    /// corner there; a farther hit means this corner is nearer than
+    /// `other`'s surface there. The same is done with the two stickers
+    /// swapped, since a size mismatch after the 4D perspective divide can
+    /// leave every corner of a smaller sticker outside a larger one's
+    /// silhouette even while they visually overlap.
+    ///
+    /// Two stickers on different tesseract cells can meet at a boundary
+    /// that, after each cell's own projection, is no longer a single plane;
+    /// viewed near-edge-on, that boundary can curve enough that no single
+    /// front/back answer is correct for the whole overlap. When tested
+    /// corners disagree, the verdict from whichever corner point is nearest
+    /// the camera wins, since a cycle of disagreeing corners has no answer
+    /// more correct than that.
+    fn is_behind(&self, camera_eye: Point3<f32>, other: &Self) -> Option<Ordering> {
+        let mut nearest: Option<(f32, Ordering)> = None;
+
+        let mut test_corner = |corner: Point3<f32>,
+                               target: &Self,
+                               order_if_target_nearer: Ordering| {
+            let offset = corner - camera_eye;
+            let corner_distance = offset.norm();
+            if corner_distance < f32::EPSILON {
+                return;
+            }
+            let direction = offset / corner_distance;
+            let ray = Ray {
+                origin: camera_eye,
+                direction,
+                inverse_direction: direction.map(|component| 1.0 / component),
+            };
+            if !ray_intersects_aabb(&ray, &target.aabb) {
+                return;
+            }
+            let Some(hit_distance) = ray_sticker_intersection(&ray, &target.world_vertices) else {
+                return;
+            };
+            if (hit_distance - corner_distance).abs() < DEPTH_TIE_EPSILON {
+                return;
+            }
+            let order = if hit_distance < corner_distance {
+                order_if_target_nearer
+            } else {
+                order_if_target_nearer.reverse()
+            };
+            let is_nearest = match nearest {
+                Some((nearest_distance, _)) => corner_distance < nearest_distance,
+                None => true,
+            };
+            if is_nearest {
+                nearest = Some((corner_distance, order));
+            }
         };
 
-        match ordering {
-            Ordering::Equal => None,
-            other => Some(other),
+        for &corner in &self.world_vertices {
+            test_corner(corner, other, Ordering::Greater);
         }
+        for &corner in &other.world_vertices {
+            test_corner(corner, self, Ordering::Less);
+        }
+
+        nearest.map(|(_, order)| order)
     }
 }
 
@@ -442,27 +408,17 @@ fn ground_truth_debug_face(
 /// instance of `ELEMENTAL_FIRE_KIND` on a visible face, farthest first.
 ///
 /// Fire draws blended and writes no depth, so where two of its balls overlap
-/// on screen the result depends on the order they are drawn in. Two criteria
-/// decide that order, because no single number can:
-///
-/// - **Within a face**, `FaceSlabs` gives an exact answer: the cells of a
-///   face are separated from each other by planes, and the one on the
-///   camera's side of the plane between them is in front.
-/// - **Across faces**, the sticker's rendered center's depth along the view
-///   axis. The center comes from `math::project_face_point`, which follows
-///   the same single perspective divide `compute_sticker_anchor` places the
-///   sticker with - projecting a position's parts separately and summing them
-///   lands somewhere else, since that divide is not linear. Depth along the
-///   view axis rather than distance from the eye, since distance ranks a
-///   laterally-offset ball behind one dead ahead at the same depth.
-///
-/// The two disagree about what a comparison even means, so they cannot be
-/// folded into one sort key. They are combined instead by topologically
-/// sorting the "is behind" relation they induce, taking the farthest of the
-/// currently-unblocked stickers at each step so the result stays
+/// on screen the result depends on the order they are drawn in.
+/// `FireSticker::is_behind` decides each pair exactly, by casting rays
+/// through their real projected corners and testing against each other's
+/// actual geometry - the same ray-vs-cube test hover and click picking
+/// already use - rather than an approximating scalar key. That relation is
+/// combined into an order by topologically sorting it, taking the farthest
+/// of the currently-unblocked stickers at each step so the result stays
 /// deterministic and close to depth order. Should the relation ever contain a
-/// cycle, the stickers caught in it fall back to depth order rather than
-/// being dropped.
+/// cycle (which can happen for two stickers on different tesseract cells
+/// whose shared boundary is viewed near-edge-on, see `FireSticker::is_behind`),
+/// the stickers caught in it fall back to depth order rather than being lost.
 ///
 /// At most `instances.len() / 8` stickers take part, so this runs on the CPU
 /// each frame.
@@ -472,12 +428,13 @@ fn ground_truth_debug_face(
 /// * `visible_faces` - per-`face_id` visibility (see `math::visible_faces`)
 /// * `rotation_4d` - 4D rotation matrix
 /// * `camera` - the 3D camera, for its eye point and view axis
-/// * `lattice_is_aligned` - false while a move animation is sweeping a slab,
-///   which leaves that face's cells no longer axis-aligned within its own
-///   3-flat and so invalidates `FaceSlabs`; depth alone is used instead
-/// * `face_gap`/`face_gap_4d`/`viewer_distance` - the same placement
-///   parameters the vertex shader is given, so the centers and the planes
-///   land where the stickers actually render
+/// * `lattice_is_aligned` - false while a move animation is sweeping a slab;
+///   depth alone is used for every pair in that case, since the moving
+///   face's cells briefly aren't the axis-aligned lattice the rest of the
+///   frame assumes
+/// * `sticker_scale`/`face_gap`/`face_gap_4d`/`viewer_distance` - the same
+///   placement parameters the vertex shader is given, so the centers and
+///   corners land where the stickers actually render
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fire_draw_order(
     instances: &[StickerInstance],
@@ -485,6 +442,7 @@ pub(crate) fn fire_draw_order(
     rotation_4d: &Matrix4<f32>,
     camera: &Camera,
     lattice_is_aligned: bool,
+    sticker_scale: f32,
     face_gap: f32,
     face_gap_4d: f32,
     viewer_distance: f32,
@@ -496,22 +454,6 @@ pub(crate) fn fire_draw_order(
     let forward = (camera.target - camera.eye).normalize();
     let facets_per_face = instances.len() / 8;
 
-    // One set of planes per face, shared by all of its stickers.
-    let slabs: Vec<Option<FaceSlabs>> = (0..8)
-        .map(|face_id| {
-            (lattice_is_aligned && visible_faces[face_id]).then(|| {
-                FaceSlabs::new(
-                    face_id,
-                    rotation_4d,
-                    camera.eye,
-                    face_gap,
-                    face_gap_4d,
-                    viewer_distance,
-                )
-            })
-        })
-        .collect();
-
     let stickers: Vec<FireSticker> = instances
         .iter()
         .enumerate()
@@ -520,45 +462,63 @@ pub(crate) fn fire_draw_order(
         })
         .map(|(index, instance)| {
             let face_id = index / facets_per_face;
+            let position_4d = Vector4::from(instance.position_4d);
             let center = project_face_point(
-                Vector4::from(instance.position_4d),
+                position_4d,
                 Vector4::from(instance.face_normal_4d),
                 rotation_4d,
                 face_gap,
                 face_gap_4d,
                 viewer_distance,
             );
+            let world_vertices = transform_sticker_vertices_to_3d(
+                position_4d,
+                face_id,
+                rotation_4d,
+                sticker_scale,
+                face_gap,
+                face_gap_4d,
+                viewer_distance,
+            );
+            let aabb = calculate_sticker_aabb(&world_vertices);
 
             FireSticker {
                 instance_index: index as u32,
-                face_id,
                 depth: (center - camera.eye).dot(&forward),
-                slab_score: slabs[face_id].as_ref().map(|slabs| slabs.score(center)),
+                world_vertices,
+                aabb,
             }
         })
         .collect();
 
-    topological_draw_order(&stickers)
+    topological_draw_order(&stickers, camera.eye, lattice_is_aligned)
 }
 
 /// Linearizes the "is behind" relation over `stickers` into a draw order,
 /// farthest first. Ties and unrelated pairs are broken by depth, so the
-/// result is deterministic; a cycle - which the relation should not contain,
-/// since the sticker cubes never intersect - degrades to depth order for the
-/// stickers caught in it rather than losing them.
-fn topological_draw_order(stickers: &[FireSticker]) -> Vec<u32> {
+/// result is deterministic; a cycle (which the relation should not contain
+/// except for the near-edge-on case documented on `FireSticker::is_behind`)
+/// degrades to depth order for the stickers caught in it rather than losing
+/// them.
+fn topological_draw_order(
+    stickers: &[FireSticker],
+    camera_eye: Point3<f32>,
+    lattice_is_aligned: bool,
+) -> Vec<u32> {
     let mut successors: Vec<Vec<usize>> = vec![Vec::new(); stickers.len()];
     let mut blocked_by = vec![0usize; stickers.len()];
 
-    for (i, sticker) in stickers.iter().enumerate() {
-        for (j, other) in stickers.iter().enumerate().skip(i + 1) {
-            let (before, after) = match sticker.is_behind(other) {
-                Some(Ordering::Greater) => (i, j),
-                Some(Ordering::Less) => (j, i),
-                _ => continue,
-            };
-            successors[before].push(after);
-            blocked_by[after] += 1;
+    if lattice_is_aligned {
+        for (i, sticker) in stickers.iter().enumerate() {
+            for (j, other) in stickers.iter().enumerate().skip(i + 1) {
+                let (before, after) = match sticker.is_behind(camera_eye, other) {
+                    Some(Ordering::Greater) => (i, j),
+                    Some(Ordering::Less) => (j, i),
+                    _ => continue,
+                };
+                successors[before].push(after);
+                blocked_by[after] += 1;
+            }
         }
     }
 
@@ -1178,6 +1138,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                     &state.rotation_4d,
                     &state.camera,
                     state.animating_move.is_none(),
+                    state.reveal_scale_override.unwrap_or(self.sticker_scale),
                     face_gap,
                     face_gap_4d,
                     self.viewer_distance,
@@ -2874,7 +2835,6 @@ mod clockwise_sign_tests {
     use crate::math::project_4d_to_3d;
     use crate::moves::clockwise_sign;
     use nalgebra::Point3;
-    use std::collections::HashMap;
 
     /// For every actionable facet, `moves::clockwise_sign` must agree with
     /// an oracle built independently of the cofactor formula it uses
@@ -2962,6 +2922,15 @@ mod clockwise_sign_tests {
         (instances, state.camera.clone(), state.rotation_4d)
     }
 
+    /// A sticker scale close to, but not exceeding, 1.0 (the scale at which
+    /// neighbouring cells' cubes exactly touch with no 3D overlap): large
+    /// enough that many camera angles show two neighbours' screen-space
+    /// footprints genuinely overlapping, without ever letting the cubes
+    /// themselves interpenetrate in 3D, which would make "which is in
+    /// front" locally ill-defined even for a pair a single flat plane truly
+    /// separates.
+    const TEST_STICKER_SCALE: f32 = 0.95;
+
     fn fire_order_for(
         instances: &[StickerInstance],
         camera: &Camera,
@@ -2974,10 +2943,52 @@ mod clockwise_sign_tests {
             rotation_4d,
             camera,
             true,
+            TEST_STICKER_SCALE,
             SECONDARY_FACE_GAP,
             SECONDARY_FACE_GAP_4D,
             VIEWER_DISTANCE,
         )
+    }
+
+    /// Builds the `FireSticker` `fire_draw_order` would for `index`, so tests
+    /// can call `FireSticker::is_behind` directly instead of inferring its
+    /// verdict from final draw ranks.
+    fn fire_sticker_for(
+        index: usize,
+        instances: &[StickerInstance],
+        rotation_4d: &Matrix4<f32>,
+        camera: &Camera,
+        sticker_scale: f32,
+    ) -> FireSticker {
+        let instance = &instances[index];
+        let face_id = index / (instances.len() / 8);
+        let position_4d = Vector4::from(instance.position_4d);
+        let forward = (camera.target - camera.eye).normalize();
+        let center = project_face_point(
+            position_4d,
+            Vector4::from(instance.face_normal_4d),
+            rotation_4d,
+            SECONDARY_FACE_GAP,
+            SECONDARY_FACE_GAP_4D,
+            VIEWER_DISTANCE,
+        );
+        let world_vertices = transform_sticker_vertices_to_3d(
+            position_4d,
+            face_id,
+            rotation_4d,
+            sticker_scale,
+            SECONDARY_FACE_GAP,
+            SECONDARY_FACE_GAP_4D,
+            VIEWER_DISTANCE,
+        );
+        let aabb = calculate_sticker_aabb(&world_vertices);
+
+        FireSticker {
+            instance_index: index as u32,
+            depth: (center - camera.eye).dot(&forward),
+            world_vertices,
+            aabb,
+        }
     }
 
     /// Places a 4D point of `face_id` in world space the way the renderer
@@ -3032,10 +3043,11 @@ mod clockwise_sign_tests {
     /// before the divide, the 3D one translates the whole face after it.
     ///
     /// So whichever of the two cells lies on the camera's side of that plane
-    /// is in front of the other and must be drawn later. This asserts that
-    /// geometry rather than the ranking `fire_draw_order` happens to use, so
-    /// unlike a test that recomputes the key it can actually catch a wrong
-    /// one.
+    /// is in front of the other and, whenever the ray-cast test in
+    /// `FireSticker::is_behind` finds a screen-space overlap for the pair at
+    /// all, must not come back behind it. This asserts that geometry
+    /// directly, rather than recomputing `is_behind`'s own key, so it can
+    /// actually catch a wrong one.
     #[test]
     fn fire_order_respects_separating_planes() {
         let (instances, base_camera, base_rotation) = fire_order_fixture();
@@ -3073,26 +3085,24 @@ mod clockwise_sign_tests {
         camera: &Camera,
         rotation_4d: &Matrix4<f32>,
     ) {
-        let drawn = fire_order_for(instances, camera, rotation_4d, &[true; 8]);
-
-        let rank: HashMap<u32, usize> = drawn
+        let facets_per_face = instances.len() / 8;
+        let fire_indices: Vec<usize> = instances
             .iter()
             .enumerate()
-            .map(|(rank, &index)| (index, rank))
+            .filter(|(_, instance)| instance.kind == ELEMENTAL_FIRE_KIND)
+            .map(|(index, _)| index)
             .collect();
-
-        let facets_per_face = instances.len() / 8;
         let mut checked = 0;
 
-        for (&a_index, &a_rank) in &rank {
-            for (&b_index, &b_rank) in &rank {
-                let face_id = a_index as usize / facets_per_face;
-                if b_index as usize / facets_per_face != face_id {
+        for &a_index in &fire_indices {
+            for &b_index in &fire_indices {
+                let face_id = a_index / facets_per_face;
+                if b_index / facets_per_face != face_id {
                     continue;
                 }
 
-                let a_position = Vector4::from(instances[a_index as usize].position_4d);
-                let b_position = Vector4::from(instances[b_index as usize].position_4d);
+                let a_position = Vector4::from(instances[a_index].position_4d);
+                let b_position = Vector4::from(instances[b_index].position_4d);
 
                 // Neighbours along exactly one free axis, one lattice step
                 // apart, so exactly one boundary separates them.
@@ -3139,19 +3149,32 @@ mod clockwise_sign_tests {
                     continue;
                 }
 
+                // Only a claim `is_behind` actually makes can be wrong; a
+                // `None` just means this pair's screen footprints didn't
+                // overlap for this camera/rotation, which says nothing about
+                // draw order since they wouldn't visually interact anyway.
+                let sticker_a =
+                    fire_sticker_for(a_index, instances, rotation_4d, camera, TEST_STICKER_SCALE);
+                let sticker_b =
+                    fire_sticker_for(b_index, instances, rotation_4d, camera, TEST_STICKER_SCALE);
+                let Some(ordering) = sticker_a.is_behind(camera.eye, &sticker_b) else {
+                    continue;
+                };
+
                 checked += 1;
-                assert!(
-                    a_rank > b_rank,
+                assert_ne!(
+                    ordering,
+                    Ordering::Greater,
                     "instance {a_index} is on the camera's side of the boundary separating it \
-                     from {b_index} on face {face_id}, so it is in front and must be drawn \
-                     later, but its rank is {a_rank} against {b_rank}"
+                     from {b_index} on face {face_id}, so it is in front and must not be behind \
+                     it, but is_behind returned {ordering:?}"
                 );
             }
         }
 
         assert!(
             checked > 0,
-            "the fixture produced no separated neighbour pairs to check"
+            "the fixture produced no separated, screen-overlapping neighbour pairs to check"
         );
     }
 
