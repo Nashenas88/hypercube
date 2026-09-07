@@ -487,6 +487,17 @@ fn lightning_face_id(face_normal: vec3<f32>) -> f32 {
 // each strike's `seed`, decorrelating which stickers flash on a given strike
 // window from one another - a different salt than `lightning_surface_arcs`'s
 // `instance_seed` so the two effects don't always spike on the same stickers.
+// Each sticker draws its own flash-window period from this range (not one
+// shared clock), so different stickers' windows land at different cadences
+// as well as different phases.
+const LIGHTNING_FLASH_MIN_PERIOD: f32 = 0.5;
+const LIGHTNING_FLASH_MAX_PERIOD: f32 = 1.5;
+// A fired strike's own visible duration is drawn from this range per strike,
+// kept comfortably below `LIGHTNING_FLASH_MIN_PERIOD` so a strike is always
+// off again before its own next window begins. Hard on/off, no fade.
+const LIGHTNING_FLASH_MIN_DURATION: f32 = 0.2;
+const LIGHTNING_FLASH_MAX_DURATION: f32 = 0.4;
+
 fn lightning_face_flashes(face_uv: vec2<f32>, face_id: f32, time_val: f32, instance_index: u32) -> vec3<f32> {
     var flash_col = vec3<f32>(0.0);
 
@@ -494,27 +505,42 @@ fn lightning_face_flashes(face_uv: vec2<f32>, face_id: f32, time_val: f32, insta
     let purple = vec3<f32>(0.7, 0.2, 1.0);
     let yellow = vec3<f32>(1.0, 0.85, 0.3);
 
-    let strike_step = floor(time_val * 5.0);
     let instance_seed = hash11(f32(instance_index) * 0.3141592653) * 100.0;
 
+    // Per-sticker period and phase offset so different stickers' flash
+    // windows don't share a cadence or start/end at the same wall-clock
+    // instant.
+    let period = mix(LIGHTNING_FLASH_MIN_PERIOD, LIGHTNING_FLASH_MAX_PERIOD, hash11(instance_seed * 3.71 + 4.0));
+    let phase_offset = hash11(instance_seed * 7.77 + 11.0) * period;
+    let shifted_time = time_val + phase_offset;
+    let window_index = floor(shifted_time / period);
+    let time_in_window = shifted_time - window_index * period;
+
     for (var i: i32 = 0; i < 2; i++) {
-        let seed = face_id * 19.3 + f32(i) * 11.7 + strike_step * 7.1 + instance_seed;
+        let seed = face_id * 19.3 + f32(i) * 11.7 + window_index * 7.1 + instance_seed;
 
         if (hash11(seed) > 0.90) {
-            let angle = hash11(seed + 1.0) * 6.28318530718;
-            let rotated_uv = lightning_rotate2d(angle) * face_uv;
+            let duration = mix(LIGHTNING_FLASH_MIN_DURATION, LIGHTNING_FLASH_MAX_DURATION, hash11(seed + 5.0));
+            let max_start = max(period - duration, 0.0);
+            let start = hash11(seed + 9.0) * max_start;
+            let local_t = time_in_window - start;
 
-            var warped_uv = rotated_uv;
-            warped_uv += vec2<f32>(2.0 * lightning_fbm2d(warped_uv + vec2<f32>(0.8 * (time_val + seed)), 8) - 1.0);
+            if (local_t >= 0.0 && local_t <= duration) {
+                let angle = hash11(seed + 1.0) * 6.28318530718;
+                let rotated_uv = lightning_rotate2d(angle) * face_uv;
 
-            let dist = abs(warped_uv.x);
+                var warped_uv = rotated_uv;
+                warped_uv += vec2<f32>(2.0 * lightning_fbm2d(warped_uv + vec2<f32>(0.8 * (time_val + seed)), 8) - 1.0);
 
-            let col_pick = hash11(seed + 3.0);
-            var c = mix(blue, purple, smoothstep(0.0, 0.5, col_pick));
-            c = mix(c, yellow, smoothstep(0.65, 1.0, col_pick));
+                let dist = abs(warped_uv.x);
 
-            let intensity = mix(0.01, 0.05, hash11(strike_step + seed)) / dist;
-            flash_col += c * pow(intensity, 1.1);
+                let col_pick = hash11(seed + 3.0);
+                var c = mix(blue, purple, smoothstep(0.0, 0.5, col_pick));
+                c = mix(c, yellow, smoothstep(0.65, 1.0, col_pick));
+
+                let intensity = mix(0.01, 0.05, hash11(window_index + seed)) / dist;
+                flash_col += c * pow(intensity, 1.1);
+            }
         }
     }
 
