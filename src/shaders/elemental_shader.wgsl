@@ -9,6 +9,11 @@ struct VertexOutput {
     @location(2) instance_index: u32,
     @location(3) piece_slot: u32,
     @location(4) kind: u32,
+    // Raw, untransformed mesh-space vertex position (before
+    // `transform.sticker_scale`) - the `vertex_position` attribute
+    // unmodified. Water uses this to recover each fragment's local face
+    // identity and in-plane UV without re-deriving `face_3d`.
+    @location(5) local_position: vec3<f32>,
 }
 
 @vertex
@@ -24,6 +29,7 @@ fn vs_main(
     out.clip_position = geometry.clip_position;
     out.world_position = geometry.world_position;
     out.world_normal = geometry.world_normal;
+    out.local_position = vertex_position;
 
     if (!geometry.visible) {
         out.instance_index = instance_index;
@@ -56,25 +62,208 @@ fn apply_highlight(color: vec3<f32>, coverage: f32, instance_index: u32, piece_s
     return color;
 }
 
-fn water_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    let normal = normalize(world_normal);
+// Water: a bump-mapped sea surface applied per sticker facet rather than
+// vertex-displaced. Each of a face's 27 water stickers
+// renders its own independent-looking wave patch: the local UV domain is
+// always the sticker's own -1..1 mesh square (normalized by
+// `STICKER_HALF_EXTENT`, defined below in the Fire section), so without a
+// per-instance offset every sticker sharing a face normal would sample the
+// identical pattern - `water_wave_height`'s `instance_seed` is what makes
+// each one distinct.
+
+const SEA_HEIGHT: f32 = 0.12;
+const SEA_CHOPPY: f32 = 3.5;
+const SEA_SPEED: f32 = 0.8;
+const SEA_FREQ: f32 = 1.8;
+
+const SEA_BASE: vec3<f32> = vec3<f32>(0.005, 0.03, 0.09);
+const SEA_WATER_COLOR: vec3<f32> = vec3<f32>(0.06, 0.28, 0.45);
+
+// Half-extent, in the normalized units `water_face_uv`/`water_edge_mask`
+// work in, of the local UV domain a sticker's wave field is sampled over.
+// Local positions are normalized by `STICKER_HALF_EXTENT` before use, so
+// this is always 1.0 regardless of the mesh's real size.
+const WATER_BOX_EXTENT: f32 = 1.0;
+
+const WATER_OCTAVE_M: mat2x2<f32> = mat2x2<f32>(vec2<f32>(1.6, -1.2), vec2<f32>(1.2, 1.6));
+const WATER_UV_ROT: mat2x2<f32> = mat2x2<f32>(vec2<f32>(0.819, -0.573), vec2<f32>(0.573, 0.819));
+
+// 2D value noise in -1..1, ported from the source shader's `noise()`. Built
+// on `hash21` (identical formula to the source's own `hash`) rather than a
+// second copy of it.
+fn water_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let h00 = hash21(i + vec2<f32>(0.0, 0.0));
+    let h10 = hash21(i + vec2<f32>(1.0, 0.0));
+    let h01 = hash21(i + vec2<f32>(0.0, 1.0));
+    let h11 = hash21(i + vec2<f32>(1.0, 1.0));
+    return -1.0 + 2.0 * mix(mix(h00, h10, u.x), mix(h01, h11, u.x), u.y);
+}
+
+fn water_sea_octave(uv_in: vec2<f32>, choppy: f32) -> f32 {
+    let uv = uv_in + water_noise(uv_in);
+    var wv = 1.0 - abs(sin(uv));
+    let swv = abs(cos(uv));
+    wv = mix(wv, swv, wv);
+    return pow(1.0 - pow(wv.x * wv.y, 0.65), choppy);
+}
+
+// Wave height at `uv_in` (already in the sticker's own -1..1 local domain)
+// for a facet whose local (pre-rotation) mesh axis normal is `face_normal`.
+// `instance_index` seeds an offset into the wave field so each of the 27
+// water stickers on a face samples an independent-looking patch instead of
+// literally the same pattern.
+fn water_wave_height(uv_in: vec2<f32>, face_normal: vec3<f32>, instance_index: u32) -> f32 {
+    let sea_time = 1.0 + transform.elapsed_seconds * SEA_SPEED;
+    let instance_seed = vec2<f32>(
+        hash11(f32(instance_index) * 0.173) * 100.0,
+        hash11(f32(instance_index) * 0.371) * 100.0,
+    );
+    let face_seed = vec2<f32>(
+        dot(face_normal, vec3<f32>(12.3, 45.6, 78.9)),
+        dot(face_normal, vec3<f32>(98.7, 65.4, 32.1)),
+    ) + instance_seed;
+    var uv = (uv_in + face_seed) * WATER_UV_ROT;
+    var freq = SEA_FREQ;
+    var amp = SEA_HEIGHT;
+    var choppy = SEA_CHOPPY;
+    var h: f32 = 0.0;
+    for (var i = 0; i < 5; i++) {
+        var d = water_sea_octave((uv + vec2<f32>(sea_time)) * freq, choppy);
+        d += water_sea_octave((uv - vec2<f32>(sea_time)) * freq, choppy);
+        h += d * amp;
+        uv = WATER_OCTAVE_M * uv;
+        freq *= 1.9;
+        amp *= 0.22;
+        choppy = mix(choppy, 1.0, 0.2);
+    }
+    return h;
+}
+
+// Extracts the two in-plane local coordinates of `p` for a facet whose
+// dominant mesh axis is `n`.
+fn water_face_uv(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
+    let abs_n = abs(n);
+    if (abs_n.x > 0.5) {
+        return p.zy;
+    }
+    if (abs_n.y > 0.5) {
+        return p.xz;
+    }
+    return p.xy;
+}
+
+// Fades the wave field to 0 near a facet's own border, in the same
+// normalized -1..1 domain `water_face_uv` returns, so neighboring stickers'
+// independently-seeded patches don't show a hard seam at the tile edge.
+fn water_edge_mask(uv: vec2<f32>, box_extent: f32) -> f32 {
+    let border = vec2<f32>(box_extent) - vec2<f32>(0.06);
+    let d = max(abs(uv) - border, vec2<f32>(0.0));
+    let dist = length(d);
+    return smoothstep(0.06, 0.0, dist);
+}
+
+// The mesh-local (pre-rotation) axis normal for whichever of a sticker's 6
+// cube faces the current fragment belongs to. Every vertex of one cube face
+// shares the same dominant coordinate (pinned to +/-STICKER_HALF_EXTENT by
+// `CUBE_VERTICES`, and each face is its own dedicated set of 6 vertices, not
+// shared with neighboring faces), so the rasterizer's interpolation of
+// `local_position` keeps that coordinate exact regardless of the fragment's
+// position within the triangle - no `face_3d` plumbing needed.
+fn water_local_face_normal(local_position: vec3<f32>) -> vec3<f32> {
+    let a = abs(local_position);
+    if (a.x >= a.y && a.x >= a.z) {
+        return vec3<f32>(sign(local_position.x), 0.0, 0.0);
+    } else if (a.y >= a.x && a.y >= a.z) {
+        return vec3<f32>(0.0, sign(local_position.y), 0.0);
+    }
+    return vec3<f32>(0.0, 0.0, sign(local_position.z));
+}
+
+// Bump-mapped normal in the sticker's own local (pre-rotation) frame, from
+// finite-differencing `water_wave_height` across the facet's UV.
+fn water_face_normal(
+    uv: vec2<f32>,
+    face_normal: vec3<f32>,
+    box_extent: f32,
+    instance_index: u32,
+) -> vec3<f32> {
+    let eps = vec2<f32>(0.005, 0.0);
+    let mask = water_edge_mask(uv, box_extent);
+    let h0 = water_wave_height(uv, face_normal, instance_index) * mask;
+    let hx = water_wave_height(uv + eps.xy, face_normal, instance_index)
+        * water_edge_mask(uv + eps.xy, box_extent) - h0;
+    let hy = water_wave_height(uv + eps.yx, face_normal, instance_index)
+        * water_edge_mask(uv + eps.yx, box_extent) - h0;
+    let abs_n = abs(face_normal);
+    var wave_n: vec3<f32>;
+    if (abs_n.x > 0.5) {
+        wave_n = vec3<f32>(sign(face_normal.x), -hy / eps.x, -hx / eps.x);
+    } else if (abs_n.y > 0.5) {
+        wave_n = vec3<f32>(-hx / eps.x, sign(face_normal.y), -hy / eps.x);
+    } else {
+        wave_n = vec3<f32>(-hx / eps.x, -hy / eps.x, sign(face_normal.z));
+    }
+    return normalize(wave_n);
+}
+
+// Shades the water surface at a perturbed world-space normal `n`. `eye` is
+// the *incident* view direction (camera -> surface, i.e.
+// `world_position - camera.eye_position.xyz`, normalized) - the opposite
+// sign from this file's usual `view_dir` (surface -> camera) - because both
+// the fresnel term and `reflect` below are written for that convention;
+// getting the sign backwards silently inverts the specular highlight and
+// the fresnel rim. `light_dir` is surface -> light, this file's usual
+// convention.
+fn water_shade(n: vec3<f32>, eye: vec3<f32>, light_dir: vec3<f32>) -> vec3<f32> {
+    var fresnel_term = clamp(1.0 - max(dot(n, -eye), 0.0), 0.0, 1.0);
+    fresnel_term = pow(fresnel_term, 3.0) * 0.5;
+    let diff = max(dot(n, light_dir), 0.0);
+    let sky_color = vec3<f32>(0.35, 0.55, 0.75);
+    let water_base = mix(SEA_BASE, SEA_WATER_COLOR, diff * 0.7 + 0.3);
+    var color = mix(water_base, sky_color, fresnel_term);
+    let refl = reflect(eye, n);
+    let spec_broad = pow(max(dot(refl, light_dir), 0.0), 32.0) * 0.6;
+    let spec_tight = pow(max(dot(refl, light_dir), 0.0), 64.0) * 0.8;
+    color += vec3<f32>(spec_broad + spec_tight);
+    return color;
+}
+
+fn water_color(
+    instance_index: u32,
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    local_position: vec3<f32>,
+) -> vec3<f32> {
+    let local_face_normal = water_local_face_normal(local_position);
+    let normalized_local = local_position / STICKER_HALF_EXTENT;
+    let local_uv = water_face_uv(normalized_local, local_face_normal);
+
+    // Map the local bump-mapped normal into world space through the
+    // sticker's own projected frame - the same technique `fs_fire` uses for
+    // `to_local`, just applied to a direction rather than a ray. A near-
+    // degenerate frame (a facet viewed edge-on under a 4D rotation) falls
+    // back to the flat `world_normal` instead of normalizing a near-zero
+    // vector: unlike Fire's blended pass, this opaque pass can't discard the
+    // fragment without poking a hole in the surface behind it.
+    let anchor = compute_sticker_anchor(instance_index, STICKER_HALF_EXTENT * transform.sticker_scale);
+    let frame_volume = dot(anchor.edge_x, cross(anchor.edge_y, anchor.edge_z));
+    let edge_volume = length(anchor.edge_x) * length(anchor.edge_y) * length(anchor.edge_z);
+
+    var perturbed_world_normal = normalize(world_normal);
+    if (anchor.visible && abs(frame_volume) >= edge_volume * STICKER_MIN_FRAME_VOLUME) {
+        let to_world = mat3x3<f32>(anchor.edge_x, anchor.edge_y, anchor.edge_z);
+        let local_normal = water_face_normal(local_uv, local_face_normal, WATER_BOX_EXTENT, instance_index);
+        perturbed_world_normal = normalize(to_world * local_normal);
+    }
+
+    let eye = normalize(world_position - camera.eye_position.xyz);
     let light_dir = normalize(-light.direction);
-    let view_dir = normalize(-world_position);
 
-    let wave = value_noise1(f32(instance_index) * 1.3 + transform.elapsed_seconds * 1.5);
-    let albedo = mix(vec3<f32>(0.05, 0.2, 0.5), vec3<f32>(0.2, 0.5, 0.8), wave);
-
-    let ambient = light.ambient * albedo;
-    let diffuse_strength = max(dot(normal, light_dir), 0.0);
-    let diffuse = diffuse_strength * light.color * albedo;
-
-    let half_dir = normalize(light_dir + view_dir);
-    let specular_strength = pow(max(dot(normal, half_dir), 0.0), 64.0);
-    let specular = specular_strength * light.color;
-
-    let sheen = fresnel(normal, view_dir, 3.0) * 0.4;
-
-    return ambient + diffuse + specular + sheen * vec3<f32>(0.6, 0.8, 1.0);
+    let color = water_shade(perturbed_world_normal, eye, light_dir);
+    return pow(color, vec3<f32>(0.75));
 }
 
 fn ice_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
@@ -206,7 +395,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             final_color = glowing_light_color(in.instance_index, in.world_position, in.world_normal);
         }
         case 6u: {
-            final_color = water_color(in.instance_index, in.world_position, in.world_normal);
+            final_color = water_color(in.instance_index, in.world_position, in.world_normal, in.local_position);
         }
         case 7u: {
             final_color = crystal_color(in.instance_index, in.world_position, in.world_normal);
@@ -224,8 +413,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 // Half-extent of a sticker's mesh cube before `transform.sticker_scale`.
 // Must match `BASE_STICKER_SIZE` in math.rs, which renderer.rs premultiplies
-// into the cube vertices.
-const FIRE_HALF_EXTENT: f32 = 0.33333334;
+// into the cube vertices. Shared by Fire and Water, both of which map
+// between a sticker's local mesh frame and its world-space projected frame
+// via `compute_sticker_anchor`.
+const STICKER_HALF_EXTENT: f32 = 0.33333334;
 
 // The flame cube's half-extent in local units, where 1.0 is the sticker
 // mesh cube's own half-extent. `FIRE_BASE_EXTENT + FIRE_SURFACE_DISPLACEMENT`
@@ -249,13 +440,14 @@ const FIRE_ABSORPTION: f32 = 3.75;
 // legible and only cost octaves to produce.
 const FIRE_NOISE_SCALE: f32 = 0.8;
 
-// How near to degenerate the sticker's projected frame may get before Fire
-// gives up on it, as a fraction of the volume three edges of the same
-// lengths would span if they were perpendicular. A 4D rotation can squash a
-// facet flat, collapsing the frame toward a plane and sending its inverse -
-// and with it the flame's shape - to infinity; such a facet is edge-on and
-// covers almost no pixels anyway.
-const FIRE_MIN_FRAME_VOLUME: f32 = 0.05;
+// How near to degenerate a sticker's projected frame may get before an
+// effect built on `compute_sticker_anchor` gives up on it, as a fraction of
+// the volume three edges of the same lengths would span if they were
+// perpendicular. A 4D rotation can squash a facet flat, collapsing the frame
+// toward a plane and sending its inverse - and with it Fire's flame shape,
+// or Water's perturbed-normal mapping - to infinity; such a facet is
+// edge-on and covers almost no pixels anyway. Shared by Fire and Water.
+const STICKER_MIN_FRAME_VOLUME: f32 = 0.05;
 
 // Multiplier on `elapsed_seconds` for the plasma's churn, and the wrap
 // applied first. Convection translates the noise domain without bound, so
@@ -384,7 +576,7 @@ fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
 
-    let anchor = compute_sticker_anchor(in.instance_index, FIRE_HALF_EXTENT * transform.sticker_scale);
+    let anchor = compute_sticker_anchor(in.instance_index, STICKER_HALF_EXTENT * transform.sticker_scale);
 
     // The sticker's own frame. Its three edges are unequal in length and no
     // longer mutually perpendicular once the 4D perspective divide has
@@ -397,7 +589,7 @@ fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let frame_volume = dot(anchor.edge_x, cross(anchor.edge_y, anchor.edge_z));
     let edge_volume = length(anchor.edge_x) * length(anchor.edge_y) * length(anchor.edge_z);
-    if (abs(frame_volume) < edge_volume * FIRE_MIN_FRAME_VOLUME) {
+    if (abs(frame_volume) < edge_volume * STICKER_MIN_FRAME_VOLUME) {
         discard;
         return vec4<f32>(0.0);
     }

@@ -11,14 +11,20 @@ pub(crate) enum Theme {
 }
 
 /// Particles emitted per sticker under `Theme::Elemental`, indexed by `kind`.
-/// One shared budget for every element that still emits; Fire's own material
-/// carries its whole look, so it emits none.
+/// One shared budget for every element that still emits; Fire's and Water's
+/// own materials carry their whole look, so they emit none.
 const ELEMENTAL_PARTICLES_PER_STICKER: u32 = 24;
 
 /// The `kind` `Theme::Elemental` renders as Fire, matching `case 3u` in
 /// `elemental_shader.wgsl`. Fire is the one element drawn in its own blended
 /// pass, so the CPU has to recognize it to build that pass's draw order.
 pub(crate) const ELEMENTAL_FIRE_KIND: u32 = 3;
+
+/// The `kind` `Theme::Elemental` renders as Water, matching `case 6u` in
+/// `elemental_shader.wgsl`. Water's material bump-maps its own normal per
+/// fragment and carries its whole look without particles, so - like Fire -
+/// it emits none.
+pub(crate) const ELEMENTAL_WATER_KIND: u32 = 6;
 
 impl Theme {
     pub(crate) const ALL: [Theme; 2] = [Theme::Classic, Theme::Elemental];
@@ -31,6 +37,7 @@ impl Theme {
             Theme::Elemental => {
                 let mut counts = [ELEMENTAL_PARTICLES_PER_STICKER; 8];
                 counts[ELEMENTAL_FIRE_KIND as usize] = 0;
+                counts[ELEMENTAL_WATER_KIND as usize] = 0;
                 counts
             }
         }
