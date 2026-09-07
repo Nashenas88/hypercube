@@ -11,9 +11,15 @@ pub(crate) enum Theme {
 }
 
 /// Particles emitted per sticker under `Theme::Elemental`, indexed by `kind`.
-/// One shared budget for every element that still emits; Fire's and Water's
-/// own materials carry their whole look, so they emit none.
+/// One shared budget for every element that still emits; Fire's, Water's and
+/// Lightning's own materials carry their whole look, so they emit none.
 const ELEMENTAL_PARTICLES_PER_STICKER: u32 = 24;
+
+/// The `kind` `Theme::Elemental` renders as Lightning, matching `case 2u` in
+/// `elemental_shader.wgsl`. Lightning's material carries its whole look -
+/// arcs and flash strikes - directly on the surface, so - like Fire and
+/// Water - it emits no particles.
+pub(crate) const ELEMENTAL_LIGHTNING_KIND: u32 = 2;
 
 /// The `kind` `Theme::Elemental` renders as Fire, matching `case 3u` in
 /// `elemental_shader.wgsl`. Fire is the one element drawn in its own blended
@@ -38,6 +44,7 @@ impl Theme {
                 let mut counts = [ELEMENTAL_PARTICLES_PER_STICKER; 8];
                 counts[ELEMENTAL_FIRE_KIND as usize] = 0;
                 counts[ELEMENTAL_WATER_KIND as usize] = 0;
+                counts[ELEMENTAL_LIGHTNING_KIND as usize] = 0;
                 counts
             }
         }

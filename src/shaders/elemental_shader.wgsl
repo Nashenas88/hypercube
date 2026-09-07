@@ -1,6 +1,6 @@
 #import math4d::{camera, compute_sticker_anchor, compute_vertex_geometry, instances, inverse3, transform}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
-#import elemental_common::{ICE_TWINKLE_HZ, LIGHTNING_STROBE_HZ, hash11, hash21, hash31, value_noise1, value_noise3, fresnel, strobe}
+#import elemental_common::{ICE_TWINKLE_HZ, hash11, hash21, hash31, value_noise1, value_noise3, fresnel}
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -143,8 +143,9 @@ fn water_wave_height(uv_in: vec2<f32>, face_normal: vec3<f32>, instance_index: u
 }
 
 // Extracts the two in-plane local coordinates of `p` for a facet whose
-// dominant mesh axis is `n`.
-fn water_face_uv(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
+// dominant mesh axis is `n`. Pure local-mesh geometry with no water-specific
+// meaning - Lightning reuses this too, to recover its own local face UV.
+fn sticker_face_uv(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
     let abs_n = abs(n);
     if (abs_n.x > 0.5) {
         return p.zy;
@@ -156,7 +157,7 @@ fn water_face_uv(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
 }
 
 // Fades the wave field to 0 near a facet's own border, in the same
-// normalized -1..1 domain `water_face_uv` returns, so neighboring stickers'
+// normalized -1..1 domain `sticker_face_uv` returns, so neighboring stickers'
 // independently-seeded patches don't show a hard seam at the tile edge.
 fn water_edge_mask(uv: vec2<f32>, box_extent: f32) -> f32 {
     let border = vec2<f32>(box_extent) - vec2<f32>(0.06);
@@ -171,8 +172,10 @@ fn water_edge_mask(uv: vec2<f32>, box_extent: f32) -> f32 {
 // `CUBE_VERTICES`, and each face is its own dedicated set of 6 vertices, not
 // shared with neighboring faces), so the rasterizer's interpolation of
 // `local_position` keeps that coordinate exact regardless of the fragment's
-// position within the triangle - no `face_3d` plumbing needed.
-fn water_local_face_normal(local_position: vec3<f32>) -> vec3<f32> {
+// position within the triangle - no `face_3d` plumbing needed. Pure
+// local-mesh geometry with no water-specific meaning - Lightning reuses this
+// too, to recover its own local face identity.
+fn sticker_local_face_normal(local_position: vec3<f32>) -> vec3<f32> {
     let a = abs(local_position);
     if (a.x >= a.y && a.x >= a.z) {
         return vec3<f32>(sign(local_position.x), 0.0, 0.0);
@@ -237,9 +240,9 @@ fn water_color(
     world_normal: vec3<f32>,
     local_position: vec3<f32>,
 ) -> vec3<f32> {
-    let local_face_normal = water_local_face_normal(local_position);
+    let local_face_normal = sticker_local_face_normal(local_position);
     let normalized_local = local_position / STICKER_HALF_EXTENT;
-    let local_uv = water_face_uv(normalized_local, local_face_normal);
+    let local_uv = sticker_face_uv(normalized_local, local_face_normal);
 
     // Map the local bump-mapped normal into world space through the
     // sticker's own projected frame - the same technique `fs_fire` uses for
@@ -359,13 +362,196 @@ fn glowing_light_color(instance_index: u32, world_position: vec3<f32>, world_nor
     return base + halo * vec3<f32>(1.0, 1.0, 0.9) * 0.6;
 }
 
-fn lightning_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    let flash = strobe(instance_index, transform.elapsed_seconds, LIGHTNING_STROBE_HZ);
-    let brightness = step(0.6, flash);
-    let base = mix(vec3<f32>(0.2, 0.18, 0.05), vec3<f32>(1.0, 0.95, 0.5), brightness);
-    let view_dir = normalize(-world_position);
-    let rim = fresnel(world_normal, view_dir, 1.0) * brightness;
-    return base + rim * vec3<f32>(1.0, 0.9, 0.3);
+// Lightning: dark metallic cube surface carrying continuous 3D domain-warped
+// arcs plus separate random per-face flash strikes. Each of a face's 27
+// Lightning stickers gets its own per-instance seed folded into
+// both the arcs and the flashes, so neighboring stickers read as independent
+// rather than a single synchronized field repeated 27 times - mirroring
+// `water_wave_height`'s `instance_seed` technique in the Water material above.
+
+fn lightning_rotate2d(theta: f32) -> mat2x2<f32> {
+    let c = cos(theta);
+    let s = sin(theta);
+    return mat2x2<f32>(c, s, -s, c);
+}
+
+// 2D value noise in 0..1, built on the already-imported `hash21` rather than
+// a second near-identical hash.
+fn lightning_noise2d(p: vec2<f32>) -> f32 {
+    let ip = floor(p);
+    let fp = fract(p);
+    let a = hash21(ip);
+    let b = hash21(ip + vec2<f32>(1.0, 0.0));
+    let c = hash21(ip + vec2<f32>(0.0, 1.0));
+    let d = hash21(ip + vec2<f32>(1.0, 1.0));
+    let t = smoothstep(vec2<f32>(0.0), vec2<f32>(1.0), fp);
+    return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
+}
+
+fn lightning_fbm2d(p_in: vec2<f32>, octave_count: i32) -> f32 {
+    var p = p_in;
+    var value: f32 = 0.0;
+    var amplitude: f32 = 0.5;
+    let rot = lightning_rotate2d(0.45);
+    for (var i: i32 = 0; i < 10; i++) {
+        if (i >= octave_count) { break; }
+        value += amplitude * lightning_noise2d(p);
+        p = rot * p;
+        p *= 2.0;
+        amplitude *= 0.5;
+    }
+    return value;
+}
+
+// 3D domain-warp fbm, ported from the source's `fbm3D`. Built on the
+// already-imported `value_noise3` (algorithmically identical to the source's
+// own `noise3D`: trilinear value noise over the 8 hashed corners of the unit
+// cell) rather than a duplicate.
+fn lightning_fbm3d(p_in: vec3<f32>, octaves: i32) -> f32 {
+    var p = p_in;
+    var value: f32 = 0.0;
+    var amplitude: f32 = 0.5;
+    let rot = lightning_rotate2d(0.45);
+    for (var i: i32 = 0; i < 6; i++) {
+        if (i >= octaves) { break; }
+        value += amplitude * value_noise3(p);
+        let xy = rot * p.xy;
+        let yz = rot * p.yz;
+        p = vec3<f32>(xy.x, yz.x, yz.y);
+        p *= 2.02;
+        amplitude *= 0.5;
+    }
+    return value;
+}
+
+// Continuous, wrapping-glow lightning arcs over `p3d` (the sticker's own
+// normalized -1..1 local position). `instance_index` seeds an offset folded
+// into every per-arc `seed` below, so each of the 27 Lightning stickers on a
+// face shows its own independent-looking arcs instead of literally the same
+// field, mirroring `water_wave_height`'s `instance_seed`.
+fn lightning_surface_arcs(p3d: vec3<f32>, time_val: f32, instance_index: u32) -> vec3<f32> {
+    var col_acc = vec3<f32>(0.0);
+
+    let blue = vec3<f32>(0.2, 0.45, 1.0);
+    let purple = vec3<f32>(0.7, 0.2, 0.95);
+    let yellow = vec3<f32>(1.0, 0.85, 0.3);
+
+    let slow_time = time_val * 0.45;
+    let instance_seed = hash11(f32(instance_index) * 0.6180339887) * 100.0;
+
+    for (var i: i32 = 0; i < 3; i++) {
+        let seed = f32(i) * 14.3 + instance_seed;
+
+        let warp_offset = vec3<f32>(
+            lightning_fbm3d(p3d * 1.8 + vec3<f32>(slow_time, seed, 0.0), 4),
+            lightning_fbm3d(p3d * 1.8 + vec3<f32>(0.0, slow_time, seed), 4),
+            lightning_fbm3d(p3d * 1.8 + vec3<f32>(seed, 0.0, slow_time), 4)
+        );
+
+        let warped_p = p3d + (warp_offset - vec3<f32>(0.5)) * 0.8;
+
+        let val1 = abs(lightning_fbm3d(warped_p * 2.5 + vec3<f32>(seed), 5) - 0.5) * 2.0;
+        let val2 = abs(lightning_fbm3d(warped_p * 2.5 + vec3<f32>(seed + 40.0), 5) - 0.5) * 2.0;
+
+        let bolt_dist = length(vec2<f32>(val1, val2));
+
+        let color_select = fract(lightning_fbm3d(p3d * 1.2 + vec3<f32>(seed), 3) + seed * 0.1);
+        var base_col = mix(blue, purple, smoothstep(0.0, 0.55, color_select));
+        base_col = mix(base_col, yellow, smoothstep(0.68, 1.0, color_select));
+
+        let core = 0.003 / (bolt_dist + 0.0015);
+        let glow = 0.006 / (bolt_dist + 0.025);
+
+        col_acc += base_col * (pow(core, 1.3) + glow);
+    }
+
+    return col_acc;
+}
+
+// Which local cube face `face_normal` (from `sticker_local_face_normal`)
+// points along, signed - matching the source shader's `faceID` numbering,
+// used only to seed `lightning_face_flashes` per face.
+fn lightning_face_id(face_normal: vec3<f32>) -> f32 {
+    let abs_n = abs(face_normal);
+    if (abs_n.x > 0.5) {
+        return 1.0 * sign(face_normal.x);
+    }
+    if (abs_n.y > 0.5) {
+        return 2.0 * sign(face_normal.y);
+    }
+    return 3.0 * sign(face_normal.z);
+}
+
+// Sparse, sharp directional flash strikes, ported from the source's
+// `calculateReferenceFlashes`. `instance_index` seeds an offset folded into
+// each strike's `seed`, decorrelating which stickers flash on a given strike
+// window from one another - a different salt than `lightning_surface_arcs`'s
+// `instance_seed` so the two effects don't always spike on the same stickers.
+fn lightning_face_flashes(face_uv: vec2<f32>, face_id: f32, time_val: f32, instance_index: u32) -> vec3<f32> {
+    var flash_col = vec3<f32>(0.0);
+
+    let blue = vec3<f32>(0.2, 0.5, 1.0);
+    let purple = vec3<f32>(0.7, 0.2, 1.0);
+    let yellow = vec3<f32>(1.0, 0.85, 0.3);
+
+    let strike_step = floor(time_val * 5.0);
+    let instance_seed = hash11(f32(instance_index) * 0.3141592653) * 100.0;
+
+    for (var i: i32 = 0; i < 2; i++) {
+        let seed = face_id * 19.3 + f32(i) * 11.7 + strike_step * 7.1 + instance_seed;
+
+        if (hash11(seed) > 0.90) {
+            let angle = hash11(seed + 1.0) * 6.28318530718;
+            let rotated_uv = lightning_rotate2d(angle) * face_uv;
+
+            var warped_uv = rotated_uv;
+            warped_uv += vec2<f32>(2.0 * lightning_fbm2d(warped_uv + vec2<f32>(0.8 * (time_val + seed)), 8) - 1.0);
+
+            let dist = abs(warped_uv.x);
+
+            let col_pick = hash11(seed + 3.0);
+            var c = mix(blue, purple, smoothstep(0.0, 0.5, col_pick));
+            c = mix(c, yellow, smoothstep(0.65, 1.0, col_pick));
+
+            let intensity = mix(0.01, 0.05, hash11(strike_step + seed)) / dist;
+            flash_col += c * pow(intensity, 1.1);
+        }
+    }
+
+    return flash_col;
+}
+
+fn lightning_color(
+    instance_index: u32,
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    local_position: vec3<f32>,
+) -> vec3<f32> {
+    let normal = normalize(world_normal);
+    let normalized_local = local_position / STICKER_HALF_EXTENT;
+
+    let face_normal = sticker_local_face_normal(local_position);
+    let face_uv = sticker_face_uv(normalized_local, face_normal);
+    let face_id = lightning_face_id(face_normal);
+
+    let light_dir = normalize(-light.direction);
+    let diff = max(dot(normal, light_dir), 0.0);
+    let base_cube_col = vec3<f32>(0.02, 0.025, 0.04) + vec3<f32>(0.03, 0.035, 0.05) * diff;
+
+    let abs_p = abs(normalized_local);
+    let edge_dist = max(max(abs_p.x, abs_p.y), abs_p.z);
+    let frame_glow = 0.0012 / (abs(edge_dist - 0.75) + 0.0015);
+    let frame_col = vec3<f32>(0.6, 0.2, 0.9) * pow(frame_glow, 1.2) * 0.25;
+
+    let continuous_arcs = lightning_surface_arcs(normalized_local, transform.elapsed_seconds, instance_index);
+    let reference_flashes = lightning_face_flashes(face_uv, face_id, transform.elapsed_seconds, instance_index);
+
+    var lightning_col = continuous_arcs + reference_flashes;
+    // Soft tone-compression curve, ported unchanged from the source, to
+    // avoid harsh white clipping where arcs and flashes overlap.
+    lightning_col = lightning_col / (1.0 + lightning_col * 0.2);
+
+    return base_cube_col + frame_col + lightning_col;
 }
 
 @fragment
@@ -380,7 +566,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             final_color = leaves_color(in.instance_index, in.world_position, in.world_normal);
         }
         case 2u: {
-            final_color = lightning_color(in.instance_index, in.world_position, in.world_normal);
+            final_color = lightning_color(in.instance_index, in.world_position, in.world_normal, in.local_position);
         }
         // Fire is drawn by `fs_fire` in its own blended pass, so this one
         // skips it rather than shading it twice.
