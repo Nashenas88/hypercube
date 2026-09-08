@@ -1,4 +1,3 @@
-// Vertex shader using instanced rendering with static cube geometry
 #import math4d::{CameraUniform, compute_vertex_geometry, instances}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
 
@@ -44,34 +43,23 @@ fn vs_main(
     return out;
 }
 
-// Fragment shader
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Normalize the normal vector
     let normal = normalize(in.world_normal);
-    
-    // Calculate light direction (directional light)
     let light_dir = normalize(-light.direction);
-    
-    // Calculate view direction (camera position is at origin in view space)
     let view_dir = normalize(-in.world_position);
-    
-    // Ambient lighting
+
     let ambient = light.ambient * in.color.rgb;
-    
-    // Diffuse lighting (Lambertian)
+
     let diffuse_strength = max(dot(normal, light_dir), 0.0);
     let diffuse = diffuse_strength * light.color * in.color.rgb;
-    
-    // Specular lighting (Blinn-Phong)
+
     let half_dir = normalize(light_dir + view_dir);
     let specular_strength = pow(max(dot(normal, half_dir), 0.0), 32.0);
-    let specular = specular_strength * light.color * 0.3; // Reduced specular intensity
-    
-    // Combine all lighting components
+    let specular = specular_strength * light.color * 0.3;
+
     var final_color = ambient + diffuse + specular;
-    
+
     // Apply highlighting: the exact hovered sticker gets its own color, the
     // rest of the hovered piece's stickers get a dimmer shared highlight.
     if (in.instance_index == highlighting.hovered_sticker_index) {
@@ -83,7 +71,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(final_color, in.color.a);
 }
 
-// Skybox shaders
 @group(0) @binding(0)
 var<uniform> sky_camera: CameraUniform;
 
@@ -98,12 +85,10 @@ struct SkyboxVertexOutput {
     @location(0) world_position: vec3<f32>,
 }
 
-// Skybox vertex shader
 @vertex
 fn vs_sky(@location(0) position: vec2<f32>) -> SkyboxVertexOutput {
     var out: SkyboxVertexOutput;
-    
-    // Use the vertex position from the vertex buffer
+
     let x = position.x;
     let y = position.y;
     
@@ -119,7 +104,6 @@ fn vs_sky(@location(0) position: vec2<f32>) -> SkyboxVertexOutput {
     return out;
 }
 
-// Skybox fragment shader
 @fragment
 fn fs_sky(in: SkyboxVertexOutput) -> @location(0) vec4<f32> {
     return textureSample(sky_texture, sky_sampler, normalize(in.world_position));

@@ -1,5 +1,3 @@
-// Depth visualization shader using instanced rendering
-// Displays depth values as grayscale colors for debugging
 #import math4d::{compute_vertex_geometry}
 
 struct VertexOutput {
@@ -31,8 +29,7 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Normalize depth to 0-1 range and display as grayscale
-    // Closer objects (smaller z) are brighter, farther objects are darker
+    // Inverted so closer objects (smaller z) render brighter.
     let normalized_depth = clamp((1.0 - in.depth) * 0.5, 0.0, 1.0);
     return vec4<f32>(normalized_depth, normalized_depth, normalized_depth, 1.0);
 }

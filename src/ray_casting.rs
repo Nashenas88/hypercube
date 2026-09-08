@@ -46,28 +46,23 @@ pub(crate) fn calculate_mouse_ray(
     camera: &Camera,
     projection: &Projection,
 ) -> Ray {
-    // Convert mouse position to normalized device coordinates (-1 to 1)
     let ndc_x = (2.0 * mouse_pos.x / bounds.width) - 1.0;
     let ndc_y = 1.0 - (2.0 * mouse_pos.y / bounds.height);
 
-    // Build camera matrices
     let view_matrix = camera.build_view_matrix();
     let proj_matrix = projection.build_projection_matrix();
     let view_proj_matrix = proj_matrix * view_matrix;
 
-    // Inverse transform to get ray in world space
     let inv_view_proj = view_proj_matrix
         .try_inverse()
         .expect("View-projection matrix should be invertible");
 
-    // Calculate ray points in world space
     let ray_start_ndc = Vector4::new(ndc_x, ndc_y, -1.0, 1.0);
     let ray_end_ndc = Vector4::new(ndc_x, ndc_y, 1.0, 1.0);
 
     let ray_start_world = inv_view_proj * ray_start_ndc;
     let ray_end_world = inv_view_proj * ray_end_ndc;
 
-    // Convert from homogeneous coordinates
     let ray_start = Point3::new(
         ray_start_world.x / ray_start_world.w,
         ray_start_world.y / ray_start_world.w,
@@ -79,7 +74,6 @@ pub(crate) fn calculate_mouse_ray(
         ray_end_world.z / ray_end_world.w,
     );
 
-    // Calculate ray direction
     let direction = (ray_end - ray_start).normalize();
 
     Ray {
@@ -94,22 +88,19 @@ pub(crate) fn calculate_mouse_ray(
 /// Returns Some(distance) if the ray intersects the box, None otherwise.
 /// Uses the standard 3D slab method for ray-AABB intersection.
 pub(crate) fn ray_intersects_aabb(ray: &Ray, aabb: &AABB) -> bool {
-    // Calculate intersection distances with each pair of parallel planes
-    // X-axis slab: two planes at aabb.min.x and aabb.max.x
-    let t1 = (aabb.min.x - ray.origin.x) * ray.inverse_direction.x; // Distance to min X plane
-    let t2 = (aabb.max.x - ray.origin.x) * ray.inverse_direction.x; // Distance to max X plane
+    let t1 = (aabb.min.x - ray.origin.x) * ray.inverse_direction.x;
+    let t2 = (aabb.max.x - ray.origin.x) * ray.inverse_direction.x;
 
-    // Y-axis slab: two planes at aabb.min.y and aabb.max.y
-    let t3 = (aabb.min.y - ray.origin.y) * ray.inverse_direction.y; // Distance to min Y plane
-    let t4 = (aabb.max.y - ray.origin.y) * ray.inverse_direction.y; // Distance to max Y plane
+    let t3 = (aabb.min.y - ray.origin.y) * ray.inverse_direction.y;
+    let t4 = (aabb.max.y - ray.origin.y) * ray.inverse_direction.y;
 
-    // Z-axis slab: two planes at aabb.min.z and aabb.max.z
-    let t5 = (aabb.min.z - ray.origin.z) * ray.inverse_direction.z; // Distance to min Z plane
-    let t6 = (aabb.max.z - ray.origin.z) * ray.inverse_direction.z; // Distance to max Z plane
+    let t5 = (aabb.min.z - ray.origin.z) * ray.inverse_direction.z;
+    let t6 = (aabb.max.z - ray.origin.z) * ray.inverse_direction.z;
 
-    // Find the farthest near intersection and nearest far intersection
-    // tmin = where the ray ENTERS the 3D box (latest of all near intersections)
-    // tmax = where the ray EXITS the 3D box (earliest of all far intersections)
+    // tmin = where the ray enters the box (latest of the three near
+    // intersections); tmax = where it exits (earliest of the three far
+    // intersections). The ray misses the box unless it enters before it
+    // exits, and the box isn't entirely behind the ray's origin.
     let tmin = f32::max(
         f32::max(f32::min(t1, t2), f32::min(t3, t4)),
         f32::min(t5, t6),
@@ -119,9 +110,6 @@ pub(crate) fn ray_intersects_aabb(ray: &Ray, aabb: &AABB) -> bool {
         f32::max(t5, t6),
     );
 
-    // Check for intersection conditions:
-    // 1. tmax < 0: The box is entirely behind the ray (no intersection)
-    // 2. tmin > tmax: The ray misses the box (exits before entering)
     !(tmax < 0.0 || tmin > tmax)
 }
 
@@ -131,7 +119,6 @@ pub(crate) fn ray_sticker_intersection(ray: &Ray, world_vertices: &[Point3<f32>]
     let mut closest_distance = f32::INFINITY;
     let mut hit = false;
 
-    // Test ray against each triangle (36 vertices = 12 triangles)
     for triangle_vertices in NORMAL_TO_BASE_INDICES.chunks(3) {
         let v0 = world_vertices[triangle_vertices[0]];
         let v0 = Point3::new(v0[0], v0[1], v0[2]);
@@ -161,53 +148,35 @@ fn ray_triangle_intersection(
 ) -> Option<f32> {
     const EPSILON: f32 = 1e-8;
 
-    // Calculate triangle edges from v0
     let edge1 = v1 - v0;
     let edge2 = v2 - v0;
 
-    // Calculate determinant using cross product of ray direction and edge2
     let h = ray.direction.cross(&edge2);
     let a = edge1.dot(&h);
-
-    // If determinant is near zero, ray is parallel to triangle
     if a > -EPSILON && a < EPSILON {
         return None;
     }
 
     let f = 1.0 / a;
-
-    // Calculate vector from v0 to ray origin
     let s = ray.origin - v0;
 
-    // Calculate u parameter and test bounds
     let u = f * s.dot(&h);
     if !(0.0..=1.0).contains(&u) {
-        return None; // Intersection point is outside triangle
+        return None;
     }
 
-    // Calculate v parameter using cross product
     let q = s.cross(&edge1);
     let v = f * ray.direction.dot(&q);
-
-    // Test remaining triangle bounds
     if v < 0.0 || u + v > 1.0 {
-        return None; // Intersection point is outside triangle
+        return None;
     }
 
-    // Calculate distance along ray to intersection point
     let t = f * edge2.dot(&q);
-
-    // Return distance if intersection is in front of ray origin
-    if t > EPSILON {
-        Some(t)
-    } else {
-        None // Intersection is behind ray origin
-    }
+    if t > EPSILON { Some(t) } else { None }
 }
 
 /// Calculate sticker-level AABB using actual transformed vertices
 pub(crate) fn calculate_sticker_aabb(world_vertices: &[Point3<f32>]) -> AABB {
-    // Find min and max bounds from all transformed vertices
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut min_z = f32::INFINITY;
@@ -241,25 +210,21 @@ fn calculate_face_aabb(
 ) -> AABB {
     use crate::geometry::{BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS};
 
-    // Get face center and orientation info
     let face_center_4d = FACE_CENTERS[face_id];
     let fixed_dim = FIXED_DIMS[face_id];
     let push = face_push_offset_3d(face_center_4d, rotation_4d, viewer_distance) * gap_distance;
     let push_4d = depth_preserving_push(face_center_4d, rotation_4d, gap_distance_4d - 1.0);
 
-    // Transform the 8 corner vertices of BASE_CUBE_VERTICES to match this face
-    // We need to find the bounds that encompass all possible stickers on this face
+    // Bounds must encompass every sticker on the face, not just its own
+    // extent: the sticker grid spans positions -2/3, 0, +2/3 (a 4/3 range),
+    // and BASE_CUBE_VERTICES is scaled by BASE_STICKER_SIZE in renderer.rs
+    // then by sticker_scale in the shaders, so add GRID_EXTENT on top of the
+    // scaled sticker size to cover the whole face.
     let mut transformed_corners_3d = Vec::with_capacity(8);
-
-    // The face extends across the full 3x3x3 sticker grid plus sticker size
-    // Sticker grid positions: -2/3, 0, +2/3 (range of 4/3)
-    // BASE_CUBE_VERTICES are scaled by BASE_STICKER_SIZE in renderer.rs, then by sticker_scale in shaders
-    // Plus add the grid extent to cover all stickers on the face
-    let actual_sticker_size = BASE_STICKER_SIZE * sticker_scale; // Apply UI sticker scale
-    let face_bound = actual_sticker_size + GRID_EXTENT; // Total face extent
+    let actual_sticker_size = BASE_STICKER_SIZE * sticker_scale;
+    let face_bound = actual_sticker_size + GRID_EXTENT;
 
     for &base_vertex in &BASE_CUBE_VERTICES {
-        // Use project_cube_point exactly like shader_widget does, but with face bounds
         let local_vertex =
             Vector3::new(base_vertex[0], base_vertex[1], base_vertex[2]) * face_bound;
         let corner_3d = project_cube_point(
@@ -273,7 +238,6 @@ fn calculate_face_aabb(
         transformed_corners_3d.push(corner_3d);
     }
 
-    // Find min and max bounds from all transformed corners
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
     let mut min_z = f32::INFINITY;
@@ -365,7 +329,6 @@ pub(crate) fn find_intersected_sticker(
             continue;
         }
 
-        // Use shared transformation logic from math.rs
         let world_vertices = transform_sticker_vertices_to_3d(
             nalgebra::Vector4::from(sticker.position_4d),
             sticker.face_id,
@@ -376,7 +339,6 @@ pub(crate) fn find_intersected_sticker(
             viewer_distance,
         );
 
-        // First check: AABB intersection using properly scaled vertices
         let sticker_aabb = calculate_sticker_aabb(&world_vertices);
         if ray_intersects_aabb(ray, &sticker_aabb) {
             // If showing sticker AABBs, create debug instance for this intersected sticker
@@ -389,7 +351,6 @@ pub(crate) fn find_intersected_sticker(
                 debug_instances.push(debug_instance);
             }
 
-            // Second check: Actual sticker geometry intersection (accurate)
             if let Some(distance) = ray_sticker_intersection(ray, &world_vertices)
                 && distance < closest_distance
             {

@@ -746,7 +746,6 @@ fn load_cross_cubemap(
         mip_level_count: None,
         base_array_layer: 0,
         array_layer_count: Some(6),
-        // new field. validate
         usage: None,
     });
 
@@ -1253,7 +1252,6 @@ impl Renderer {
         let mut vertices = CUBE_VERTICES;
         vertices
             .iter_mut()
-            // TODO divide by puzzle size
             .for_each(|v| v.iter_mut().for_each(|i| *i *= BASE_STICKER_SIZE));
         // Create vertex buffer for cube geometry
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3033,7 +3031,6 @@ impl Renderer {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
-                    // TODO new field. validate
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -3088,8 +3085,8 @@ impl Renderer {
             // 27, so chunk N only ever reaches the instances it was computed
             // for. A single draw over all 288 indices and 216 instances would
             // feed every chunk to every instance, relying on backface culling to
-            // silently discard the wrong ones (the bug perf_improvements.md #1
-            // describes); slicing per face keeps culling meaningful instead.
+            // silently discard the wrong ones; slicing per face keeps culling
+            // meaningful instead.
             // Faces `visible_faces` marks invisible skip the draw call entirely,
             // rather than issuing it and relying on the vertex shader to cull.
             for face_id in 0..8u32 {
@@ -3470,7 +3467,6 @@ impl Renderer {
                     load: wgpu::LoadOp::Load, // Don't clear - render on top of existing content
                     store: wgpu::StoreOp::Store,
                 },
-                // TODO new field. validate
                 depth_slice: None,
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {

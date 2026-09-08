@@ -111,8 +111,8 @@ fn apply_highlight(color: vec3<f32>, coverage: f32, instance_index: u32, piece_s
 }
 
 // Water: a bump-mapped sea surface applied per sticker facet rather than
-// vertex-displaced. Each of a face's 27 water stickers
-// renders its own independent-looking wave patch: the local UV domain is
+// vertex-displaced. Each of a face's 27 water stickers renders its own
+// independent-looking wave patch: the local UV domain is
 // always the sticker's own -1..1 mesh square (normalized by
 // `STICKER_HALF_EXTENT`, defined below in the Fire section), so without a
 // per-instance offset every sticker sharing a face normal would sample the
@@ -1101,17 +1101,13 @@ fn fs_ice(in: VertexOutput) -> @location(0) vec4<f32> {
     // Small on purpose: `ice_normal_map` takes a *numerical derivative* of
     // `ice_triplanar_noise` at this offset position, and that noise's own
     // octaves multiply the position by up to ~4.8x internally. A large
-    // offset (this used to be `* 100.0`, matching the much larger shifts
-    // Water/Lightning use for effects that only ever *sample* noise, never
-    // differentiate it) pushes the finite-difference evaluation far enough
-    // out that float32 precision can't resolve the `d = 0.005` step
-    // `ice_normal_map` diffs by, so it starts returning near-zero gradients
-    // and NaNs (see `ice_normal_map`'s guard) - a bug the user found by
-    // spotting black dots where Fire's blended pass composited over them.
-    // This range still shifts each of a face's 27 stickers by roughly a
-    // full noise cell (`ICE_BUMP_UV_SCALE` = 0.2, so `5.0 * 0.2 = 1.0`),
-    // decorrelating their patterns same as before, just at a magnitude the
-    // derivative stays well-conditioned at.
+    // offset pushes the finite-difference evaluation far enough out that
+    // float32 precision can't resolve the `d = 0.005` step `ice_normal_map`
+    // diffs by, so it starts returning near-zero gradients and NaNs (see
+    // `ice_normal_map`'s guard). This magnitude still shifts each of a
+    // face's 27 stickers by roughly a full noise cell (`ICE_BUMP_UV_SCALE` =
+    // 0.2, so `5.0 * 0.2 = 1.0`), decorrelating their patterns while keeping
+    // the derivative well-conditioned.
     let instance_seed = hash11(f32(in.instance_index) * 0.4127) * 5.0;
     let bump_normal_delta = ice_normal_map(
         entry_local * ICE_ROUGHNESS + vec3<f32>(instance_seed),
@@ -1146,14 +1142,11 @@ fn fs_ice(in: VertexOutput) -> @location(0) vec4<f32> {
     // was reached by actually traveling along `refract_dir_local` in local
     // space, so the true world-space travel direction - the one Snell's law
     // at the exit surface needs as its incident ray - is this remapped
-    // direction, not the original unwarped `refract_dir`. Using `refract_dir`
-    // there was self-consistent as a world-space computation but physically
-    // wrong: it silently substitutes the pre-warp direction for the ray that
-    // actually reached this exit point, an error that grows with how much
-    // `to_world` skews near this facet - worst right at a sticker's own
-    // edges/corners, where adjacent local faces (and their skew) change
-    // fastest, showing up as a visibly wrong refracted sample right at those
-    // edges.
+    // direction, not the original unwarped `refract_dir`: substituting the
+    // pre-warp direction would silently diverge from the ray that actually
+    // reached this exit point, an error that grows with how much `to_world`
+    // skews near this facet - worst right at a sticker's own edges/corners,
+    // where adjacent local faces (and their skew) change fastest.
     let travel_dir_world = normalize(to_world * refract_dir_local);
     // The source tunes its inner-color mix/tint against travel distance
     // through its own box, half-extent 0.25 in the same units as its ray
@@ -1191,19 +1184,14 @@ fn fs_ice(in: VertexOutput) -> @location(0) vec4<f32> {
     // `refracted_background`/`reflected_background` above are read straight
     // from the actual rendered HDR scene - which can already carry values
     // brighter than anything this shader itself generates (e.g. a nearby
-    // Fire sticker's emissive rim). The source assumed its own background
-    // samples (a bounded floor/sky) stayed under ~1.7 and relied on its
-    // final `pow(c, 0.4545)` hitting an LDR framebuffer to hard-clip
-    // anything over 1.0 with no visible side effect. This app instead
-    // composites through a bloom pass keyed off `BLOOM_THRESHOLD = 2.0`
-    // (`post_process.wgsl`), documented there as a no-op for every current
-    // material - an ice sticker that mixes/adds on top of an
-    // already-bright scene sample can cross that threshold and bloom out
-    // its own fine bump detail into a soft glow, which reads as "washed
-    // out"/less textured right where the background behind it is brightest.
-    // Clamping here keeps Ice inside the same no-bloom invariant every
-    // other material already holds itself to, rather than laundering
-    // unbounded scene brightness through unclipped.
+    // Fire sticker's emissive rim). This app composites through a bloom
+    // pass keyed off `BLOOM_THRESHOLD = 2.0` (`post_process.wgsl`),
+    // documented there as a no-op for every current material - an ice
+    // sticker that mixes/adds on top of an already-bright scene sample can
+    // cross that threshold and bloom out its own fine bump detail into a
+    // soft glow, which reads as "washed out"/less textured right where the
+    // background behind it is brightest. Clamping here keeps Ice inside the
+    // same no-bloom invariant every other material already holds itself to.
     let bloom_safe_color = min(final_color, vec3<f32>(1.9));
 
     return vec4<f32>(

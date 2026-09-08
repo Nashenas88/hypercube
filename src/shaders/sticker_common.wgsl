@@ -34,8 +34,7 @@ var<uniform> highlighting: HighlightingUniform;
 var<uniform> light: LightUniform;
 
 // Sticker indices grouped into contiguous `(face_id, kind)` blocks, read only
-// by the particle pipeline: it looks a particle's owning sticker up here
-// instead of dividing its instance index by a shared per-kind budget, since
-// each kind now has its own.
+// by the particle pipeline to look up a particle's owning sticker, since
+// each kind has its own per-kind emission budget.
 @group(0) @binding(6)
 var<storage, read> sticker_order: array<u32>;

@@ -268,8 +268,7 @@ fn lightning_particle(sticker_index: u32, instance_index: u32, anchor: StickerAn
 }
 
 // Fire: embers thrown off the sticker in every direction, cooling from
-// yellow to deep red as they slow. Temporarily still the shared analytic
-// path; f1/f2 replace this with fire's own per-band emitter math.
+// yellow to deep red as they slow.
 fn fire_particle(sticker_index: u32, instance_index: u32, anchor: StickerAnchor) -> ParticleSample {
     var style = default_style();
     style.lifetime = 1.2;

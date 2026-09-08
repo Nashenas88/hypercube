@@ -84,9 +84,8 @@ pub(crate) fn process_4d_rotation(
 
 /// Transform a 4D position to 3D world space using perspective projection.
 ///
-/// This is the core transformation used throughout the application for
-/// projecting 4D coordinates to visible 3D space. Replaces duplicate logic
-/// in ray_casting.rs and shader_widget.rs.
+/// The core transformation used throughout the application for projecting
+/// 4D coordinates to visible 3D space.
 ///
 /// # Arguments
 /// * `position_4d` - 4D position to transform
@@ -155,9 +154,6 @@ pub(crate) fn depth_preserving_push(
 }
 
 /// Transform all vertices of a sticker cube to 3D space.
-///
-/// Replaces the duplicate vertex transformation logic in both
-/// ray_casting.rs and shader_widget.rs.
 ///
 /// # Arguments
 /// * `sticker_position_4d` - 4D position of the sticker (nominal, unpushed)
@@ -453,8 +449,6 @@ pub(crate) fn compose_so4(p: UnitQuaternion<f32>, q: UnitQuaternion<f32>) -> Mat
 
 /// Check if a 4D face is visible from the viewer position.
 ///
-/// Replaces the duplicate implementation in ray_casting.rs is_face_visible().
-///
 /// # Arguments
 /// * `face_id` - Face ID (0-7) to check visibility for
 /// * `rotation_4d` - 4D rotation matrix
@@ -496,9 +490,8 @@ mod tests {
         );
     }
 
-    /// Reference implementation kept only to check `create_4d_plane_rotation`
-    /// against, now that `process_4d_rotation` derives its planes from the
-    /// camera instead of always using world Y/W.
+    /// Reference implementation of a fixed Y/W-plane rotation, kept only to
+    /// check `create_4d_plane_rotation`'s general form against a known case.
     fn create_4d_rotation_yw(angle: f32) -> Matrix4<f32> {
         let cos_y = angle.cos();
         let sin_y = angle.sin();
