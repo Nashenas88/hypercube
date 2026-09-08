@@ -247,6 +247,11 @@ pub(crate) struct Renderer {
     /// Graphics pipeline for the Elemental theme's Fire stickers, blended
     /// rather than opaque
     fire_pipeline: wgpu::RenderPipeline,
+    /// Graphics pipeline for the Elemental theme's Ice stickers. Opaque and
+    /// depth-writing, unlike Fire, but drawn one instance and one depth
+    /// layer at a time (see `render()`) since each layer reads back a
+    /// snapshot of the scene so far as its refraction/reflection background.
+    ice_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for the Elemental theme's billboarded particles
     particle_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for normal visualization
@@ -277,8 +282,8 @@ pub(crate) struct Renderer {
     /// opaque and depth-tested, in a small inset in the corner of the main
     /// scene, using the exact same live camera/instance/transform data the
     /// main pass used. Reusing those buffers rather than recomputing
-    /// anything means the inset can never drift from what `fire_order`'s
-    /// `FaceSlabs` actually scored - the same transform decides the
+    /// anything means the inset can never drift from what `depth_draw_order`'s
+    /// topological sort actually scored - the same transform decides the
     /// geometry either way. `shader_widget.rs` cycles this through whichever
     /// faces currently hold a Fire sticker.
     current_ground_truth_debug_face: Option<u32>,
@@ -361,6 +366,26 @@ pub(crate) struct Renderer {
     blur_h_bind_group: wgpu::BindGroup,
     blur_v_bind_group: wgpu::BindGroup,
     composite_bind_group: wgpu::BindGroup,
+    /// Gray noise texture Ice's triplanar bump-mapping samples as
+    /// `iChannel0`, loaded once from `src/resources/ice_noise_64.png` (see
+    /// `src/bin/generate_ice_noise.rs`). The `Texture` is otherwise unused
+    /// after creation, kept alive only because `ice_noise_view` borrows it.
+    _ice_noise_texture: wgpu::Texture,
+    ice_noise_view: wgpu::TextureView,
+    ice_noise_sampler: wgpu::Sampler,
+    /// Snapshot of `scene_texture`'s contents ("iChannel1") each Ice depth
+    /// layer's pass reads as its refraction/reflection background; see
+    /// `render()`. Resized alongside `scene_texture`.
+    ice_bg_texture: wgpu::Texture,
+    ice_bg_view: wgpu::TextureView,
+    /// Layout for `ice_bind_group`, kept to rebuild it in `resize` whenever
+    /// `ice_bg_view` is replaced.
+    ice_bind_group_layout: wgpu::BindGroupLayout,
+    ice_bind_group: wgpu::BindGroup,
+    /// Backs `ice_bind_group`'s binding 4, rewritten every frame in
+    /// `update_camera`. Never needs recreating in `resize` (only its
+    /// contents change), unlike the rest of `ice_bind_group`'s resources.
+    ice_background_transform_buffer: wgpu::Buffer,
     /// Transform uniform buffer for vertex shaders
     transform_buffer: wgpu::Buffer,
     /// Skybox bind group
@@ -403,6 +428,23 @@ pub(crate) struct LightUniform {
     /// Ambient light color
     ambient: [f32; 3],
     _padding3: f32,
+}
+
+/// Maps NDC (from `camera.view_proj`) into `ice_bg_texture`'s texture-space
+/// UV, for `elemental_shader.wgsl`'s `ice_sample_background`. `scene_texture`/
+/// `ice_bg_texture` are sized to the full window, but the 3D scene only
+/// occupies `Renderer::bounds` within it (a sub-rectangle - the shader
+/// widget's viewport, e.g. below the menu bar) - treating NDC as spanning the
+/// *whole* texture would sample outside that sub-rectangle, into pixels
+/// `render()` never draws. Recomputed every frame in `update_camera`, since
+/// either `bounds` or the texture's size can change between frames.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct IceBackgroundTransform {
+    /// `bounds.{width,height}` as a fraction of the full texture's size.
+    scale: [f32; 2],
+    /// `bounds.{x,y}` as a fraction of the full texture's size.
+    offset: [f32; 2],
 }
 
 /// Highlighting uniform data for sticker hover effects
@@ -662,12 +704,16 @@ fn create_depth_texture(
 }
 
 /// Creates one `HDR_FORMAT` render target usable both as a pass's color
-/// attachment and as a later pass's sampled input.
+/// attachment and as a later pass's sampled input. `extra_usage` adds any
+/// further capability a particular target needs beyond that - `COPY_SRC` for
+/// `scene_texture`, which `render()` copies from into `ice_bg_texture`
+/// before each Ice depth layer's pass.
 fn create_hdr_target(
     device: &Device,
     label: &str,
     width: u32,
     height: u32,
+    extra_usage: wgpu::TextureUsages,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
@@ -680,11 +726,118 @@ fn create_hdr_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | extra_usage,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
+}
+
+/// Loads a small grayscale PNG as a `Rgba8Unorm` 2D texture, sampled nearest
+/// and repeat-wrapped. Used for the Ice material's `iChannel0` bump-map
+/// noise (`src/resources/ice_noise_64.png`, produced offline by
+/// `src/bin/generate_ice_noise.rs`) - the shader's own `smoothSampling`
+/// reconstructs its bicubic-ish smoothing from these unfiltered texel reads,
+/// so the sampler itself stays unfiltered.
+fn load_gray_noise_texture(
+    device: &Device,
+    queue: &Queue,
+    image_path: &str,
+) -> Result<(wgpu::Texture, wgpu::TextureView, wgpu::Sampler), Box<dyn std::error::Error>> {
+    let image_bytes = std::fs::read(image_path)?;
+    let image = image::load_from_memory(&image_bytes)?.to_rgba8();
+    let (width, height) = image.dimensions();
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Ice Noise Texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        image.as_raw(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("Ice Noise Sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+
+    Ok((texture, view, sampler))
+}
+
+/// Builds Ice's `@group(1)` bind group (iChannel0 noise, iChannel1
+/// background, and the NDC-to-background-UV transform), needed both at
+/// creation and whenever `resize` replaces `ice_bg_view`.
+#[allow(clippy::too_many_arguments)]
+fn create_ice_bind_group(
+    device: &Device,
+    layout: &wgpu::BindGroupLayout,
+    noise_view: &wgpu::TextureView,
+    noise_sampler: &wgpu::Sampler,
+    background_view: &wgpu::TextureView,
+    background_sampler: &wgpu::Sampler,
+    background_transform_buffer: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Ice Bind Group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(noise_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(noise_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(background_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(background_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: background_transform_buffer.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 /// Rebuilds the post-process pipelines' bind groups against the current
@@ -877,13 +1030,36 @@ impl Renderer {
             "Scene Texture",
             viewport_size.width,
             viewport_size.height,
+            wgpu::TextureUsages::COPY_SRC,
         );
         let bloom_width = (viewport_size.width / 2).max(1);
         let bloom_height = (viewport_size.height / 2).max(1);
-        let (bloom_texture_a, bloom_view_a) =
-            create_hdr_target(device, "Bloom Texture A", bloom_width, bloom_height);
-        let (bloom_texture_b, bloom_view_b) =
-            create_hdr_target(device, "Bloom Texture B", bloom_width, bloom_height);
+        let (bloom_texture_a, bloom_view_a) = create_hdr_target(
+            device,
+            "Bloom Texture A",
+            bloom_width,
+            bloom_height,
+            wgpu::TextureUsages::empty(),
+        );
+        let (bloom_texture_b, bloom_view_b) = create_hdr_target(
+            device,
+            "Bloom Texture B",
+            bloom_width,
+            bloom_height,
+            wgpu::TextureUsages::empty(),
+        );
+        // Snapshot of `scene_view`'s contents each Ice depth layer's pass
+        // reads as its background ("iChannel1"): `render()` copies
+        // `scene_texture` into this every layer, right before that layer's
+        // own pass, so a nearer layer's snapshot already contains every
+        // farther one's own refracted/reflected result.
+        let (ice_bg_texture, ice_bg_view) = create_hdr_target(
+            device,
+            "Ice Background Texture",
+            viewport_size.width,
+            viewport_size.height,
+            wgpu::TextureUsages::COPY_DST,
+        );
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
@@ -1118,6 +1294,59 @@ impl Renderer {
                     },
                 ],
                 label: Some("Main Bind Group Layout"),
+            });
+
+        // Ice's own bind group (group 1 alongside `main_bind_group_layout`
+        // at group 0, which has no free texture slots): iChannel0 (gray
+        // noise) and iChannel1 (the scene-so-far snapshot `render()` copies
+        // into `ice_bg_texture` before each depth layer).
+        let ice_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+                label: Some("Ice Bind Group Layout"),
             });
 
         // Normal shader bind group layout (transform, camera, instances)
@@ -1466,6 +1695,12 @@ impl Renderer {
                 push_constant_ranges: &[],
             });
 
+        let ice_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Ice Pipeline Layout"),
+            bind_group_layouts: &[&main_bind_group_layout, &ice_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
         let normal_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Normal Pipeline Layout"),
@@ -1748,6 +1983,64 @@ impl Renderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        // Ice's material raymarches refraction/reflection against a
+        // snapshot of the scene so far (`ice_bind_group`'s iChannel1), so it
+        // needs the extra bind group `fire_pipeline` doesn't. Unlike Fire it
+        // writes a fully opaque result and real depth: there's no blending
+        // left for the GPU to do (the shader already composited the
+        // background itself via texture reads), and later particles should
+        // be properly occluded by / occlude solid ice rather than glow
+        // through it.
+        let ice_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Ice Pipeline"),
+            layout: Some(&ice_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &elemental_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &elemental_shader,
+                entry_point: Some("fs_ice"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -2145,6 +2438,37 @@ impl Renderer {
             label: Some("Skybox Bind Group"),
         });
 
+        // Ice's gray noise bump-map texture (see `load_gray_noise_texture`)
+        // and the bind group pairing it with the scene-snapshot texture
+        // created earlier alongside `scene_texture`.
+        let (ice_noise_texture, ice_noise_view, ice_noise_sampler) =
+            load_gray_noise_texture(device, queue, "src/resources/ice_noise_64.png")
+                .expect("Failed to load Ice noise texture");
+        let ice_background_transform_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Ice Background Transform Buffer"),
+                contents: bytemuck::cast_slice(&[IceBackgroundTransform {
+                    scale: [
+                        bounds.width / viewport_size.width as f32,
+                        bounds.height / viewport_size.height as f32,
+                    ],
+                    offset: [
+                        bounds.x / viewport_size.width as f32,
+                        bounds.y / viewport_size.height as f32,
+                    ],
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let ice_bind_group = create_ice_bind_group(
+            device,
+            &ice_bind_group_layout,
+            &ice_noise_view,
+            &ice_noise_sampler,
+            &ice_bg_view,
+            &post_process_sampler,
+            &ice_background_transform_buffer,
+        );
+
         Self {
             bounds,
             target_format: format,
@@ -2154,6 +2478,7 @@ impl Renderer {
             classic_pipeline,
             elemental_pipeline,
             fire_pipeline,
+            ice_pipeline,
             particle_pipeline,
             normal_pipeline,
             depth_pipeline,
@@ -2203,6 +2528,14 @@ impl Renderer {
             blur_h_bind_group,
             blur_v_bind_group,
             composite_bind_group,
+            _ice_noise_texture: ice_noise_texture,
+            ice_noise_view,
+            ice_noise_sampler,
+            ice_bg_texture,
+            ice_bg_view,
+            ice_bind_group_layout,
+            ice_bind_group,
+            ice_background_transform_buffer,
             transform_buffer,
             skybox_bind_group,
         }
@@ -2239,14 +2572,36 @@ impl Renderer {
                 new_size.height,
             );
 
-            (self.scene_texture, self.scene_view) =
-                create_hdr_target(device, "Scene Texture", new_size.width, new_size.height);
+            (self.scene_texture, self.scene_view) = create_hdr_target(
+                device,
+                "Scene Texture",
+                new_size.width,
+                new_size.height,
+                wgpu::TextureUsages::COPY_SRC,
+            );
             let bloom_width = (new_size.width / 2).max(1);
             let bloom_height = (new_size.height / 2).max(1);
-            (self.bloom_texture_a, self.bloom_view_a) =
-                create_hdr_target(device, "Bloom Texture A", bloom_width, bloom_height);
-            (self.bloom_texture_b, self.bloom_view_b) =
-                create_hdr_target(device, "Bloom Texture B", bloom_width, bloom_height);
+            (self.bloom_texture_a, self.bloom_view_a) = create_hdr_target(
+                device,
+                "Bloom Texture A",
+                bloom_width,
+                bloom_height,
+                wgpu::TextureUsages::empty(),
+            );
+            (self.bloom_texture_b, self.bloom_view_b) = create_hdr_target(
+                device,
+                "Bloom Texture B",
+                bloom_width,
+                bloom_height,
+                wgpu::TextureUsages::empty(),
+            );
+            (self.ice_bg_texture, self.ice_bg_view) = create_hdr_target(
+                device,
+                "Ice Background Texture",
+                new_size.width,
+                new_size.height,
+                wgpu::TextureUsages::COPY_DST,
+            );
 
             (
                 self.bright_pass_bind_group,
@@ -2262,6 +2617,16 @@ impl Renderer {
                 &self.bloom_view_a,
                 &self.bloom_view_b,
             );
+
+            self.ice_bind_group = create_ice_bind_group(
+                device,
+                &self.ice_bind_group_layout,
+                &self.ice_noise_view,
+                &self.ice_noise_sampler,
+                &self.ice_bg_view,
+                &self.post_process_sampler,
+                &self.ice_background_transform_buffer,
+            );
         }
     }
 
@@ -2276,6 +2641,27 @@ impl Renderer {
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
+        );
+
+        // `bounds` (the shader widget's viewport) and `scene_texture`'s size
+        // (the full window) can each change independently between frames -
+        // recomputed unconditionally here rather than only in `resize`,
+        // since `update_camera` already runs every frame regardless.
+        let scene_size = self.scene_texture.size();
+        let ice_background_transform = IceBackgroundTransform {
+            scale: [
+                self.bounds.width / scene_size.width as f32,
+                self.bounds.height / scene_size.height as f32,
+            ],
+            offset: [
+                self.bounds.x / scene_size.width as f32,
+                self.bounds.y / scene_size.height as f32,
+            ],
+        };
+        queue.write_buffer(
+            &self.ice_background_transform_buffer,
+            0,
+            bytemuck::cast_slice(&[ice_background_transform]),
         );
     }
 
@@ -2442,8 +2828,26 @@ impl Renderer {
     /// offscreen HDR `scene_view`; `composite` blits it (plus, under
     /// `Theme::Elemental`, bloom) into the real surface afterward.
     ///
-    /// Updates camera uniforms, acquires surface texture, and draws all instances
-    /// with proper depth testing.
+    /// Under `(RenderMode::Standard, Theme::Elemental)` this is several
+    /// passes rather than one, all loading (not clearing) `scene_view`/
+    /// `depth_view` so each sees what the last left behind:
+    /// 1. Skybox, then the opaque hypercube (every kind but Ice and Fire,
+    ///    which both discard - see `elemental_shader.wgsl`'s `fs_main`).
+    /// 2. Fire's and Ice's stickers, back-to-front together per
+    ///    `depth_order` (`shader_widget::depth_draw_order`) so either kind
+    ///    correctly draws over the other depending on the current 4D
+    ///    rotation, not one kind fully before the other. Consecutive `Fire`
+    ///    entries share one pass (blended, no depth write - see `fs_fire`);
+    ///    each `Ice` entry gets its own copy-then-pass, since outside any
+    ///    pass (a texture can't be a render target and a sampled input at
+    ///    once) `scene_texture` is copied into `ice_bg_texture` first, then
+    ///    a pass draws that one instance with `ice_pipeline`, which samples
+    ///    the copy as its refraction/reflection background - so a nearer Ice
+    ///    sticker's snapshot already shows every farther Fire or Ice
+    ///    sticker's own result. Unlike Fire, Ice writes real depth, so later
+    ///    particles are correctly hidden behind or drawn over it.
+    /// 3. Particles, now that Ice's depth is in place for them to test
+    ///    against.
     ///
     /// # Arguments
     /// * `camera` - Current camera state for view matrix
@@ -2451,19 +2855,21 @@ impl Renderer {
     /// * `visible_faces` - Per-`face_id` visibility (see `math::visible_faces`);
     ///   faces marked invisible are skipped entirely, issuing no draw call
     ///   and no vertex-shader invocations for their 27 instances.
-    /// * `fire_order` - back-to-front instance indices for the Elemental
-    ///   theme's blended Fire pass (see `shader_widget::fire_draw_order`);
+    /// * `depth_order` - combined back-to-front draw order for the Elemental
+    ///   theme's Fire and Ice passes (see `shader_widget::depth_draw_order`);
     ///   ignored under any other render mode or theme.
     pub(crate) fn render(
         &self,
         encoder: &mut CommandEncoder,
         visible_faces: &[bool; 8],
-        fire_order: &[u32],
+        depth_order: &[crate::shader_widget::DepthLayer],
     ) {
-        // Scoped so `render_pass` (whose `Drop` ends the wgpu pass) is
-        // finished before `render_ground_truth_debug_inset` opens a second
-        // one on the same encoder below.
-        let (indices_per_face, facets_per_face) = {
+        let indices_per_face = VERTEX_NORMAL_INDICES.len() as u32;
+        let facets_per_face = self.num_stickers as u32 / 8;
+        let is_elemental_standard = (self.current_render_mode, self.current_theme)
+            == (RenderMode::Standard, Theme::Elemental);
+
+        {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2537,8 +2943,6 @@ impl Renderer {
             // describes); slicing per face keeps culling meaningful instead.
             // Faces `visible_faces` marks invisible skip the draw call entirely,
             // rather than issuing it and relying on the vertex shader to cull.
-            let indices_per_face = VERTEX_NORMAL_INDICES.len() as u32;
-            let facets_per_face = self.num_stickers as u32 / 8;
             for face_id in 0..8u32 {
                 if !visible_faces[face_id as usize] {
                     continue;
@@ -2552,39 +2956,214 @@ impl Renderer {
                 );
             }
 
-            if (self.current_render_mode, self.current_theme)
-                == (RenderMode::Standard, Theme::Elemental)
-            {
-                // Fire's blended stickers come after the opaque ones, so the
-                // depth they test against is complete, and before the particles,
-                // whose additive blending then glows over them instead of being
-                // overwritten by them.
-                render_pass.set_pipeline(&self.fire_pipeline);
-                for &instance_index in fire_order {
-                    let index_start = (instance_index / facets_per_face) * indices_per_face;
-                    render_pass.draw_indexed(
-                        index_start..index_start + indices_per_face,
-                        0,
-                        instance_index..instance_index + 1,
-                    );
-                }
+            // Fire's and Ice's stickers draw after the opaque ones, so the
+            // depth they test against is complete; both are handled below,
+            // interleaved by `depth_order` rather than in this pass.
+        }
 
-                render_pass.set_pipeline(&self.particle_pipeline);
-                for (face_id, visible) in visible_faces.iter().enumerate() {
-                    if !visible {
-                        continue;
+        if is_elemental_standard {
+            use crate::shader_widget::DepthLayer;
+
+            let scene_size = self.scene_texture.size();
+            // Consecutive `Fire` entries share this pass; an `Ice` entry
+            // closes it (if open), snapshots the scene so far, and opens its
+            // own fresh one - `None` here means "no pass currently open",
+            // not "nothing left to draw".
+            // Grouped ahead of the actual drawing below, purely as data (no
+            // pass or encoder borrow involved yet): consecutive `Fire`
+            // entries collapse into one run sharing a single pass, since
+            // Fire needs no copy between draws, while every `Ice` entry
+            // stays its own run, since it does. Pre-grouping like this - one
+            // fresh `RenderPass` local per loop iteration below, never one
+            // carried across iterations in an outer variable - is what lets
+            // the borrow checker see each pass as done before the next
+            // begins; a single loop over `depth_order` juggling one
+            // `Option<RenderPass>` across iterations runs into a borrow
+            // conflict it can't prove sound, even though the runtime
+            // behavior would be identical.
+            enum DrawRun {
+                Fire(Vec<u32>),
+                Ice(u32),
+            }
+            let mut runs: Vec<DrawRun> = Vec::new();
+            for &layer in depth_order {
+                match layer {
+                    DepthLayer::Fire(instance_index) => match runs.last_mut() {
+                        Some(DrawRun::Fire(indices)) => indices.push(instance_index),
+                        _ => runs.push(DrawRun::Fire(vec![instance_index])),
+                    },
+                    DepthLayer::Ice(instance_index) => runs.push(DrawRun::Ice(instance_index)),
+                }
+            }
+
+            for run in &runs {
+                match run {
+                    DrawRun::Ice(instance_index) => {
+                        // A texture can't be a render target and a sampled
+                        // input at the same time, so this copy runs with no
+                        // pass open - guaranteed here since the previous
+                        // run's pass, a fresh local of its own, was dropped
+                        // at the end of the last loop iteration.
+                        encoder.copy_texture_to_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &self.scene_texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &self.ice_bg_texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            scene_size,
+                        );
+
+                        let mut ice_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Depth Layer Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &self.scene_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                                depth_slice: None,
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: &self.depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+                        ice_pass.set_viewport(
+                            self.bounds.x,
+                            self.bounds.y,
+                            self.bounds.width,
+                            self.bounds.height,
+                            0.0,
+                            1.0,
+                        );
+                        ice_pass.set_pipeline(&self.ice_pipeline);
+                        ice_pass.set_bind_group(0, &self.main_bind_group, &[]);
+                        ice_pass.set_bind_group(1, &self.ice_bind_group, &[]);
+                        ice_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                        ice_pass.set_index_buffer(
+                            self.face_index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint16,
+                        );
+                        let index_start = (instance_index / facets_per_face) * indices_per_face;
+                        ice_pass.draw_indexed(
+                            index_start..index_start + indices_per_face,
+                            0,
+                            *instance_index..*instance_index + 1,
+                        );
                     }
-                    for range in &self.particle_ranges[face_id] {
-                        if range.is_empty() {
-                            continue;
+                    DrawRun::Fire(indices) => {
+                        let mut fire_pass =
+                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("Depth Layer Pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &self.scene_view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                    depth_slice: None,
+                                })],
+                                depth_stencil_attachment: Some(
+                                    wgpu::RenderPassDepthStencilAttachment {
+                                        view: &self.depth_view,
+                                        depth_ops: Some(wgpu::Operations {
+                                            load: wgpu::LoadOp::Load,
+                                            store: wgpu::StoreOp::Store,
+                                        }),
+                                        stencil_ops: None,
+                                    },
+                                ),
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                        fire_pass.set_viewport(
+                            self.bounds.x,
+                            self.bounds.y,
+                            self.bounds.width,
+                            self.bounds.height,
+                            0.0,
+                            1.0,
+                        );
+                        fire_pass.set_pipeline(&self.fire_pipeline);
+                        fire_pass.set_bind_group(0, &self.main_bind_group, &[]);
+                        fire_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                        fire_pass.set_index_buffer(
+                            self.face_index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint16,
+                        );
+                        for &instance_index in indices {
+                            let index_start = (instance_index / facets_per_face) * indices_per_face;
+                            fire_pass.draw_indexed(
+                                index_start..index_start + indices_per_face,
+                                0,
+                                instance_index..instance_index + 1,
+                            );
                         }
-                        render_pass.draw(0..QUAD_VERTICES, range.clone());
                     }
                 }
             }
 
-            (indices_per_face, facets_per_face)
-        };
+            let mut particle_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Particle Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.scene_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            particle_pass.set_viewport(
+                self.bounds.x,
+                self.bounds.y,
+                self.bounds.width,
+                self.bounds.height,
+                0.0,
+                1.0,
+            );
+            particle_pass.set_pipeline(&self.particle_pipeline);
+            particle_pass.set_bind_group(0, &self.main_bind_group, &[]);
+            for (face_id, visible) in visible_faces.iter().enumerate() {
+                if !visible {
+                    continue;
+                }
+                for range in &self.particle_ranges[face_id] {
+                    if range.is_empty() {
+                        continue;
+                    }
+                    particle_pass.draw(0..QUAD_VERTICES, range.clone());
+                }
+            }
+        }
 
         if let Some(face_id) = self.current_ground_truth_debug_face {
             self.render_ground_truth_debug_inset(
@@ -2600,8 +3179,8 @@ impl Renderer {
     /// depth-tested, restricted to a small square viewport in the corner of
     /// `scene_view`, regardless of `visible_faces`. Reuses `classic_pipeline`
     /// and the same live vertex/instance/transform buffers `render` just
-    /// drew with, so the inset can never drift from what `fire_order`'s
-    /// `FaceSlabs` actually scored - the exact same transform decides the
+    /// drew with, so the inset can never drift from what `depth_draw_order`'s
+    /// topological sort actually scored - the exact same transform decides the
     /// geometry either way. Loads `scene_view` rather than clearing it, so
     /// the main scene this pass draws over survives; clears its own
     /// dedicated `debug_inset_depth_view` rather than `depth_view`, so it
@@ -2736,7 +3315,7 @@ impl Renderer {
         device: &Device,
         queue: &Queue,
         visible_faces: &[bool; 8],
-        fire_order: &[u32],
+        depth_order: &[crate::shader_widget::DepthLayer],
     ) -> (Vec<u8>, u32, u32) {
         let size = self.scene_texture.size();
         log::info!(
@@ -2759,7 +3338,7 @@ impl Renderer {
         let capture_view = capture_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        self.render(&mut encoder, visible_faces, fire_order);
+        self.render(&mut encoder, visible_faces, depth_order);
         self.composite(&mut encoder, &capture_view);
         queue.submit(Some(encoder.finish()));
 
@@ -2993,8 +3572,16 @@ mod tests {
             },
         );
 
-        let (pixels, width, height) =
-            renderer.capture_frame(&device, &queue, &[true; 8], &[0, 1, 2]);
+        let (pixels, width, height) = renderer.capture_frame(
+            &device,
+            &queue,
+            &[true; 8],
+            &[
+                crate::shader_widget::DepthLayer::Fire(0),
+                crate::shader_widget::DepthLayer::Ice(1),
+                crate::shader_widget::DepthLayer::Fire(2),
+            ],
+        );
 
         assert_eq!((width, height), (64, 64));
         assert_eq!(pixels.len(), (width * height * 4) as usize);
@@ -3219,9 +3806,10 @@ mod tests {
         );
 
         let visible_faces = [true; 8];
-        let fire_order = if theme == Theme::Elemental {
-            crate::shader_widget::fire_draw_order(
-                &generate_sticker_instances(&Hypercube::solved()),
+        let depth_order = if theme == Theme::Elemental {
+            let instances = generate_sticker_instances(&Hypercube::solved());
+            crate::shader_widget::depth_draw_order(
+                &instances,
                 &visible_faces,
                 &rotation_4d,
                 &camera,
@@ -3235,7 +3823,7 @@ mod tests {
             Vec::new()
         };
 
-        renderer.capture_frame(&device, &queue, &visible_faces, &fire_order)
+        renderer.capture_frame(&device, &queue, &visible_faces, &depth_order)
     }
 
     /// Compares `rgba` against a golden PNG checked into
@@ -3367,8 +3955,16 @@ mod tests {
             },
         );
 
-        let (pixels, width, height) =
-            renderer.capture_frame(&device, &queue, &[true; 8], &[0, 1, 2]);
+        let (pixels, width, height) = renderer.capture_frame(
+            &device,
+            &queue,
+            &[true; 8],
+            &[
+                crate::shader_widget::DepthLayer::Fire(0),
+                crate::shader_widget::DepthLayer::Ice(1),
+                crate::shader_widget::DepthLayer::Fire(2),
+            ],
+        );
 
         let path = std::env::var("DUMP_PATH").unwrap_or_else(|_| "/tmp/capture_dump.png".into());
         image::RgbaImage::from_raw(width, height, pixels)

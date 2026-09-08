@@ -1,6 +1,28 @@
 #import math4d::{camera, compute_sticker_anchor, compute_vertex_geometry, instances, inverse3, transform}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
-#import elemental_common::{ICE_TWINKLE_HZ, hash11, hash21, hash31, value_noise1, value_noise3, fresnel}
+#import elemental_common::{hash11, hash21, hash31, value_noise1, value_noise3, fresnel}
+
+// Ice's own bind group: iChannel0 (gray noise, for the triplanar bump map)
+// and iChannel1 (a snapshot of the rendered scene so far, copied fresh by
+// `render()` before each Ice depth layer's pass - see `ice_sample_background`).
+// `main_bind_group_layout` at group 0 has no free texture slots, so Ice's
+// pipeline binds this as a second group instead.
+@group(1) @binding(0) var ice_noise_texture: texture_2d<f32>;
+@group(1) @binding(1) var ice_noise_sampler: sampler;
+@group(1) @binding(2) var ice_background_texture: texture_2d<f32>;
+@group(1) @binding(3) var ice_background_sampler: sampler;
+
+// `ice_background_texture` is sized to the whole window, but the 3D scene
+// only occupies `Renderer::bounds` within it (a sub-rectangle - the shader
+// widget's viewport, e.g. below the menu bar). Maps NDC (spanning that
+// sub-rectangle) into the texture's own `[0,1]` UV space, recomputed every
+// frame in `Renderer::update_camera` since either `bounds` or the texture's
+// size can change between frames.
+struct IceBackgroundTransform {
+    scale: vec2<f32>,
+    offset: vec2<f32>,
+}
+@group(1) @binding(4) var<uniform> ice_background_transform: IceBackgroundTransform;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -267,29 +289,6 @@ fn water_color(
 
     let color = water_shade(perturbed_world_normal, eye, light_dir);
     return pow(color, vec3<f32>(0.75));
-}
-
-fn ice_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    let normal = normalize(world_normal);
-    let light_dir = normalize(-light.direction);
-    let view_dir = normalize(-world_position);
-
-    let shimmer = value_noise1(f32(instance_index) * 2.1 + transform.elapsed_seconds * 0.6);
-    let albedo = mix(vec3<f32>(0.75, 0.9, 0.95), vec3<f32>(0.9, 0.98, 1.0), shimmer);
-
-    let ambient = light.ambient * albedo;
-    let diffuse_strength = max(dot(normal, light_dir), 0.0);
-    let diffuse = diffuse_strength * light.color * albedo;
-
-    let half_dir = normalize(light_dir + view_dir);
-    let specular_strength = pow(max(dot(normal, half_dir), 0.0), 128.0);
-    let specular = specular_strength * light.color * 1.2;
-
-    let sparkle_time_bucket = floor(transform.elapsed_seconds * ICE_TWINKLE_HZ);
-    let sparkle_phase = hash21(vec2<f32>(f32(instance_index), sparkle_time_bucket));
-    let sparkle = step(0.97, sparkle_phase) * fresnel(normal, view_dir, 1.0);
-
-    return ambient + diffuse + specular + sparkle * vec3<f32>(1.0, 1.0, 1.0);
 }
 
 fn sand_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
@@ -585,8 +584,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var final_color: vec3<f32>;
 
     switch (in.kind) {
+        // Ice is drawn by `fs_ice` in its own per-depth-layer passes, so this
+        // one skips it rather than shading it twice.
         case 0u: {
-            final_color = ice_color(in.instance_index, in.world_position, in.world_normal);
+            discard;
+            return vec4<f32>(0.0);
         }
         case 1u: {
             final_color = leaves_color(in.instance_index, in.world_position, in.world_normal);
@@ -883,5 +885,266 @@ fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(
         apply_highlight(accumulated, coverage, in.instance_index, in.piece_slot),
         coverage,
+    );
+}
+
+// Ice: a raymarched glass cube with real refraction and reflection, ported
+// from a self-contained source scene - its own orbiting camera, its own
+// floor + box SDF, reflection and refraction sampling a previously-rendered
+// frame - so porting it means
+// replacing pieces of it with what this app already has, rather than a
+// straight per-fragment reshade like Water/Lightning:
+//
+// - Rasterizing the sticker's own cube mesh already gives an exact entry
+//   point and normal (`in.world_position`/`in.world_normal`), so unlike the
+//   source there's no need to sphere-trace to *find* the box surface first.
+// - Past that entry point there is no floor, only the ice and then whatever
+//   the real scene shows behind it: `ice_sample_background` replaces the
+//   source's synthetic floor/sky raycast with a screen-space sample of
+//   `ice_background_texture` ("iChannel1"), the snapshot `render()` copies
+//   the scene into before each Ice depth layer's pass (see `render()`'s doc
+//   comment). This is what makes Ice's refraction/reflection show the
+//   actual rendered scene.
+// - Finding where the refracted ray exits the ice again - which drives both
+//   the internal color tint and the exit-ray direction sampled from
+//   `iChannel1` - only needs an exact box intersection here, since the ice
+//   fills the sticker's whole cube: `ray_box` (defined above, in Fire's
+//   section) does that directly, in the same local frame
+//   (`compute_sticker_anchor`/`to_world`/`to_local`) Fire already uses to
+//   raymarch inside a facet, rather than the source's own sphere-traced SDF.
+// - `iChannel0`'s triplanar-sampled gray noise bump map
+//   (`ice_smooth_sample`/`ice_triplanar_sample`/`ice_triplanar_noise`) is
+//   ported over unchanged - it doesn't touch scene geometry.
+// - Dropped entirely: the source's own camera/orbit controls and its
+//   standalone vignette+gamma tail, both whole-frame effects this app's own
+//   camera and post-process/composite/bloom already cover.
+
+// Hardcoded in the source (its own UI sliders collapsed to fixed values);
+// kept as named, independently tunable constants here.
+const ICE_ROUGHNESS: f32 = 1.0;
+const ICE_REFRACTION_IDX: f32 = 1.9;
+// Always 0.0 in the source (an unused slider) - every `smoothstep` in
+// `ice_inner_color`'s ramp then reads as 0, so it always evaluates to the
+// first branch, `ICE_WHITE`. Kept as a named tunable rather than collapsed,
+// matching the source's own structure.
+const ICE_COLOR: f32 = 0.0;
+
+// Scales local position into the noise domain the triplanar bump map is
+// sampled in, matching the source's `BUMP_MAP_UV_SCALE` folded into `ROUGHNESS`.
+const ICE_BUMP_UV_SCALE: f32 = 0.2;
+// Notional resolution `ice_smooth_sample` reconstructs bicubic-ish smoothing
+// for, matching `ice_noise_64.png`'s actual size (see
+// `src/bin/generate_ice_noise.rs`) and the source's own `T_RES`.
+const ICE_NOISE_RESOLUTION: f32 = 64.0;
+// How far past the ice's exit surface a reflected/refracted ray is stepped
+// before projecting it to screen space to sample `iChannel1` - enough to
+// clear the ice's own depth without meaningfully displacing the sample.
+const ICE_BACKGROUND_SAMPLE_DISTANCE: f32 = 0.05;
+
+// Reconstructs smooth (bicubic-ish) filtering from `ice_noise_texture`'s
+// unfiltered texel reads, exactly as the source's `smoothSampling` does for
+// its own noise texture - ported unchanged past the binding names.
+fn ice_smooth_sample(uv: vec2<f32>) -> f32 {
+    let x = fract(uv * ICE_NOISE_RESOLUTION + 0.5);
+    let texel_corner = uv - x / ICE_NOISE_RESOLUTION;
+    let t = (6.0 * x * x - 15.0 * x + 10.0) * x * x * x;
+    return textureSampleLevel(ice_noise_texture, ice_noise_sampler, texel_corner + t / ICE_NOISE_RESOLUTION, 0.0).r;
+}
+
+fn ice_triplanar_sample(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    let total = abs(n.x) + abs(n.y) + abs(n.z);
+    return (abs(n.x) * ice_smooth_sample(p.yz)
+          + abs(n.y) * ice_smooth_sample(p.xz)
+          + abs(n.z) * ice_smooth_sample(p.xy)) / total;
+}
+
+const ICE_BUMP_ROTATE: mat2x2<f32> = mat2x2<f32>(0.90, 0.44, -0.44, 0.90);
+
+fn ice_triplanar_noise(p_in: vec3<f32>, n: vec3<f32>) -> f32 {
+    var p = p_in;
+    let f1 = ice_triplanar_sample(p * ICE_BUMP_UV_SCALE, n);
+
+    p = vec3<f32>(ICE_BUMP_ROTATE * p.xy, p.z);
+    p = vec3<f32>(p.x, ICE_BUMP_ROTATE * p.xz);
+    p *= 2.1;
+    let f2 = ice_triplanar_sample(p * ICE_BUMP_UV_SCALE, n);
+
+    p = vec3<f32>(ICE_BUMP_ROTATE * p.yx, p.z);
+    p = vec3<f32>(p.x, ICE_BUMP_ROTATE * p.yz);
+    p *= 2.3;
+    let f3 = ice_triplanar_sample(p * ICE_BUMP_UV_SCALE, n);
+
+    return f1 + 0.5 * f2 + 0.25 * f3;
+}
+
+fn ice_normal_map(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let d = 0.005;
+    let po = ice_triplanar_noise(p, n);
+    let px = ice_triplanar_noise(p + vec3<f32>(d, 0.0, 0.0), n);
+    let py = ice_triplanar_noise(p + vec3<f32>(0.0, d, 0.0), n);
+    let pz = ice_triplanar_noise(p + vec3<f32>(0.0, 0.0, d), n);
+    let gradient = vec3<f32>((px - po) / d, (py - po) / d, (pz - po) / d);
+
+    // A perfectly (or near-) flat sample has no defined bump direction, and
+    // `normalize` of a near-zero vector is NaN - which then poisons every
+    // later pass that blends or blurs across this pixel (Fire's blended
+    // pass, bloom), not just this one fragment. No bump reads as a flat,
+    // unperturbed surface, a safe fallback for a case that should be rare
+    // but isn't provably impossible.
+    let gradient_length = length(gradient);
+    if (gradient_length < 1e-6) {
+        return vec3<f32>(0.0);
+    }
+    return gradient / gradient_length;
+}
+
+// The source's fixed ICE_INNER color ramp. Always evaluates to `c_white`
+// with `ICE_COLOR` pinned at 0.0 (see its doc comment above).
+fn ice_inner_color() -> vec3<f32> {
+    let c_red = vec3<f32>(0.70, -0.5, -0.60);
+    let c_green = vec3<f32>(-0.50, 0.0, -0.5);
+    let c_blue = vec3<f32>(-0.50, -0.5, 0.30);
+    let c_grey = vec3<f32>(-0.3);
+    let c_white = vec3<f32>(1.0);
+
+    var col = mix(c_white, c_grey, smoothstep(0.00, 0.20, ICE_COLOR));
+    col = mix(col, c_blue, smoothstep(0.20, 0.40, ICE_COLOR));
+    col = mix(col, c_green, smoothstep(0.40, 0.60, ICE_COLOR));
+    col = mix(col, c_red, smoothstep(0.60, 0.80, ICE_COLOR));
+    return col;
+}
+
+// Replaces the source's synthetic floor/sky raycast: steps a small distance
+// along `dir_world` from `origin_world`, projects that point through the
+// real camera to screen space, and samples the actual rendered scene
+// (`ice_background_texture`, "iChannel1") there. This is what makes Ice's
+// reflection/refraction show the app's real scene rather than a procedural
+// backdrop. `ice_background_sampler` clamps to the texture edge, so a sample
+// that lands outside the viewport (a grazing reflection near screen edges)
+// degrades to the edge color instead of wrapping or reading garbage.
+fn ice_sample_background(origin_world: vec3<f32>, dir_world: vec3<f32>) -> vec3<f32> {
+    let sample_point = origin_world + dir_world * ICE_BACKGROUND_SAMPLE_DISTANCE;
+    let clip = camera.view_proj * vec4<f32>(sample_point, 1.0);
+    // `clip.w` is astronomically unlikely to land at exactly 0 for a point
+    // this close to real scene geometry, but a 0/0 NaN here would corrupt
+    // every later pass that blends or blurs across this pixel - guarding it
+    // is cheap insurance against a case that isn't provably impossible.
+    let safe_w = select(clip.w, 1e-4, abs(clip.w) < 1e-4);
+    let ndc = clip.xyz / safe_w;
+    let bounds_uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    // `bounds_uv` spans the viewport `render()` actually drew into (`[0,1]`
+    // across `Renderer::bounds`), not the whole `ice_background_texture` -
+    // that texture is sized to the full window, most of which (menu bar,
+    // any letterboxing) `render()` never touches. Without this remap, a
+    // fragment reads scaled-and-offset into the wrong part of the texture -
+    // visibly, content misaligned with (and bleeding in from) the
+    // never-rendered area outside the viewport.
+    let uv = ice_background_transform.offset + bounds_uv * ice_background_transform.scale;
+    return textureSampleLevel(ice_background_texture, ice_background_sampler, uv, 0.0).rgb;
+}
+
+// Ice's own entry point, drawn one instance and one depth layer at a time
+// (see `render()`'s doc comment) so each layer's `ice_background_texture`
+// snapshot already contains every farther Ice sticker's own result.
+//
+// Uses the same local frame Fire's `fs_fire` raymarches in
+// (`compute_sticker_anchor`/`to_world`/`to_local`), since that frame already
+// corrects for the non-uniform stretch a 4D perspective divide can leave a
+// facet with - a plain axis-aligned box in that frame is exactly the
+// sticker's own cube, so `ray_box` finds the ice's exit point exactly, with
+// no sphere-tracing needed.
+@fragment
+fn fs_ice(in: VertexOutput) -> @location(0) vec4<f32> {
+    let anchor = compute_sticker_anchor(in.instance_index, STICKER_HALF_EXTENT * transform.sticker_scale);
+    let to_world = mat3x3<f32>(anchor.edge_x, anchor.edge_y, anchor.edge_z);
+
+    let frame_volume = dot(anchor.edge_x, cross(anchor.edge_y, anchor.edge_z));
+    let edge_volume = length(anchor.edge_x) * length(anchor.edge_y) * length(anchor.edge_z);
+    if (abs(frame_volume) < edge_volume * STICKER_MIN_FRAME_VOLUME) {
+        // Near-degenerate edge-on facet, covering almost no pixels anyway -
+        // discard rather than divide by the ill-conditioned `to_local`
+        // below, same as Fire/Water do for the same case.
+        discard;
+        return vec4<f32>(0.0);
+    }
+
+    let to_local = inverse3(to_world);
+    let entry_local = to_local * (in.world_position - anchor.world_center);
+
+    let world_normal = normalize(in.world_normal);
+    // Small on purpose: `ice_normal_map` takes a *numerical derivative* of
+    // `ice_triplanar_noise` at this offset position, and that noise's own
+    // octaves multiply the position by up to ~4.8x internally. A large
+    // offset (this used to be `* 100.0`, matching the much larger shifts
+    // Water/Lightning use for effects that only ever *sample* noise, never
+    // differentiate it) pushes the finite-difference evaluation far enough
+    // out that float32 precision can't resolve the `d = 0.005` step
+    // `ice_normal_map` diffs by, so it starts returning near-zero gradients
+    // and NaNs (see `ice_normal_map`'s guard) - a bug the user found by
+    // spotting black dots where Fire's blended pass composited over them.
+    // This range still shifts each of a face's 27 stickers by roughly a
+    // full noise cell (`ICE_BUMP_UV_SCALE` = 0.2, so `5.0 * 0.2 = 1.0`),
+    // decorrelating their patterns same as before, just at a magnitude the
+    // derivative stays well-conditioned at.
+    let instance_seed = hash11(f32(in.instance_index) * 0.4127) * 5.0;
+    let bump_normal_delta = ice_normal_map(
+        entry_local * ICE_ROUGHNESS + vec3<f32>(instance_seed),
+        world_normal,
+    ) * ICE_ROUGHNESS * 0.1;
+    let bump_normal = normalize(world_normal + bump_normal_delta);
+
+    let incident = normalize(in.world_position - camera.eye_position.xyz);
+    let refract_dir = refract(incident, bump_normal, 1.0 / ICE_REFRACTION_IDX);
+    let reflect_dir = reflect(incident, bump_normal);
+    let reflect_alpha = 0.5 * (1.0 - abs(dot(incident, bump_normal)));
+
+    // `1.0 / ICE_REFRACTION_IDX` is comfortably below 1.0, so total internal
+    // reflection - `refract` returning the zero vector - is not physically
+    // reachable entering the medium the way it is on exit below. Guarded
+    // anyway: normalizing a zero vector is NaN, and unlike `exit_dir`'s
+    // already-handled TIR case, nothing downstream expects this one to ever
+    // be zero. Falls back to the (always well-defined) reflection direction,
+    // i.e. treats the entry surface as fully reflective in the case that
+    // shouldn't arise.
+    let entered = length(refract_dir) > 1e-4;
+    let refract_dir_local = normalize(to_local * select(reflect_dir, refract_dir, entered));
+    let exit_span = ray_box(entry_local, refract_dir_local, 1.0);
+    let travel = max(exit_span.y, 0.0);
+    let exit_local = entry_local + refract_dir_local * travel;
+    // The source tunes its inner-color mix/tint against travel distance
+    // through its own box, half-extent 0.25 in the same units as its ray
+    // origins - so a straight-through ray travels at most ~0.5. `ray_box`
+    // here runs in the sticker's *local* frame, a unit cube of half-extent
+    // 1.0, where the same ray travels up to ~2.0 (and up to the space
+    // diagonal, ~3.46, corner to corner) - four times the source's scale.
+    // Left unscaled, `travel` blows the source's mix weight
+    // (`0.3 * travel + ...`) past 1.0, over-extrapolating `mix` beyond
+    // `ice_inner_color()` instead of blending toward it. Rescaling by the
+    // source's box-to-diameter ratio (0.25 / 1.0) reproduces its tuning
+    // regardless of this sticker's actual local-frame box size.
+    let travel_tint = travel * 0.25;
+    let exit_normal_world = normalize(to_world * sticker_local_face_normal(exit_local));
+    let exit_point_world = anchor.world_center + to_world * exit_local;
+
+    // Refracting back out of the ice at the exit surface can hit total
+    // internal reflection - `refract` returns a zero vector then - in which
+    // case the source falls back to reflecting off that same surface
+    // instead, same as it does here.
+    var exit_dir = refract(refract_dir, -exit_normal_world, ICE_REFRACTION_IDX);
+    if (length(exit_dir) <= 0.95) {
+        exit_dir = reflect(refract_dir, -exit_normal_world);
+    }
+
+    let refracted_background = ice_sample_background(exit_point_world, exit_dir);
+    let reflected_background = ice_sample_background(in.world_position, reflect_dir);
+
+    var refract_color = refracted_background;
+    refract_color = mix(refract_color, ice_inner_color(), 0.3 * travel_tint + 0.2 * sqrt(travel_tint * 3.0));
+    refract_color += vec3<f32>(travel_tint * 0.3);
+    let final_color = mix(refract_color, reflected_background, reflect_alpha);
+
+    return vec4<f32>(
+        apply_highlight(final_color, 1.0, in.instance_index, in.piece_slot),
+        1.0,
     );
 }

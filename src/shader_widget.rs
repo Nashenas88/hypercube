@@ -36,7 +36,7 @@ use crate::ray_casting::{
 use crate::renderer::{DebugInstanceWithDistance, Renderer};
 use crate::settings::RotateButton;
 use crate::snapshot::{self, ViewSnapshot};
-use crate::theme::{ELEMENTAL_FIRE_KIND, Theme};
+use crate::theme::{ELEMENTAL_FIRE_KIND, ELEMENTAL_ICE_KIND, Theme};
 
 /// An in-progress move's animation: piece state has already been committed
 /// atomically by `apply_move`; this only drives the visual sweep from the
@@ -282,7 +282,8 @@ pub(crate) struct UiControls {
 /// floating-point noise.
 const DEPTH_TIE_EPSILON: f32 = 1e-4;
 
-/// One fire sticker as the draw order sees it.
+/// One sticker of the kind being ordered (Fire, Ice, ...) as `depth_draw_order`
+/// sees it.
 struct FireSticker {
     instance_index: u32,
     /// Depth along the camera's view axis of the sticker's rendered center.
@@ -404,23 +405,44 @@ fn ground_truth_debug_face(
     fire_faces.get(cycle_index).copied()
 }
 
-/// The order Fire's stickers are drawn in under `Theme::Elemental`: every
-/// instance of `ELEMENTAL_FIRE_KIND` on a visible face, farthest first.
+/// One element of the combined Fire+Ice back-to-front draw order
+/// `depth_draw_order` produces, tagging which pass/pipeline `render()` needs
+/// to draw it with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DepthLayer {
+    /// Blended, no depth write - see `fs_fire`.
+    Fire(u32),
+    /// Opaque, its own snapshot-and-draw pass - see `fs_ice`.
+    Ice(u32),
+}
+
+/// The order Fire's and Ice's stickers are drawn in together under
+/// `Theme::Elemental`: every instance of `ELEMENTAL_FIRE_KIND` or
+/// `ELEMENTAL_ICE_KIND` on a visible face, farthest first, interleaved
+/// rather than one kind fully before the other - both need a back-to-front
+/// order because what they draw depends on draw order, whether from
+/// blending (Fire) or from each layer's background snapshot needing to
+/// already contain every farther layer's own result (Ice), and either kind
+/// can sit in front of or behind the other depending on the current 4D
+/// rotation.
 ///
 /// Fire draws blended and writes no depth, so where two of its balls overlap
-/// on screen the result depends on the order they are drawn in.
-/// `FireSticker::is_behind` decides each pair exactly, by casting rays
-/// through their real projected corners and testing against each other's
-/// actual geometry - the same ray-vs-cube test hover and click picking
-/// already use - rather than an approximating scalar key. That relation is
-/// combined into an order by topologically sorting it, taking the farthest
-/// of the currently-unblocked stickers at each step so the result stays
-/// deterministic and close to depth order. Should the relation ever contain a
-/// cycle (which can happen for two stickers on different tesseract cells
-/// whose shared boundary is viewed near-edge-on, see `FireSticker::is_behind`),
-/// the stickers caught in it fall back to depth order rather than being lost.
+/// on screen the result depends on the order they are drawn in. Ice instead
+/// writes an opaque result but reads back a snapshot of the scene so far, so
+/// a nearer Ice sticker must draw after every farther one - Fire included -
+/// for its refraction to show them. Either way, `FireSticker::is_behind`
+/// decides each pair exactly, by casting rays through their real projected
+/// corners and testing against each other's actual geometry - the same
+/// ray-vs-cube test hover and click picking already use - rather than an
+/// approximating scalar key. That relation is combined into an order by
+/// topologically sorting it, taking the farthest of the currently-unblocked
+/// stickers at each step so the result stays deterministic and close to
+/// depth order. Should the relation ever contain a cycle (which can happen
+/// for two stickers on different tesseract cells whose shared boundary is
+/// viewed near-edge-on, see `FireSticker::is_behind`), the stickers caught
+/// in it fall back to depth order rather than being lost.
 ///
-/// At most `instances.len() / 8` stickers take part, so this runs on the CPU
+/// At most `instances.len() / 4` stickers take part, so this runs on the CPU
 /// each frame.
 ///
 /// # Arguments
@@ -436,7 +458,7 @@ fn ground_truth_debug_face(
 ///   placement parameters the vertex shader is given, so the centers and
 ///   corners land where the stickers actually render
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn fire_draw_order(
+pub(crate) fn depth_draw_order(
     instances: &[StickerInstance],
     visible_faces: &[bool; 8],
     rotation_4d: &Matrix4<f32>,
@@ -446,7 +468,7 @@ pub(crate) fn fire_draw_order(
     face_gap: f32,
     face_gap_4d: f32,
     viewer_distance: f32,
-) -> Vec<u32> {
+) -> Vec<DepthLayer> {
     if instances.is_empty() {
         return Vec::new();
     }
@@ -458,7 +480,8 @@ pub(crate) fn fire_draw_order(
         .iter()
         .enumerate()
         .filter(|(index, instance)| {
-            instance.kind == ELEMENTAL_FIRE_KIND && visible_faces[index / facets_per_face]
+            (instance.kind == ELEMENTAL_FIRE_KIND || instance.kind == ELEMENTAL_ICE_KIND)
+                && visible_faces[index / facets_per_face]
         })
         .map(|(index, instance)| {
             let face_id = index / facets_per_face;
@@ -492,6 +515,15 @@ pub(crate) fn fire_draw_order(
         .collect();
 
     topological_draw_order(&stickers, camera.eye, lattice_is_aligned)
+        .into_iter()
+        .map(|instance_index| {
+            if instances[instance_index as usize].kind == ELEMENTAL_FIRE_KIND {
+                DepthLayer::Fire(instance_index)
+            } else {
+                DepthLayer::Ice(instance_index)
+            }
+        })
+        .collect()
 }
 
 /// Linearizes the "is behind" relation over `stickers` into a draw order,
@@ -574,9 +606,11 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) sticker_instances: Arc<[StickerInstance]>,
     pub(crate) sticker_generation: u64,
     pub(crate) visible_faces: [bool; 8],
-    /// Back-to-front instance indices for Fire's blended pass, empty under
-    /// any theme that doesn't draw one (see `fire_draw_order`).
-    pub(crate) fire_order: Vec<u32>,
+    /// Combined back-to-front draw order for Fire's blended pass and Ice's
+    /// per-layer raymarch passes, interleaved so either can sit in front of
+    /// the other; empty under any theme that doesn't draw either (see
+    /// `depth_draw_order`).
+    pub(crate) depth_order: Vec<DepthLayer>,
     /// Wall-clock seconds since the app started, wrapped modulo 3600.
     pub(crate) elapsed_seconds: f32,
     /// Set by a `save_snapshot_generation` mismatch; `prepare()` captures
@@ -619,7 +653,7 @@ impl shader::Primitive for HypercubePrimitive {
 
         if let Some(request) = &self.snapshot_request {
             let (rgba, width, height) =
-                pipeline.capture_frame(device, queue, &self.visible_faces, &self.fire_order);
+                pipeline.capture_frame(device, queue, &self.visible_faces, &self.depth_order);
             snapshot::save(request, &rgba, width, height);
         }
     }
@@ -631,7 +665,7 @@ impl shader::Primitive for HypercubePrimitive {
         target: &wgpu::TextureView,
         _clip_bounds: &Rectangle<u32>,
     ) {
-        pipeline.render(encoder, &self.visible_faces, &self.fire_order);
+        pipeline.render(encoder, &self.visible_faces, &self.depth_order);
         pipeline.composite(encoder, target);
 
         // Render transparent debug AABBs
@@ -1131,8 +1165,8 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             sticker_instances: state.cached_sticker_instances.clone(),
             sticker_generation: state.sticker_generation,
             visible_faces: face_visibility,
-            fire_order: if self.theme == Theme::Elemental {
-                fire_draw_order(
+            depth_order: if self.theme == Theme::Elemental {
+                depth_draw_order(
                     &state.cached_sticker_instances,
                     &face_visibility,
                     &state.rotation_4d,
@@ -2914,7 +2948,7 @@ mod clockwise_sign_tests {
         }
     }
 
-    /// The instances, camera and 4D rotation `fire_draw_order` is exercised
+    /// The instances, camera and 4D rotation `depth_draw_order` is exercised
     /// against, all taken from a freshly-solved puzzle.
     fn fire_order_fixture() -> (Vec<StickerInstance>, Camera, Matrix4<f32>) {
         let state = HypercubeShaderState::default();
@@ -2931,13 +2965,16 @@ mod clockwise_sign_tests {
     /// separates.
     const TEST_STICKER_SCALE: f32 = 0.95;
 
+    /// The Fire-tagged subsequence of the combined `depth_draw_order`,
+    /// preserving relative order, so existing Fire-only assertions still
+    /// apply against it.
     fn fire_order_for(
         instances: &[StickerInstance],
         camera: &Camera,
         rotation_4d: &Matrix4<f32>,
         visible: &[bool; 8],
     ) -> Vec<u32> {
-        fire_draw_order(
+        depth_draw_order(
             instances,
             visible,
             rotation_4d,
@@ -2948,9 +2985,15 @@ mod clockwise_sign_tests {
             SECONDARY_FACE_GAP_4D,
             VIEWER_DISTANCE,
         )
+        .into_iter()
+        .filter_map(|layer| match layer {
+            DepthLayer::Fire(index) => Some(index),
+            DepthLayer::Ice(_) => None,
+        })
+        .collect()
     }
 
-    /// Builds the `FireSticker` `fire_draw_order` would for `index`, so tests
+    /// Builds the `FireSticker` `depth_draw_order` would for `index`, so tests
     /// can call `FireSticker::is_behind` directly instead of inferring its
     /// verdict from final draw ranks.
     fn fire_sticker_for(
