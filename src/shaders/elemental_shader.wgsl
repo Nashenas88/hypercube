@@ -24,6 +24,10 @@ struct IceBackgroundTransform {
 }
 @group(1) @binding(4) var<uniform> ice_background_transform: IceBackgroundTransform;
 
+// Resolves `vs_main_batched`'s raw `@builtin(instance_index)` to the real
+// sticker index it stands in for - see `vs_main_batched`.
+@group(0) @binding(8) var<storage, read> depth_batch_remap: array<u32>;
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
@@ -38,12 +42,7 @@ struct VertexOutput {
     @location(5) local_position: vec3<f32>,
 }
 
-@vertex
-fn vs_main(
-    @location(0) vertex_position: vec3<f32>,
-    @builtin(instance_index) instance_index: u32,
-    @builtin(vertex_index) vertex_index: u32,
-) -> VertexOutput {
+fn vs_body(instance_index: u32, vertex_position: vec3<f32>, vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
 
     let geometry = compute_vertex_geometry(instance_index, vertex_position, vertex_index);
@@ -65,6 +64,33 @@ fn vs_main(
     out.kind = instances[instance_index].kind;
 
     return out;
+}
+
+@vertex
+fn vs_main(
+    @location(0) vertex_position: vec3<f32>,
+    @builtin(instance_index) instance_index: u32,
+    @builtin(vertex_index) vertex_index: u32,
+) -> VertexOutput {
+    return vs_body(instance_index, vertex_position, vertex_index);
+}
+
+// Used by `fire_pipeline`/`ice_pipeline` instead of `vs_main`: a depth
+// batch's same-kind, same-face stickers draw with one instanced
+// `draw_indexed` call over a contiguous run of `depth_batch_remap`
+// (`Renderer::update_depth_batches`), rather than one call per sticker, so
+// `@builtin(instance_index)` here is a position in that run, not the
+// sticker's own identity - resolved through `depth_batch_remap` first, so
+// every downstream identity use (highlighting, per-sticker noise seeds,
+// `instances`/`piece_slots` lookups) sees the real sticker index.
+@vertex
+fn vs_main_batched(
+    @location(0) vertex_position: vec3<f32>,
+    @builtin(instance_index) draw_instance_index: u32,
+    @builtin(vertex_index) vertex_index: u32,
+) -> VertexOutput {
+    let instance_index = depth_batch_remap[draw_instance_index];
+    return vs_body(instance_index, vertex_position, vertex_index);
 }
 
 // Fragment shader

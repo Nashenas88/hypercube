@@ -105,6 +105,86 @@ fn build_particle_instances(
     (expanded, ranges)
 }
 
+/// Which pipeline/bind groups a [`DepthBatchGroup`] draws with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DepthBatchKind {
+    Fire,
+    Ice,
+}
+
+/// One instanced `draw_indexed` call within a depth batch's shared pass:
+/// every sticker of `batch_remap[remap_offset..remap_offset + count]` shares
+/// both `kind` and `face_id`, so they share `fire_pipeline`/`ice_pipeline`
+/// (whichever `kind` picks) and `face_id`'s own winding-corrected index
+/// chunk (see `calculate_indices`) - `compute_vertex_geometry` derives a
+/// vertex's local cube face straight from the raw index buffer position, so
+/// mixing chunks across a call would corrupt geometry/normals for whichever
+/// instances didn't match. Built by `update_depth_batches`, which also
+/// uploads the matching `depth_batch_remap_buffer` contents; consumed by
+/// `render()`.
+#[derive(Debug, Clone, Copy)]
+struct DepthBatchGroup {
+    kind: DepthBatchKind,
+    face_id: u32,
+    remap_offset: u32,
+    count: u32,
+}
+
+/// Groups `depth_batches`' entries into `update_depth_batches`'s draw plan:
+/// each batch's `Vec<DepthLayer>` becomes a `Vec<DepthBatchGroup>`,
+/// partitioned by `(kind, face_id)` so same-kind, same-face stickers within
+/// one batch collapse into a single instanced draw call. Returns that plan
+/// alongside the flat sticker-index array `depth_batch_remap_buffer` needs
+/// uploaded - each group's `remap_offset..remap_offset + count` is a slice
+/// of it. `BTreeMap` only for deterministic (ascending `face_id`) group
+/// ordering, not for performance - a batch holds at most a few dozen
+/// stickers.
+fn group_depth_batches(
+    depth_batches: &[Vec<crate::shader_widget::DepthLayer>],
+    facets_per_face: u32,
+) -> (Vec<Vec<DepthBatchGroup>>, Vec<u32>) {
+    use crate::shader_widget::DepthLayer;
+
+    let mut flat_remap: Vec<u32> = Vec::new();
+    let mut batches: Vec<Vec<DepthBatchGroup>> = Vec::with_capacity(depth_batches.len());
+
+    for batch in depth_batches {
+        let mut fire_by_face: std::collections::BTreeMap<u32, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        let mut ice_by_face: std::collections::BTreeMap<u32, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        for &layer in batch {
+            let (by_face, instance_index) = match layer {
+                DepthLayer::Fire(index) => (&mut fire_by_face, index),
+                DepthLayer::Ice(index) => (&mut ice_by_face, index),
+            };
+            let face_id = instance_index / facets_per_face;
+            by_face.entry(face_id).or_default().push(instance_index);
+        }
+
+        let mut groups = Vec::new();
+        for (kind, by_face) in [
+            (DepthBatchKind::Fire, fire_by_face),
+            (DepthBatchKind::Ice, ice_by_face),
+        ] {
+            for (face_id, indices) in by_face {
+                let remap_offset = flat_remap.len() as u32;
+                let count = indices.len() as u32;
+                flat_remap.extend(indices);
+                groups.push(DepthBatchGroup {
+                    kind,
+                    face_id,
+                    remap_offset,
+                    count,
+                });
+            }
+        }
+        batches.push(groups);
+    }
+
+    (batches, flat_remap)
+}
+
 /// Copies `texture`'s full extent back to CPU memory as tightly-packed RGBA8
 /// rows, converting from `format`'s BGRA channel order if that's what the
 /// caller's surface turned out to be (the `image` crate, and every caller
@@ -302,6 +382,16 @@ pub(crate) struct Renderer {
     /// `instance_buffer`, so `update_sticker_instances` can skip
     /// re-uploading unchanged data.
     last_sticker_generation: Option<u64>,
+    /// Backs `vs_main_batched`'s `depth_batch_remap` binding: a flat run of
+    /// sticker indices per `(kind, face_id)` group across every depth
+    /// batch, written fresh each frame by `update_depth_batches`. Sized to
+    /// `num_stickers` u32 slots - the most Fire+Ice participants any single
+    /// frame can have - so it never needs resizing.
+    depth_batch_remap_buffer: wgpu::Buffer,
+    /// This frame's Fire/Ice draw plan, one `Vec<DepthBatchGroup>` per
+    /// batch in back-to-front order; populated by `update_depth_batches`
+    /// and consumed by `render()`. See `DepthBatchGroup`.
+    depth_batch_groups: Vec<Vec<DepthBatchGroup>>,
     /// Particle pipeline's indirection buffer: sticker indices grouped into
     /// contiguous `(face_id, kind)` blocks, rebuilt by
     /// `update_sticker_instances` alongside `instance_buffer` whenever
@@ -1098,6 +1188,18 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Backs `vs_main_batched`'s `depth_batch_remap` binding - see
+        // `DepthBatchGroup`. Sized to `num_stickers` u32 slots, the most
+        // Fire+Ice participants any single frame could ever populate;
+        // `update_depth_batches` overwrites only the prefix it uses each
+        // frame, so uninitialized content past that is never read.
+        let depth_batch_remap_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Depth Batch Remap Buffer"),
+            size: (num_stickers * std::mem::size_of::<u32>()) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // Static mapping from sticker instance index to owning piece slot,
         // for piece-level hover highlighting. Unlike `instance_buffer`, this
         // never changes, so it's uploaded once with no `COPY_DST` and isn't
@@ -1208,7 +1310,9 @@ impl Renderer {
         // Main shader bind group layout, ordered by descending readership
         // across the classic/elemental/particle pipelines: transform,
         // camera, instances, piece_slots, highlighting, light,
-        // sticker_order (particle pipeline only), kind_colors.
+        // sticker_order (particle pipeline only), kind_colors,
+        // depth_batch_remap (fire_pipeline/ice_pipeline's `vs_main_batched`
+        // only - see `DepthBatchGroup`).
         let main_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[
@@ -1287,6 +1391,16 @@ impl Renderer {
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -1583,6 +1697,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: kind_colors_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: depth_batch_remap_buffer.as_entire_binding(),
                 },
             ],
             label: Some("Main Bind Group"),
@@ -1933,7 +2051,7 @@ impl Renderer {
             cache: None,
             vertex: wgpu::VertexState {
                 module: &elemental_shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some("vs_main_batched"),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
@@ -2005,7 +2123,7 @@ impl Renderer {
             cache: None,
             vertex: wgpu::VertexState {
                 module: &elemental_shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some("vs_main_batched"),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
@@ -2495,6 +2613,8 @@ impl Renderer {
             face_index_buffer,
             last_indices_generation: None,
             last_sticker_generation: None,
+            depth_batch_remap_buffer,
+            depth_batch_groups: Vec::new(),
             sticker_order_buffer,
             particle_ranges: initial_particle_ranges,
             num_stickers,
@@ -2773,6 +2893,29 @@ impl Renderer {
         self.last_sticker_generation = Some(generation);
     }
 
+    /// Builds this frame's Fire/Ice draw plan from `depth_batches`
+    /// (`shader_widget::depth_draw_order`) and uploads the matching
+    /// `depth_batch_remap_buffer` contents, so `render()` can later issue
+    /// one instanced `draw_indexed` call per `(kind, face_id)` group within
+    /// a batch instead of one per sticker (see `DepthBatchGroup`). Must run
+    /// before `render()` or `capture_frame` each frame under
+    /// `Theme::Elemental`; a no-op elsewhere, since `depth_batches` is empty
+    /// under any other theme.
+    pub(crate) fn update_depth_batches(
+        &mut self,
+        queue: &Queue,
+        depth_batches: &[Vec<crate::shader_widget::DepthLayer>],
+    ) {
+        let facets_per_face = self.num_stickers as u32 / 8;
+        let (groups, flat_remap) = group_depth_batches(depth_batches, facets_per_face);
+        queue.write_buffer(
+            &self.depth_batch_remap_buffer,
+            0,
+            bytemuck::cast_slice(&flat_remap),
+        );
+        self.depth_batch_groups = groups;
+    }
+
     /// Updates the highlighting uniform buffer with the currently hovered
     /// sticker and its owning piece (looked up via `FACET_TABLE`).
     ///
@@ -2834,18 +2977,32 @@ impl Renderer {
     /// 1. Skybox, then the opaque hypercube (every kind but Ice and Fire,
     ///    which both discard - see `elemental_shader.wgsl`'s `fs_main`).
     /// 2. Fire's and Ice's stickers, back-to-front together per
-    ///    `depth_order` (`shader_widget::depth_draw_order`) so either kind
+    ///    `depth_batches` (`shader_widget::depth_draw_order`) so either kind
     ///    correctly draws over the other depending on the current 4D
-    ///    rotation, not one kind fully before the other. Consecutive `Fire`
-    ///    entries share one pass (blended, no depth write - see `fs_fire`);
-    ///    each `Ice` entry gets its own copy-then-pass, since outside any
-    ///    pass (a texture can't be a render target and a sampled input at
-    ///    once) `scene_texture` is copied into `ice_bg_texture` first, then
-    ///    a pass draws that one instance with `ice_pipeline`, which samples
-    ///    the copy as its refraction/reflection background - so a nearer Ice
-    ///    sticker's snapshot already shows every farther Fire or Ice
-    ///    sticker's own result. Unlike Fire, Ice writes real depth, so later
-    ///    particles are correctly hidden behind or drawn over it.
+    ///    rotation, not one kind fully before the other. Batches must run in
+    ///    order, but a batch's own members share one pass, since nothing
+    ///    established a draw-order relation between any two of them -
+    ///    `depth_draw_order` only puts stickers in the same batch when
+    ///    `FireSticker::is_behind` found no evidence any pair of them
+    ///    occludes the other on screen. If a batch contains any Ice, its
+    ///    entries need `scene_texture` copied into `ice_bg_texture` once
+    ///    before the pass opens (outside any pass, since a texture can't be
+    ///    a render target and a sampled input at once) so `ice_pipeline` has
+    ///    every earlier batch's result to sample as its refraction/
+    ///    reflection background - one copy per batch instead of one per Ice
+    ///    sticker. That trade is not free: `is_behind`'s occlusion test says
+    ///    nothing about where a reflection ray can land, so two Ice stickers
+    ///    batched together (e.g. neighbors on the same face, mutually
+    ///    unrelated by occlusion) no longer see each other's own result the
+    ///    way they would if drawn one at a time, losing some mutual
+    ///    reflection detail between them in exchange for far fewer copies
+    ///    and passes on a mostly- or fully-Ice face. Unlike Fire, Ice writes
+    ///    real depth, so later particles are correctly hidden behind or
+    ///    drawn over it. Within a batch, every same-kind, same-`face_id`
+    ///    run of stickers - the most a `draw_indexed` call can cover at
+    ///    once, see `DepthBatchGroup` - draws with one instanced call
+    ///    instead of one per sticker, via `self.depth_batch_groups`
+    ///    (`update_depth_batches`, which must run first each frame).
     /// 3. Particles, now that Ice's depth is in place for them to test
     ///    against.
     ///
@@ -2855,15 +3012,7 @@ impl Renderer {
     /// * `visible_faces` - Per-`face_id` visibility (see `math::visible_faces`);
     ///   faces marked invisible are skipped entirely, issuing no draw call
     ///   and no vertex-shader invocations for their 27 instances.
-    /// * `depth_order` - combined back-to-front draw order for the Elemental
-    ///   theme's Fire and Ice passes (see `shader_widget::depth_draw_order`);
-    ///   ignored under any other render mode or theme.
-    pub(crate) fn render(
-        &self,
-        encoder: &mut CommandEncoder,
-        visible_faces: &[bool; 8],
-        depth_order: &[crate::shader_widget::DepthLayer],
-    ) {
+    pub(crate) fn render(&self, encoder: &mut CommandEncoder, visible_faces: &[bool; 8]) {
         let indices_per_face = VERTEX_NORMAL_INDICES.len() as u32;
         let facets_per_face = self.num_stickers as u32 / 8;
         let is_elemental_standard = (self.current_render_mode, self.current_theme)
@@ -2958,165 +3107,113 @@ impl Renderer {
 
             // Fire's and Ice's stickers draw after the opaque ones, so the
             // depth they test against is complete; both are handled below,
-            // interleaved by `depth_order` rather than in this pass.
+            // batched by `depth_batches` rather than in this pass.
         }
 
         if is_elemental_standard {
-            use crate::shader_widget::DepthLayer;
-
             let scene_size = self.scene_texture.size();
-            // Consecutive `Fire` entries share this pass; an `Ice` entry
-            // closes it (if open), snapshots the scene so far, and opens its
-            // own fresh one - `None` here means "no pass currently open",
-            // not "nothing left to draw".
-            // Grouped ahead of the actual drawing below, purely as data (no
-            // pass or encoder borrow involved yet): consecutive `Fire`
-            // entries collapse into one run sharing a single pass, since
-            // Fire needs no copy between draws, while every `Ice` entry
-            // stays its own run, since it does. Pre-grouping like this - one
-            // fresh `RenderPass` local per loop iteration below, never one
-            // carried across iterations in an outer variable - is what lets
-            // the borrow checker see each pass as done before the next
-            // begins; a single loop over `depth_order` juggling one
-            // `Option<RenderPass>` across iterations runs into a borrow
-            // conflict it can't prove sound, even though the runtime
-            // behavior would be identical.
-            enum DrawRun {
-                Fire(Vec<u32>),
-                Ice(u32),
-            }
-            let mut runs: Vec<DrawRun> = Vec::new();
-            for &layer in depth_order {
-                match layer {
-                    DepthLayer::Fire(instance_index) => match runs.last_mut() {
-                        Some(DrawRun::Fire(indices)) => indices.push(instance_index),
-                        _ => runs.push(DrawRun::Fire(vec![instance_index])),
-                    },
-                    DepthLayer::Ice(instance_index) => runs.push(DrawRun::Ice(instance_index)),
+
+            // Batches must run in order (each one fresh `RenderPass` local,
+            // never one carried across iterations, so the borrow checker
+            // can see each pass as done before the next begins), but a
+            // batch's own groups can draw in any order - `depth_batches`
+            // only ever puts stickers in the same batch when nothing
+            // establishes an order between any two of them (see `render`'s
+            // doc comment) - so groups are simply issued Fire-then-Ice
+            // (`group_depth_batches`'s own emission order), purely to
+            // minimize pipeline/bind-group switches inside the pass.
+            for batch in &self.depth_batch_groups {
+                let has_ice = batch.iter().any(|group| group.kind == DepthBatchKind::Ice);
+
+                if has_ice {
+                    // A texture can't be a render target and a sampled
+                    // input at the same time, so this copy runs with no
+                    // pass open - guaranteed here since the previous
+                    // batch's pass, a fresh local of its own, was dropped
+                    // at the end of the last loop iteration. One copy
+                    // covers every Ice group in this batch: none of them
+                    // need to see each other's result, only every earlier
+                    // batch's, which this snapshot already has.
+                    encoder.copy_texture_to_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &self.scene_texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &self.ice_bg_texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        scene_size,
+                    );
                 }
-            }
 
-            for run in &runs {
-                match run {
-                    DrawRun::Ice(instance_index) => {
-                        // A texture can't be a render target and a sampled
-                        // input at the same time, so this copy runs with no
-                        // pass open - guaranteed here since the previous
-                        // run's pass, a fresh local of its own, was dropped
-                        // at the end of the last loop iteration.
-                        encoder.copy_texture_to_texture(
-                            wgpu::TexelCopyTextureInfo {
-                                texture: &self.scene_texture,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            wgpu::TexelCopyTextureInfo {
-                                texture: &self.ice_bg_texture,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            scene_size,
-                        );
+                let mut batch_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Depth Layer Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.scene_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                batch_pass.set_viewport(
+                    self.bounds.x,
+                    self.bounds.y,
+                    self.bounds.width,
+                    self.bounds.height,
+                    0.0,
+                    1.0,
+                );
 
-                        let mut ice_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("Depth Layer Pass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &self.scene_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                                depth_slice: None,
-                            })],
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: &self.depth_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Load,
-                                        store: wgpu::StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                        });
-                        ice_pass.set_viewport(
-                            self.bounds.x,
-                            self.bounds.y,
-                            self.bounds.width,
-                            self.bounds.height,
-                            0.0,
-                            1.0,
-                        );
-                        ice_pass.set_pipeline(&self.ice_pipeline);
-                        ice_pass.set_bind_group(0, &self.main_bind_group, &[]);
-                        ice_pass.set_bind_group(1, &self.ice_bind_group, &[]);
-                        ice_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                        ice_pass.set_index_buffer(
-                            self.face_index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint16,
-                        );
-                        let index_start = (instance_index / facets_per_face) * indices_per_face;
-                        ice_pass.draw_indexed(
-                            index_start..index_start + indices_per_face,
-                            0,
-                            *instance_index..*instance_index + 1,
-                        );
-                    }
-                    DrawRun::Fire(indices) => {
-                        let mut fire_pass =
-                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("Depth Layer Pass"),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: &self.scene_view,
-                                    resolve_target: None,
-                                    ops: wgpu::Operations {
-                                        load: wgpu::LoadOp::Load,
-                                        store: wgpu::StoreOp::Store,
-                                    },
-                                    depth_slice: None,
-                                })],
-                                depth_stencil_attachment: Some(
-                                    wgpu::RenderPassDepthStencilAttachment {
-                                        view: &self.depth_view,
-                                        depth_ops: Some(wgpu::Operations {
-                                            load: wgpu::LoadOp::Load,
-                                            store: wgpu::StoreOp::Store,
-                                        }),
-                                        stencil_ops: None,
-                                    },
-                                ),
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                            });
-                        fire_pass.set_viewport(
-                            self.bounds.x,
-                            self.bounds.y,
-                            self.bounds.width,
-                            self.bounds.height,
-                            0.0,
-                            1.0,
-                        );
-                        fire_pass.set_pipeline(&self.fire_pipeline);
-                        fire_pass.set_bind_group(0, &self.main_bind_group, &[]);
-                        fire_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                        fire_pass.set_index_buffer(
-                            self.face_index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint16,
-                        );
-                        for &instance_index in indices {
-                            let index_start = (instance_index / facets_per_face) * indices_per_face;
-                            fire_pass.draw_indexed(
-                                index_start..index_start + indices_per_face,
-                                0,
-                                instance_index..instance_index + 1,
-                            );
+                // Only re-bind pipeline/bind-groups/buffers on a kind
+                // change - `group_depth_batches` already emits every Fire
+                // group before any Ice group, so this is at most one
+                // switch per batch.
+                let mut bound_kind: Option<DepthBatchKind> = None;
+                for group in batch {
+                    if bound_kind != Some(group.kind) {
+                        match group.kind {
+                            DepthBatchKind::Fire => {
+                                batch_pass.set_pipeline(&self.fire_pipeline);
+                                batch_pass.set_bind_group(0, &self.main_bind_group, &[]);
+                            }
+                            DepthBatchKind::Ice => {
+                                batch_pass.set_pipeline(&self.ice_pipeline);
+                                batch_pass.set_bind_group(0, &self.main_bind_group, &[]);
+                                batch_pass.set_bind_group(1, &self.ice_bind_group, &[]);
+                            }
                         }
+                        batch_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                        batch_pass.set_index_buffer(
+                            self.face_index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint16,
+                        );
+                        bound_kind = Some(group.kind);
                     }
+
+                    let index_start = group.face_id * indices_per_face;
+                    batch_pass.draw_indexed(
+                        index_start..index_start + indices_per_face,
+                        0,
+                        group.remap_offset..group.remap_offset + group.count,
+                    );
                 }
             }
 
@@ -3310,12 +3407,14 @@ impl Renderer {
     /// Blocks the calling thread on `device.poll` until the copy completes.
     /// Fine for an occasional manual capture or a test; wrong for a hot
     /// path.
+    ///
+    /// Like `render`, needs `update_depth_batches` called first under
+    /// `Theme::Elemental`.
     pub(crate) fn capture_frame(
         &mut self,
         device: &Device,
         queue: &Queue,
         visible_faces: &[bool; 8],
-        depth_order: &[crate::shader_widget::DepthLayer],
     ) -> (Vec<u8>, u32, u32) {
         let size = self.scene_texture.size();
         log::info!(
@@ -3338,7 +3437,7 @@ impl Renderer {
         let capture_view = capture_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        self.render(&mut encoder, visible_faces, depth_order);
+        self.render(&mut encoder, visible_faces);
         self.composite(&mut encoder, &capture_view);
         queue.submit(Some(encoder.finish()));
 
@@ -3572,16 +3671,17 @@ mod tests {
             },
         );
 
-        let (pixels, width, height) = renderer.capture_frame(
-            &device,
+        renderer.update_depth_batches(
             &queue,
-            &[true; 8],
             &[
-                crate::shader_widget::DepthLayer::Fire(0),
-                crate::shader_widget::DepthLayer::Ice(1),
-                crate::shader_widget::DepthLayer::Fire(2),
+                vec![
+                    crate::shader_widget::DepthLayer::Fire(0),
+                    crate::shader_widget::DepthLayer::Ice(1),
+                ],
+                vec![crate::shader_widget::DepthLayer::Fire(2)],
             ],
         );
+        let (pixels, width, height) = renderer.capture_frame(&device, &queue, &[true; 8]);
 
         assert_eq!((width, height), (64, 64));
         assert_eq!(pixels.len(), (width * height * 4) as usize);
@@ -3823,7 +3923,8 @@ mod tests {
             Vec::new()
         };
 
-        renderer.capture_frame(&device, &queue, &visible_faces, &depth_order)
+        renderer.update_depth_batches(&queue, &depth_order);
+        renderer.capture_frame(&device, &queue, &visible_faces)
     }
 
     /// Compares `rgba` against a golden PNG checked into
@@ -3955,16 +4056,17 @@ mod tests {
             },
         );
 
-        let (pixels, width, height) = renderer.capture_frame(
-            &device,
+        renderer.update_depth_batches(
             &queue,
-            &[true; 8],
             &[
-                crate::shader_widget::DepthLayer::Fire(0),
-                crate::shader_widget::DepthLayer::Ice(1),
-                crate::shader_widget::DepthLayer::Fire(2),
+                vec![
+                    crate::shader_widget::DepthLayer::Fire(0),
+                    crate::shader_widget::DepthLayer::Ice(1),
+                ],
+                vec![crate::shader_widget::DepthLayer::Fire(2)],
             ],
         );
+        let (pixels, width, height) = renderer.capture_frame(&device, &queue, &[true; 8]);
 
         let path = std::env::var("DUMP_PATH").unwrap_or_else(|_| "/tmp/capture_dump.png".into());
         image::RgbaImage::from_raw(width, height, pixels)

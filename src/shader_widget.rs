@@ -405,26 +405,26 @@ fn ground_truth_debug_face(
     fire_faces.get(cycle_index).copied()
 }
 
-/// One element of the combined Fire+Ice back-to-front draw order
-/// `depth_draw_order` produces, tagging which pass/pipeline `render()` needs
-/// to draw it with.
+/// One sticker within a batch `depth_draw_order` produces, tagging which
+/// pass/pipeline `render()` needs to draw it with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DepthLayer {
     /// Blended, no depth write - see `fs_fire`.
     Fire(u32),
-    /// Opaque, its own snapshot-and-draw pass - see `fs_ice`.
+    /// Opaque, drawn against its batch's shared background snapshot - see
+    /// `fs_ice`.
     Ice(u32),
 }
 
-/// The order Fire's and Ice's stickers are drawn in together under
+/// The batches Fire's and Ice's stickers are drawn in together under
 /// `Theme::Elemental`: every instance of `ELEMENTAL_FIRE_KIND` or
-/// `ELEMENTAL_ICE_KIND` on a visible face, farthest first, interleaved
-/// rather than one kind fully before the other - both need a back-to-front
-/// order because what they draw depends on draw order, whether from
-/// blending (Fire) or from each layer's background snapshot needing to
-/// already contain every farther layer's own result (Ice), and either kind
-/// can sit in front of or behind the other depending on the current 4D
-/// rotation.
+/// `ELEMENTAL_ICE_KIND` on a visible face, grouped into passes that must run
+/// strictly in the returned order (farthest batch first), but whose members
+/// within one batch can draw in any order - both need a back-to-front order
+/// because what they draw depends on draw order, whether from blending
+/// (Fire) or from each layer's background snapshot needing to already
+/// contain every farther layer's own result (Ice), and either kind can sit
+/// in front of or behind the other depending on the current 4D rotation.
 ///
 /// Fire draws blended and writes no depth, so where two of its balls overlap
 /// on screen the result depends on the order they are drawn in. Ice instead
@@ -434,13 +434,24 @@ pub(crate) enum DepthLayer {
 /// decides each pair exactly, by casting rays through their real projected
 /// corners and testing against each other's actual geometry - the same
 /// ray-vs-cube test hover and click picking already use - rather than an
-/// approximating scalar key. That relation is combined into an order by
-/// topologically sorting it, taking the farthest of the currently-unblocked
-/// stickers at each step so the result stays deterministic and close to
-/// depth order. Should the relation ever contain a cycle (which can happen
-/// for two stickers on different tesseract cells whose shared boundary is
-/// viewed near-edge-on, see `FireSticker::is_behind`), the stickers caught
-/// in it fall back to depth order rather than being lost.
+/// approximating scalar key. That relation is combined into batches by
+/// topologically sorting it in layers: every step takes every sticker
+/// nothing undrawn still blocks, all at once, rather than just the single
+/// farthest one. A pair with no edge between them in the relation is a pair
+/// `is_behind` found no evidence occludes the other on screen, which is
+/// exactly what makes sharing one pass safe for Fire, whose blending only
+/// depends on literally-overlapping pixels. It's a deliberately looser bar
+/// for Ice, whose reflection can sample any point on screen regardless of
+/// 3D proximity: two same-batch Ice stickers no longer see each other's own
+/// result the way strictly sequential draws would, so mutual reflection
+/// detail between them (e.g. two occlusion-unrelated neighbors on the same
+/// face) is traded away for far fewer background-snapshot copies - accepted
+/// because the alternative (never batching more than one Ice sticker
+/// together) keeps the exact cost this batching exists to avoid. Should the
+/// relation ever contain a cycle (which can happen for two stickers on
+/// different tesseract cells whose shared boundary is viewed near-edge-on,
+/// see `FireSticker::is_behind`), the stickers caught in it fall back to
+/// their own singleton batch, farthest first, rather than being lost.
 ///
 /// At most `instances.len() / 4` stickers take part, so this runs on the CPU
 /// each frame.
@@ -468,7 +479,7 @@ pub(crate) fn depth_draw_order(
     face_gap: f32,
     face_gap_4d: f32,
     viewer_distance: f32,
-) -> Vec<DepthLayer> {
+) -> Vec<Vec<DepthLayer>> {
     if instances.is_empty() {
         return Vec::new();
     }
@@ -516,27 +527,37 @@ pub(crate) fn depth_draw_order(
 
     topological_draw_order(&stickers, camera.eye, lattice_is_aligned)
         .into_iter()
-        .map(|instance_index| {
-            if instances[instance_index as usize].kind == ELEMENTAL_FIRE_KIND {
-                DepthLayer::Fire(instance_index)
-            } else {
-                DepthLayer::Ice(instance_index)
-            }
+        .map(|batch| {
+            batch
+                .into_iter()
+                .map(|instance_index| {
+                    if instances[instance_index as usize].kind == ELEMENTAL_FIRE_KIND {
+                        DepthLayer::Fire(instance_index)
+                    } else {
+                        DepthLayer::Ice(instance_index)
+                    }
+                })
+                .collect()
         })
         .collect()
 }
 
-/// Linearizes the "is behind" relation over `stickers` into a draw order,
-/// farthest first. Ties and unrelated pairs are broken by depth, so the
-/// result is deterministic; a cycle (which the relation should not contain
-/// except for the near-edge-on case documented on `FireSticker::is_behind`)
-/// degrades to depth order for the stickers caught in it rather than losing
-/// them.
+/// Layers the "is behind" relation over `stickers` into draw batches,
+/// farthest batch first: each batch holds every sticker nothing
+/// still-undrawn blocks, taken all at once rather than one at a time, so a
+/// batch's members are exactly those with no established order between any
+/// pair of them - safe to draw in any order, and so safe to share one
+/// render pass. Ties and unrelated-when-batching pairs are broken by depth,
+/// so the result is deterministic; a cycle (which the relation should not
+/// contain except for the near-edge-on case documented on
+/// `FireSticker::is_behind`) degrades to a singleton batch, farthest
+/// remaining first, for the stickers caught in it, rather than losing them
+/// or wrongly batching stickers an unresolved cycle proves DO interact.
 fn topological_draw_order(
     stickers: &[FireSticker],
     camera_eye: Point3<f32>,
     lattice_is_aligned: bool,
-) -> Vec<u32> {
+) -> Vec<Vec<u32>> {
     let mut successors: Vec<Vec<usize>> = vec![Vec::new(); stickers.len()];
     let mut blocked_by = vec![0usize; stickers.len()];
 
@@ -554,33 +575,59 @@ fn topological_draw_order(
         }
     }
 
-    let mut order = Vec::with_capacity(stickers.len());
+    let farthest = |candidates: &mut dyn Iterator<Item = usize>| {
+        candidates.max_by(|&a, &b| stickers[a].depth.total_cmp(&stickers[b].depth))
+    };
+
+    let mut batches: Vec<Vec<u32>> = Vec::new();
     let mut drawn = vec![false; stickers.len()];
+    let mut remaining = stickers.len();
 
-    while order.len() < stickers.len() {
-        let farthest = |candidates: &mut dyn Iterator<Item = usize>| {
-            candidates.max_by(|&a, &b| stickers[a].depth.total_cmp(&stickers[b].depth))
+    while remaining > 0 {
+        let unblocked: Vec<usize> = (0..stickers.len())
+            .filter(|&i| !drawn[i] && blocked_by[i] == 0)
+            .collect();
+
+        let batch: Vec<usize> = if unblocked.is_empty() {
+            // A cycle among what's left: these stickers DO have edges among
+            // themselves, just none currently satisfiable, so only the
+            // single farthest remaining one goes next to break it, rather
+            // than batching a set that isn't actually proven
+            // non-interacting.
+            match farthest(&mut (0..stickers.len()).filter(|&i| !drawn[i])) {
+                Some(next) => vec![next],
+                None => break,
+            }
+        } else if lattice_is_aligned {
+            let mut batch = unblocked;
+            batch.sort_by(|&a, &b| stickers[b].depth.total_cmp(&stickers[a].depth));
+            batch
+        } else {
+            // No relation was built at all this frame (a move animation is
+            // sweeping a slab), so every sticker looks unblocked with zero
+            // overlap evidence behind that either way - batching on that
+            // would claim a guarantee that doesn't hold. Fall back to
+            // today's one-at-a-time depth order instead.
+            let next = farthest(&mut unblocked.into_iter()).expect("unblocked is non-empty here");
+            vec![next]
         };
 
-        // The farthest sticker nothing is still waiting on. Only once none is
-        // unblocked - which takes a cycle, and the relation should have none,
-        // since the sticker cubes never intersect - does the farthest
-        // remaining sticker go next instead, to break it.
-        let next = farthest(&mut (0..stickers.len()).filter(|&i| !drawn[i] && blocked_by[i] == 0))
-            .or_else(|| farthest(&mut (0..stickers.len()).filter(|&i| !drawn[i])));
-
-        let Some(next) = next else {
-            break;
-        };
-
-        drawn[next] = true;
-        order.push(stickers[next].instance_index);
-        for &successor in &successors[next] {
-            blocked_by[successor] = blocked_by[successor].saturating_sub(1);
+        for &index in &batch {
+            drawn[index] = true;
+            remaining -= 1;
+            for &successor in &successors[index] {
+                blocked_by[successor] = blocked_by[successor].saturating_sub(1);
+            }
         }
+        batches.push(
+            batch
+                .iter()
+                .map(|&index| stickers[index].instance_index)
+                .collect(),
+        );
     }
 
-    order
+    batches
 }
 
 fn scale_bounds(bounds: &Rectangle, scale: f32) -> Rectangle {
@@ -606,11 +653,13 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) sticker_instances: Arc<[StickerInstance]>,
     pub(crate) sticker_generation: u64,
     pub(crate) visible_faces: [bool; 8],
-    /// Combined back-to-front draw order for Fire's blended pass and Ice's
-    /// per-layer raymarch passes, interleaved so either can sit in front of
-    /// the other; empty under any theme that doesn't draw either (see
-    /// `depth_draw_order`).
-    pub(crate) depth_order: Vec<DepthLayer>,
+    /// Back-to-front draw batches for Fire's blended pass and Ice's
+    /// per-batch raymarch passes, interleaved so either can sit in front of
+    /// the other; batches must render in order, but a batch's own members
+    /// share one pass since nothing established an order between them
+    /// (see `depth_draw_order`). Empty under any theme that doesn't draw
+    /// either.
+    pub(crate) depth_order: Vec<Vec<DepthLayer>>,
     /// Wall-clock seconds since the app started, wrapped modulo 3600.
     pub(crate) elapsed_seconds: f32,
     /// Set by a `save_snapshot_generation` mismatch; `prepare()` captures
@@ -647,13 +696,13 @@ impl shader::Primitive for HypercubePrimitive {
         pipeline.update_highlighting(queue, self.hovered_sticker);
         pipeline.update_debug_instances(queue, &self.debug_instances);
         pipeline.update_sticker_instances(queue, &self.sticker_instances, self.sticker_generation);
+        pipeline.update_depth_batches(queue, &self.depth_order);
         pipeline.set_render_mode(self.ui_controls.render_mode);
         pipeline.set_theme(self.ui_controls.theme);
         pipeline.set_ground_truth_debug_face(self.ui_controls.ground_truth_debug_face);
 
         if let Some(request) = &self.snapshot_request {
-            let (rgba, width, height) =
-                pipeline.capture_frame(device, queue, &self.visible_faces, &self.depth_order);
+            let (rgba, width, height) = pipeline.capture_frame(device, queue, &self.visible_faces);
             snapshot::save(request, &rgba, width, height);
         }
     }
@@ -665,7 +714,7 @@ impl shader::Primitive for HypercubePrimitive {
         target: &wgpu::TextureView,
         _clip_bounds: &Rectangle<u32>,
     ) {
-        pipeline.render(encoder, &self.visible_faces, &self.depth_order);
+        pipeline.render(encoder, &self.visible_faces);
         pipeline.composite(encoder, target);
 
         // Render transparent debug AABBs
@@ -2986,6 +3035,7 @@ mod clockwise_sign_tests {
             VIEWER_DISTANCE,
         )
         .into_iter()
+        .flatten()
         .filter_map(|layer| match layer {
             DepthLayer::Fire(index) => Some(index),
             DepthLayer::Ice(_) => None,
@@ -3238,6 +3288,160 @@ mod clockwise_sign_tests {
         assert!(
             !drawn.is_empty(),
             "hiding one face should not hide every fire sticker"
+        );
+    }
+
+    /// `DepthLayer`'s carried instance index, regardless of kind.
+    fn depth_layer_instance_index(layer: &DepthLayer) -> u32 {
+        match *layer {
+            DepthLayer::Fire(index) | DepthLayer::Ice(index) => index,
+        }
+    }
+
+    #[test]
+    fn depth_batches_never_group_stickers_with_an_established_order() {
+        let (instances, camera, rotation_4d) = fire_order_fixture();
+        let batches = depth_draw_order(
+            &instances,
+            &[true; 8],
+            &rotation_4d,
+            &camera,
+            true,
+            TEST_STICKER_SCALE,
+            SECONDARY_FACE_GAP,
+            SECONDARY_FACE_GAP_4D,
+            VIEWER_DISTANCE,
+        );
+        assert!(
+            batches.len() > 1,
+            "a solved puzzle's fire/ice stickers should span more than one batch"
+        );
+
+        for batch in &batches {
+            for (i, a) in batch.iter().enumerate() {
+                for b in &batch[i + 1..] {
+                    let sticker_a = fire_sticker_for(
+                        depth_layer_instance_index(a) as usize,
+                        &instances,
+                        &rotation_4d,
+                        &camera,
+                        TEST_STICKER_SCALE,
+                    );
+                    let sticker_b = fire_sticker_for(
+                        depth_layer_instance_index(b) as usize,
+                        &instances,
+                        &rotation_4d,
+                        &camera,
+                        TEST_STICKER_SCALE,
+                    );
+                    assert_eq!(
+                        sticker_a.is_behind(camera.eye, &sticker_b),
+                        None,
+                        "instances {} and {} share a batch, but is_behind found an order \
+                         between them - they aren't safe to share a pass",
+                        depth_layer_instance_index(a),
+                        depth_layer_instance_index(b)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn depth_batches_respect_established_order_across_batches() {
+        let (instances, camera, rotation_4d) = fire_order_fixture();
+        let batches = depth_draw_order(
+            &instances,
+            &[true; 8],
+            &rotation_4d,
+            &camera,
+            true,
+            TEST_STICKER_SCALE,
+            SECONDARY_FACE_GAP,
+            SECONDARY_FACE_GAP_4D,
+            VIEWER_DISTANCE,
+        );
+
+        let mut batch_of = std::collections::HashMap::new();
+        for (batch_index, batch) in batches.iter().enumerate() {
+            for layer in batch {
+                batch_of.insert(depth_layer_instance_index(layer), batch_index);
+            }
+        }
+
+        let participants: Vec<usize> = instances
+            .iter()
+            .enumerate()
+            .filter(|(_, instance)| {
+                instance.kind == ELEMENTAL_FIRE_KIND || instance.kind == ELEMENTAL_ICE_KIND
+            })
+            .map(|(index, _)| index)
+            .collect();
+
+        let mut checked = 0;
+        for &a_index in &participants {
+            for &b_index in &participants {
+                if a_index >= b_index {
+                    continue;
+                }
+                let sticker_a = fire_sticker_for(
+                    a_index,
+                    &instances,
+                    &rotation_4d,
+                    &camera,
+                    TEST_STICKER_SCALE,
+                );
+                let sticker_b = fire_sticker_for(
+                    b_index,
+                    &instances,
+                    &rotation_4d,
+                    &camera,
+                    TEST_STICKER_SCALE,
+                );
+                let Some(ordering) = sticker_a.is_behind(camera.eye, &sticker_b) else {
+                    continue;
+                };
+                checked += 1;
+                let (before, after) = match ordering {
+                    Ordering::Greater => (a_index as u32, b_index as u32),
+                    Ordering::Less => (b_index as u32, a_index as u32),
+                    Ordering::Equal => unreachable!("is_behind never returns Equal"),
+                };
+                let (before_batch, after_batch) = (batch_of[&before], batch_of[&after]);
+                assert!(
+                    before_batch < after_batch,
+                    "instance {before} must draw before {after}, but batching put them in \
+                     batches {before_batch} and {after_batch}"
+                );
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "the fixture produced no established orderings to check"
+        );
+    }
+
+    #[test]
+    fn depth_batches_are_singletons_when_lattice_is_not_aligned() {
+        let (instances, camera, rotation_4d) = fire_order_fixture();
+        let batches = depth_draw_order(
+            &instances,
+            &[true; 8],
+            &rotation_4d,
+            &camera,
+            false,
+            TEST_STICKER_SCALE,
+            SECONDARY_FACE_GAP,
+            SECONDARY_FACE_GAP_4D,
+            VIEWER_DISTANCE,
+        );
+
+        assert!(!batches.is_empty());
+        assert!(
+            batches.iter().all(|batch| batch.len() == 1),
+            "mid-animation batches must stay singletons: with no lattice-aligned relation \
+             built, there's no overlap evidence to batch on"
         );
     }
 
