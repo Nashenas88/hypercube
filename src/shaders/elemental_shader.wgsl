@@ -1111,6 +1111,24 @@ fn fs_ice(in: VertexOutput) -> @location(0) vec4<f32> {
     let exit_span = ray_box(entry_local, refract_dir_local, 1.0);
     let travel = max(exit_span.y, 0.0);
     let exit_local = entry_local + refract_dir_local * travel;
+    // `to_world`/`to_local` are only a *linear* map, not a similarity
+    // transform - a warped facet's three edges are unequal in length and no
+    // longer mutually perpendicular (see `StickerAnchor`'s doc comment), so
+    // mapping a normalized local direction back through `to_world` does not,
+    // in general, point the same way as the world-space direction that was
+    // normalized into `refract_dir_local` in the first place. `exit_local`
+    // was reached by actually traveling along `refract_dir_local` in local
+    // space, so the true world-space travel direction - the one Snell's law
+    // at the exit surface needs as its incident ray - is this remapped
+    // direction, not the original unwarped `refract_dir`. Using `refract_dir`
+    // there was self-consistent as a world-space computation but physically
+    // wrong: it silently substitutes the pre-warp direction for the ray that
+    // actually reached this exit point, an error that grows with how much
+    // `to_world` skews near this facet - worst right at a sticker's own
+    // edges/corners, where adjacent local faces (and their skew) change
+    // fastest, showing up as a visibly wrong refracted sample right at those
+    // edges.
+    let travel_dir_world = normalize(to_world * refract_dir_local);
     // The source tunes its inner-color mix/tint against travel distance
     // through its own box, half-extent 0.25 in the same units as its ray
     // origins - so a straight-through ray travels at most ~0.5. `ray_box`
@@ -1130,9 +1148,9 @@ fn fs_ice(in: VertexOutput) -> @location(0) vec4<f32> {
     // internal reflection - `refract` returns a zero vector then - in which
     // case the source falls back to reflecting off that same surface
     // instead, same as it does here.
-    var exit_dir = refract(refract_dir, -exit_normal_world, ICE_REFRACTION_IDX);
+    var exit_dir = refract(travel_dir_world, -exit_normal_world, ICE_REFRACTION_IDX);
     if (length(exit_dir) <= 0.95) {
-        exit_dir = reflect(refract_dir, -exit_normal_world);
+        exit_dir = reflect(travel_dir_world, -exit_normal_world);
     }
 
     let refracted_background = ice_sample_background(exit_point_world, exit_dir);
@@ -1143,8 +1161,27 @@ fn fs_ice(in: VertexOutput) -> @location(0) vec4<f32> {
     refract_color += vec3<f32>(travel_tint * 0.3);
     let final_color = mix(refract_color, reflected_background, reflect_alpha);
 
+    // Unlike Fire/Water/Lightning, whose colors are entirely procedural,
+    // `refracted_background`/`reflected_background` above are read straight
+    // from the actual rendered HDR scene - which can already carry values
+    // brighter than anything this shader itself generates (e.g. a nearby
+    // Fire sticker's emissive rim). The source assumed its own background
+    // samples (a bounded floor/sky) stayed under ~1.7 and relied on its
+    // final `pow(c, 0.4545)` hitting an LDR framebuffer to hard-clip
+    // anything over 1.0 with no visible side effect. This app instead
+    // composites through a bloom pass keyed off `BLOOM_THRESHOLD = 2.0`
+    // (`post_process.wgsl`), documented there as a no-op for every current
+    // material - an ice sticker that mixes/adds on top of an
+    // already-bright scene sample can cross that threshold and bloom out
+    // its own fine bump detail into a soft glow, which reads as "washed
+    // out"/less textured right where the background behind it is brightest.
+    // Clamping here keeps Ice inside the same no-bloom invariant every
+    // other material already holds itself to, rather than laundering
+    // unbounded scene brightness through unclipped.
+    let bloom_safe_color = min(final_color, vec3<f32>(1.9));
+
     return vec4<f32>(
-        apply_highlight(final_color, 1.0, in.instance_index, in.piece_slot),
+        apply_highlight(bloom_safe_color, 1.0, in.instance_index, in.piece_slot),
         1.0,
     );
 }
