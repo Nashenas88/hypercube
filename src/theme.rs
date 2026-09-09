@@ -12,8 +12,8 @@ pub(crate) enum Theme {
 
 /// Particles emitted per sticker under `Theme::Elemental`, indexed by `kind`.
 /// One shared budget for every element that still emits; Fire's, Water's,
-/// Lightning's and Ice's own materials carry their whole look, so they emit
-/// none.
+/// Lightning's, Ice's and Dark's own materials carry their whole look, so
+/// they emit none.
 const ELEMENTAL_PARTICLES_PER_STICKER: u32 = 24;
 
 /// The `kind` `Theme::Elemental` renders as Ice, matching `case 0u` in
@@ -39,6 +39,12 @@ pub(crate) const ELEMENTAL_FIRE_KIND: u32 = 3;
 /// it emits none.
 pub(crate) const ELEMENTAL_WATER_KIND: u32 = 6;
 
+/// The `kind` `Theme::Elemental` renders as Dark, matching `case 7u` in
+/// `elemental_shader.wgsl`. Dark's material raymarches its own portal
+/// world and carries its whole look directly on the surface, so - like
+/// Fire, Water, Lightning and Ice - it emits no particles.
+pub(crate) const ELEMENTAL_DARK_KIND: u32 = 7;
+
 impl Theme {
     pub(crate) const ALL: [Theme; 2] = [Theme::Classic, Theme::Elemental];
 
@@ -53,6 +59,7 @@ impl Theme {
                 counts[ELEMENTAL_WATER_KIND as usize] = 0;
                 counts[ELEMENTAL_LIGHTNING_KIND as usize] = 0;
                 counts[ELEMENTAL_ICE_KIND as usize] = 0;
+                counts[ELEMENTAL_DARK_KIND as usize] = 0;
                 counts
             }
         }

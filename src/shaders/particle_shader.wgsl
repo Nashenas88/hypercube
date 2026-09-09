@@ -327,9 +327,12 @@ fn water_particle(sticker_index: u32, instance_index: u32, anchor: StickerAnchor
     return styled_particle(style, sticker_index, instance_index, anchor);
 }
 
-// Crystal: bright violet glints that barely travel, gated to occasional
-// bursts so they pop and fade in place rather than streaming off the facet.
-fn crystal_particle(sticker_index: u32, instance_index: u32, anchor: StickerAnchor) -> ParticleSample {
+// Dark: kept only for the one-function-per-kind symmetry every other
+// zero-budget element (Fire, Water, Lightning, Ice) maintains -
+// `Theme::particles_per_kind` zeroes this kind's budget, so the `case 7u`
+// dispatch below is never actually invoked at runtime. Values otherwise
+// unchanged from the Crystal material this replaced.
+fn dark_particle(sticker_index: u32, instance_index: u32, anchor: StickerAnchor) -> ParticleSample {
     var style = default_style();
     style.lifetime = 1.5;
     style.speed = 0.2;
@@ -396,7 +399,7 @@ fn vs_main(
             sample = water_particle(sticker_index, instance_index, anchor);
         }
         case 7u: {
-            sample = crystal_particle(sticker_index, instance_index, anchor);
+            sample = dark_particle(sticker_index, instance_index, anchor);
         }
         default: {
             sample.visible = false;

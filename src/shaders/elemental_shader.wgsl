@@ -356,26 +356,128 @@ fn leaves_color(instance_index: u32, world_position: vec3<f32>, world_normal: ve
     return ambient + diffuse + specular;
 }
 
-fn crystal_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    let normal = normalize(world_normal);
-    let light_dir = normalize(-light.direction);
-    let view_dir = normalize(-world_position);
+// Dark: a raymarched window into one shared toxic-void "portal world" -
+// unlike every other material in this file, it has no per-instance
+// uniqueness (no instance_index, no local UV): the raymarch already varies
+// continuously per-fragment from world_position alone, and every
+// Dark-kind facet samples the *same* continuous world-space scene, so
+// different facets glimpse different slices of one shared void rather than
+// each rendering an independent copy - a deliberate "shared portal" look,
+// not a bug. Also unlike every other material here, it ignores the `light`
+// uniform entirely: the source shader is fully self-illuminated (its only
+// light source is the lightning flash itself), so folding in a directional
+// light would fight the portal's own lighting rather than complement it.
+// Ported near-verbatim from a standalone Shadertoy-style source; only the
+// noise primitives and the ray entry point were adapted to this project's
+// conventions. The reddish flash/highlight tones are intentional contrast
+// against the shader's own dark purple/violet void and cloud base tones -
+// kept verbatim, not retinted.
 
-    let facet_seed = hash11(f32(instance_index) * 4.0 + floor(transform.elapsed_seconds * 0.5));
-    let albedo = mix(vec3<f32>(0.3, 0.05, 0.5), vec3<f32>(0.55, 0.2, 0.8), facet_seed);
+fn dark_fbm(p_in: vec3<f32>) -> f32 {
+    var p = p_in;
+    var f = 0.0;
+    f += 0.5000 * value_noise3(p); p *= 2.02;
+    f += 0.2500 * value_noise3(p); p *= 2.03;
+    f += 0.1250 * value_noise3(p); p *= 2.01;
+    f += 0.0625 * value_noise3(p);
+    return f;
+}
 
-    let ambient = light.ambient * albedo;
-    let diffuse_strength = max(dot(normal, light_dir), 0.0);
-    let banded_diffuse = floor(diffuse_strength * 4.0) / 4.0;
-    let diffuse = banded_diffuse * light.color * albedo;
+fn dark_smooth_lightning(cloud_p: vec3<f32>, dist_to_cloud: f32) -> f32 {
+    // Widened from the source's smoothstep(80.0, 10.0, ...) so flashes stay
+    // visible/fading in from much farther away.
+    let dist_fade = smoothstep(280.0, 10.0, dist_to_cloud);
+    if (dist_fade <= 0.0) {
+        return 0.0;
+    }
+    var total_glow = 0.0;
+    for (var i = 0; i < 2; i++) {
+        let fi = f32(i);
+        let time_scale = transform.elapsed_seconds * 1.2 + fi * 15.3;
+        let strike_id = floor(time_scale);
+        let pulse = fract(time_scale);
+        let trigger = hash11(strike_id + fi * 37.81);
+        if (trigger > 0.70) {
+            let flash = pow(1.0 - pulse, 3.5) * hash11(strike_id * 12.3) * 5.0;
+            let noise_pos = cloud_p * 0.25 + vec3<f32>(strike_id * 2.5, 0.0, fi * 4.2);
+            let patch_pattern = dark_fbm(noise_pos);
+            let patch_mask = smoothstep(0.48, 0.72, patch_pattern);
+            total_glow += flash * patch_mask;
+        }
+    }
+    return total_glow * dist_fade;
+}
 
-    let half_dir = normalize(light_dir + view_dir);
-    let specular_strength = pow(max(dot(normal, half_dir), 0.0), 96.0);
-    let specular = specular_strength * light.color;
+fn dark_terrain(p: vec3<f32>) -> f32 {
+    let height = dark_fbm(p * 0.1) * 6.0 - 3.0;
+    let floor_y = -1.5;
+    return p.y - (floor_y + height);
+}
 
-    let rim = fresnel(normal, view_dir, 2.5) * 0.6;
+fn dark_render_world(ro: vec3<f32>, rd: vec3<f32>) -> vec3<f32> {
+    var t = 0.1;
+    let tmax = 50.0;
+    var p = vec3<f32>(0.0);
+    var hit = false;
+    for (var i = 0; i < 90; i++) {
+        p = ro + rd * t;
+        let d = dark_terrain(p);
+        if (d < 0.01) {
+            hit = true;
+            break;
+        }
+        t += d * 0.5;
+        if (t > tmax) {
+            break;
+        }
+    }
+    var color = vec3<f32>(0.015, 0.008, 0.02);
+    let cloud_height = 15.0;
+    let dist_to_cloud = (cloud_height - ro.y) / rd.y;
+    var cloud_density = 0.0;
+    var lightning_flash = 0.0;
+    if (rd.y > 0.0 && (!hit || t > dist_to_cloud)) {
+        let cloud_plane_p = ro + rd * dist_to_cloud;
+        let cloud_p = cloud_plane_p * 0.08
+            + vec3<f32>(transform.elapsed_seconds * 0.1, 0.0, transform.elapsed_seconds * 0.05);
+        cloud_density = dark_fbm(cloud_p);
+        let cloud_color = vec3<f32>(0.03, 0.02, 0.04) * cloud_density;
+        lightning_flash = dark_smooth_lightning(cloud_p, dist_to_cloud);
+        let lightning_color = vec3<f32>(2.5, 0.1, 0.04) * lightning_flash
+            * smoothstep(0.25, 0.65, cloud_density);
+        color += cloud_color + lightning_color;
+    }
+    if (hit) {
+        let eps = vec2<f32>(0.02, 0.0);
+        let norm = normalize(vec3<f32>(
+            dark_terrain(p + eps.xyy) - dark_terrain(p - eps.xyy),
+            dark_terrain(p + eps.yxy) - dark_terrain(p - eps.yxy),
+            dark_terrain(p + eps.yyx) - dark_terrain(p - eps.yyx),
+        ));
+        let ground_color = vec3<f32>(0.03, 0.025, 0.03) * (dark_fbm(p * 0.4) * 0.6 + 0.4);
+        let ambient = 0.15;
+        let flash_diff = max(0.0, dot(norm, normalize(vec3<f32>(0.1, 1.0, 0.1))));
+        let flash_light = vec3<f32>(1.2, 0.15, 0.1) * lightning_flash * flash_diff * 0.5;
+        let scene_col = ground_color * (ambient + flash_light);
+        let fog = 1.0 - exp(-t * 0.04);
+        color = mix(scene_col, color, fog);
+    }
+    return color;
+}
 
-    return ambient + diffuse + specular + rim * vec3<f32>(0.7, 0.3, 1.0);
+// The source's fixed `worldPos + vec3(0,-1,0)` assumed a literal world
+// "down"; this puzzle has no fixed "up/down" once 4D-rotated. Entering
+// along -normalize(world_normal) instead keeps the portal always opening
+// "into" the surface regardless of which of the 8 facet orientations is
+// showing.
+const DARK_ENTRY_DEPTH: f32 = 1.0;
+
+fn dark_color(world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
+    let portal_ro = world_position - normalize(world_normal) * DARK_ENTRY_DEPTH;
+    let portal_rd = normalize(world_position - camera.eye_position.xyz);
+    var final_color = dark_render_world(portal_ro, portal_rd);
+    final_color = pow(final_color, vec3<f32>(0.4545));
+    return final_color;
 }
 
 fn glowing_light_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
@@ -638,7 +740,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             final_color = water_color(in.instance_index, in.world_position, in.world_normal, in.local_position);
         }
         case 7u: {
-            final_color = crystal_color(in.instance_index, in.world_position, in.world_normal);
+            final_color = dark_color(in.world_position, in.world_normal);
         }
         default: {
             final_color = vec3<f32>(0.5, 0.5, 0.5);
