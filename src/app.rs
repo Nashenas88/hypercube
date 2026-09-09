@@ -170,6 +170,15 @@ pub(crate) struct HypercubeApp {
     /// the GPU's own depth buffer.
     fire_ground_truth_debug: bool,
     debug_mode: bool,
+    /// Smoothed frames-per-second, updated on every `Message::FpsTick` while
+    /// `debug_mode` is on (see `subscription`); displayed as a viewport
+    /// overlay.
+    fps: f32,
+    /// Timestamp of the previous `Message::FpsTick`, for computing the
+    /// per-frame delta backing `fps`. `None` right after debug mode is
+    /// (re-)enabled, so the first tick doesn't compute a delta against a
+    /// stale, stretched-out gap.
+    last_fps_frame: Option<Instant>,
     settings: AppSettings,
     reset_generation: u64,
     random_moves_generation: u64,
@@ -250,6 +259,9 @@ pub(crate) enum Message {
     /// (see `shader_widget::ground_truth_debug_face`).
     FireGroundTruthDebug(bool),
     DebugMode(bool),
+    /// Per-frame tick driving the debug-mode FPS overlay (see
+    /// `HypercubeApp::subscription`).
+    FpsTick(Instant),
     RotateButton(RotateButton),
     Theme(Theme),
     AnimationDuration(u32),
@@ -290,6 +302,8 @@ impl HypercubeApp {
             aabb_mode: AABBMode::None,
             fire_ground_truth_debug: false,
             debug_mode: false,
+            fps: 0.0,
+            last_fps_frame: None,
             settings: settings::load(),
             reset_generation: 0,
             random_moves_generation: 0,
@@ -381,6 +395,24 @@ impl HypercubeApp {
             }
             Message::DebugMode(enabled) => {
                 self.debug_mode = enabled;
+                if enabled {
+                    self.fps = 0.0;
+                    self.last_fps_frame = None;
+                }
+            }
+            Message::FpsTick(now) => {
+                if let Some(last) = self.last_fps_frame {
+                    let delta = now.duration_since(last).as_secs_f32();
+                    if delta > 0.0 {
+                        let instant_fps = 1.0 / delta;
+                        self.fps = if self.fps == 0.0 {
+                            instant_fps
+                        } else {
+                            self.fps * 0.9 + instant_fps * 0.1
+                        };
+                    }
+                }
+                self.last_fps_frame = Some(now);
             }
             Message::RotateButton(button) => {
                 self.settings.rotate_button = button;
@@ -496,7 +528,8 @@ impl HypercubeApp {
     }
 
     /// Global keyboard shortcuts, mirroring the File/Help menu items, plus a
-    /// per-frame tick while a reveal/hide flourish is animating.
+    /// per-frame tick while a reveal/hide flourish is animating and another
+    /// while `debug_mode` is on (driving the FPS overlay).
     pub(crate) fn subscription(&self) -> Subscription<Message> {
         use iced::keyboard::{Key, key};
 
@@ -514,11 +547,14 @@ impl HypercubeApp {
             }
         });
 
+        let mut subscriptions = vec![keyboard];
         if self.reveal_animating {
-            Subscription::batch([keyboard, window::frames().map(Message::RevealAnimationTick)])
-        } else {
-            keyboard
+            subscriptions.push(window::frames().map(Message::RevealAnimationTick));
         }
+        if self.debug_mode {
+            subscriptions.push(window::frames().map(Message::FpsTick));
+        }
+        Subscription::batch(subscriptions)
     }
 
     /// Create the view for the application
@@ -759,15 +795,32 @@ impl HypercubeApp {
 
         let content: Element<'_, Message> = Column::new().push(menu_bar).push(main_row).into();
 
-        // Always a 2-layer stack regardless of `about_open`, not a
-        // conditional stack - keeps `content`'s widget-tree position stable.
+        // Always a 3-layer stack regardless of `about_open`/`debug_mode`,
+        // not a conditional stack - keeps `content`'s widget-tree position
+        // stable.
         let about_layer: Element<'_, Message> = if self.about_open {
             about_modal()
         } else {
             Space::new().into()
         };
 
-        iced::widget::stack([content, about_layer]).into()
+        let fps_layer: Element<'_, Message> = if self.debug_mode {
+            iced::widget::container(
+                iced::widget::container(iced::widget::text(format!("{:.0} FPS", self.fps)))
+                    .padding(6)
+                    .style(iced::widget::container::rounded_box),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Top)
+            .padding(10)
+            .into()
+        } else {
+            Space::new().into()
+        };
+
+        iced::widget::stack([content, about_layer, fps_layer]).into()
     }
 }
 
