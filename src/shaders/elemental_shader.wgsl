@@ -534,13 +534,13 @@ struct MossEval {
     height: f32,
 };
 
-fn moss_fbm(p_in: vec2<f32>) -> f32 {
+fn moss_fbm(p_in: vec2<f32>, octaves: i32) -> f32 {
     var p = p_in;
     var total = 0.0;
     var amplitude = 0.5;
     let rot = mat2x2<f32>(0.8, 0.6, -0.6, 0.8);
 
-    for (var i = 0; i < 6; i++) {
+    for (var i = 0; i < octaves; i++) {
         total += amplitude * value_noise2(p);
         p = rot * p * 2.02;
         amplitude *= 0.5;
@@ -549,14 +549,25 @@ fn moss_fbm(p_in: vec2<f32>) -> f32 {
 }
 
 // Domain warping for organic moss clustering: two nested layers of fbm
-// distort the sample point before a final fbm reads the pattern there.
+// distort the sample point before a final fbm reads the pattern there. The
+// warp layers (`q`, `r`) only steer where the final fbm samples - their own
+// high-frequency detail is invisible by the time it's used as a domain
+// offset - so they run at a fraction of the octave count of the final,
+// visible layer instead of the full count each of the 5 nested calls used
+// before this was profiled as the material's per-fragment hot spot.
+const MOSS_WARP_OCTAVES: i32 = 3;
+const MOSS_DETAIL_OCTAVES: i32 = 6;
+
 fn moss_pattern(p: vec2<f32>) -> f32 {
-    let q = vec2<f32>(moss_fbm(p), moss_fbm(p + vec2<f32>(5.2, 1.3)));
-    let r = vec2<f32>(
-        moss_fbm(p + 4.0 * q + vec2<f32>(1.7, 9.2)),
-        moss_fbm(p + 4.0 * q + vec2<f32>(8.3, 2.8))
+    let q = vec2<f32>(
+        moss_fbm(p, MOSS_WARP_OCTAVES),
+        moss_fbm(p + vec2<f32>(5.2, 1.3), MOSS_WARP_OCTAVES)
     );
-    return moss_fbm(p + 4.0 * r);
+    let r = vec2<f32>(
+        moss_fbm(p + 4.0 * q + vec2<f32>(1.7, 9.2), MOSS_WARP_OCTAVES),
+        moss_fbm(p + 4.0 * q + vec2<f32>(8.3, 2.8), MOSS_WARP_OCTAVES)
+    );
+    return moss_fbm(p + 4.0 * r, MOSS_DETAIL_OCTAVES);
 }
 
 fn evaluate_moss(uv: vec2<f32>, seed_offset: vec2<f32>) -> MossEval {
@@ -586,10 +597,22 @@ fn evaluate_moss(uv: vec2<f32>, seed_offset: vec2<f32>) -> MossEval {
 // local-mesh geometry despite the name) rather than the reference's arbitrary
 // TBN-from-world-normal construction, so it stays correct under the
 // sticker's own warped 4D-projected frame.
-fn moss_face_normal(uv: vec2<f32>, seed_offset: vec2<f32>, face_normal: vec3<f32>, box_extent: f32) -> vec3<f32> {
+//
+// Takes the center height as `height_at_uv` rather than recomputing it via
+// `evaluate_moss(uv, ...)`: the caller (`moss_color`) has already evaluated
+// the field at this exact `uv`/`seed_offset` for the surface color, and
+// `evaluate_moss` is the most expensive call in this file's per-fragment
+// path (a 5-layer domain-warped fbm), so re-running it here just to
+// re-derive the same height was pure waste.
+fn moss_face_normal(
+    height_at_uv: f32,
+    uv: vec2<f32>,
+    seed_offset: vec2<f32>,
+    face_normal: vec3<f32>,
+    box_extent: f32,
+) -> vec3<f32> {
     let eps = vec2<f32>(0.005, 0.0);
-    let mask = water_edge_mask(uv, box_extent);
-    let h0 = evaluate_moss(uv, seed_offset).height * mask;
+    let h0 = height_at_uv * water_edge_mask(uv, box_extent);
     let hx = evaluate_moss(uv + eps.xy, seed_offset).height * water_edge_mask(uv + eps.xy, box_extent) - h0;
     let hy = evaluate_moss(uv + eps.yx, seed_offset).height * water_edge_mask(uv + eps.yx, box_extent) - h0;
     let abs_n = abs(face_normal);
@@ -634,7 +657,7 @@ fn moss_color(
     var perturbed_world_normal = normalize(world_normal);
     if (anchor.visible && abs(frame_volume) >= edge_volume * STICKER_MIN_FRAME_VOLUME) {
         let to_world = mat3x3<f32>(anchor.edge_x, anchor.edge_y, anchor.edge_z);
-        let local_normal = moss_face_normal(local_uv, seed_offset, local_face_normal, 1.0);
+        let local_normal = moss_face_normal(eval.height, local_uv, seed_offset, local_face_normal, 1.0);
         perturbed_world_normal = normalize(to_world * local_normal);
     }
 
