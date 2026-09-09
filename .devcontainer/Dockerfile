@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Installed outside CARGO_HOME, which a named volume mounts over at runtime and
 # would otherwise mask.
-RUN cargo install --root /usr/local jj-cli --locked
+RUN cargo install --root /usr/local jj-cli r3bl-rust-analyzer-mcp-server --locked
 
 # Node 22 or newer is required by the Claude Code devcontainer feature, which
 # installs Node itself only when absent; Debian packages 18.
