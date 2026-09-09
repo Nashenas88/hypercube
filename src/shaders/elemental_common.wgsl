@@ -62,7 +62,3 @@ fn strobe(seed: u32, time: f32, hz: f32) -> f32 {
     let window = floor(time * hz);
     return hash11(f32(seed) * 5.0 + window);
 }
-
-fn fresnel(normal: vec3<f32>, view_dir: vec3<f32>, power: f32) -> f32 {
-    return pow(1.0 - clamp(dot(normalize(normal), normalize(view_dir)), 0.0, 1.0), power);
-}

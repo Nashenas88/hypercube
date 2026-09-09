@@ -1,6 +1,6 @@
 #import math4d::{camera, compute_sticker_anchor, compute_vertex_geometry, instances, inverse3, transform}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
-#import elemental_common::{hash11, hash21, hash31, value_noise1, value_noise3, fresnel}
+#import elemental_common::{hash11, hash21, hash31, value_noise1, value_noise3}
 
 // Ice's own bind group: iChannel0 (gray noise, for the triplanar bump map)
 // and iChannel1 (a snapshot of the rendered scene so far, copied fresh by
@@ -480,15 +480,6 @@ fn dark_color(world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
     return final_color;
 }
 
-fn glowing_light_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    let seed = f32(instance_index);
-    let pulse = 0.5 + 0.5 * sin(transform.elapsed_seconds * 2.0 + seed * 6.28318);
-    let base = mix(vec3<f32>(0.85, 0.8, 0.6), vec3<f32>(1.0, 1.0, 0.9), pulse);
-    let view_dir = normalize(-world_position);
-    let halo = fresnel(world_normal, view_dir, 1.5);
-    return base + halo * vec3<f32>(1.0, 1.0, 0.9) * 0.6;
-}
-
 // Lightning: dark metallic cube surface carrying continuous 3D domain-warped
 // arcs plus separate random per-face flash strikes. Each of a face's 27
 // Lightning stickers gets its own per-instance seed folded into
@@ -733,8 +724,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         case 4u: {
             final_color = sand_color(in.instance_index, in.world_position, in.world_normal);
         }
+        // Light is drawn by `fs_light` in its own blended pass, so this one
+        // skips it rather than shading it twice.
         case 5u: {
-            final_color = glowing_light_color(in.instance_index, in.world_position, in.world_normal);
+            discard;
+            return vec4<f32>(0.0);
         }
         case 6u: {
             final_color = water_color(in.instance_index, in.world_position, in.world_normal, in.local_position);
@@ -1007,6 +1001,161 @@ fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
 
         let temperature = (1.0 - normalized_extent) * 1.8 + plasma * 0.8;
         accumulated += sun_palette(temperature) * density * transmittance * step_radii;
+    }
+
+    let coverage = 1.0 - transmittance;
+    return vec4<f32>(
+        apply_highlight(accumulated, coverage, in.instance_index, in.piece_slot),
+        coverage,
+    );
+}
+
+// Light: a raymarched volumetric cloud filling each sticker's own local
+// cube, shaded by density-based self-shadowing toward the scene's real
+// directional light plus a fixed warm/ambient palette. Drawn the same way
+// as Fire - its own blended, no-depth-write pass, sharing Fire's
+// local-frame technique (`compute_sticker_anchor`/`inverse3`) rather than
+// a flat model-matrix inverse, since a 4D rotation warps a sticker's
+// projected cube into a non-orthonormal frame. Unlike Dark, which is fully
+// self-illuminated and ignores `light` on purpose, Light is meant to read
+// as lit, so it shades against the same directional light every other
+// material does.
+const LIGHT_CLOUD_HALF_EXTENT: f32 = 1.0;
+const LIGHT_CLOUD_STEPS: u32 = 28u;
+const LIGHT_CLOUD_SHADOW_STEPS: u32 = 5u;
+const LIGHT_CLOUD_SHADOW_STEP_SIZE: f32 = 0.12;
+
+// Soft fade to zero near the cube's own boundary, so the cloud has no hard
+// edge at the sticker's face.
+fn light_cloud_box_mask(pos: vec3<f32>) -> f32 {
+    let box_dist = abs(pos) / LIGHT_CLOUD_HALF_EXTENT;
+    let max_dist = max(box_dist.x, max(box_dist.y, box_dist.z));
+    return smoothstep(1.0, 0.85, max_dist);
+}
+
+// 3-octave FBM for the cloud's primary density field.
+fn light_cloud_fbm(p_in: vec3<f32>) -> f32 {
+    var p = p_in;
+    var density = 0.5 * value_noise3(p);
+    p *= 2.02;
+    density += 0.25 * value_noise3(p);
+    p *= 2.03;
+    density += 0.125 * value_noise3(p);
+    return density;
+}
+
+// `seed_offset` (see `fs_light`) shifts which region of the shared,
+// scrolling noise field a sticker samples, so same-face stickers - who'd
+// otherwise all march the identical local `[-1,1]` box against the same
+// `transform.elapsed_seconds` - read as independent clouds instead of one
+// pattern repeated on every facet.
+fn light_cloud_density(pos: vec3<f32>, seed_offset: vec3<f32>) -> f32 {
+    let animated_pos = pos * 2.0 + seed_offset
+        + vec3<f32>(transform.elapsed_seconds * 0.15, transform.elapsed_seconds * 0.08, 0.0);
+    let d = light_cloud_fbm(animated_pos);
+    return clamp((d - 0.25) * 2.0, 0.0, 1.0) * light_cloud_box_mask(pos);
+}
+
+// Single-octave density for the cheaper shadow sub-march.
+fn light_cloud_fast_density(pos: vec3<f32>, seed_offset: vec3<f32>) -> f32 {
+    let animated_pos = pos * 2.0 + seed_offset
+        + vec3<f32>(transform.elapsed_seconds * 0.15, transform.elapsed_seconds * 0.08, 0.0);
+    let d = value_noise3(animated_pos);
+    return clamp((d - 0.3) * 1.8, 0.0, 1.0) * light_cloud_box_mask(pos);
+}
+
+// Light's own entry point, drawn per sticker in back-to-front order over a
+// pipeline with premultiplied blending and no depth write - see `fs_fire`'s
+// own doc comment for why back faces are discarded here rather than by
+// `cull_mode`.
+@fragment
+fn fs_light(in: VertexOutput) -> @location(0) vec4<f32> {
+    let view_dir = normalize(camera.eye_position.xyz - in.world_position);
+    if (dot(normalize(in.world_normal), view_dir) <= 0.0) {
+        discard;
+        return vec4<f32>(0.0);
+    }
+
+    let anchor = compute_sticker_anchor(in.instance_index, STICKER_HALF_EXTENT * transform.sticker_scale);
+
+    let to_world = mat3x3<f32>(anchor.edge_x, anchor.edge_y, anchor.edge_z);
+
+    let frame_volume = dot(anchor.edge_x, cross(anchor.edge_y, anchor.edge_z));
+    let edge_volume = length(anchor.edge_x) * length(anchor.edge_y) * length(anchor.edge_z);
+    if (abs(frame_volume) < edge_volume * STICKER_MIN_FRAME_VOLUME) {
+        discard;
+        return vec4<f32>(0.0);
+    }
+
+    let to_local = inverse3(to_world);
+
+    let ray_origin = to_local * (in.world_position - anchor.world_center);
+    let ray_direction = normalize(to_local * (in.world_position - camera.eye_position.xyz));
+    // `-light.direction`, matching every other material's "toward the
+    // light" convention (see e.g. `leaves_color`), rather than the raw
+    // direction the light travels.
+    let local_light_dir = normalize(to_local * (-light.direction));
+
+    let span = ray_box(ray_origin, ray_direction, LIGHT_CLOUD_HALF_EXTENT);
+    if (span.x < 0.0) {
+        discard;
+        return vec4<f32>(0.0);
+    }
+
+    let cos_theta = dot(ray_direction, local_light_dir);
+    let phase = 0.5 + 0.5 * cos_theta * cos_theta;
+
+    let step_size = (span.y - span.x) / f32(LIGHT_CLOUD_STEPS);
+    // Screen-space-stable jitter (fixed pattern, not crawling frame to
+    // frame) - see `fs_fire`'s own use of this.
+    let jitter = hash31(vec3<f32>(in.clip_position.xy, 0.0));
+    var travelled = span.x + step_size * jitter;
+
+    // Seeded by `piece_slot` rather than instance index, so a piece keeps
+    // its own cloud pattern when a move relocates it to a different slot -
+    // see `fs_fire`'s identical technique.
+    let seed = hash11(f32(in.piece_slot) * 0.073) * 4.0;
+    let seed_offset = vec3<f32>(seed, seed * 1.3, seed * 0.7);
+
+    var accumulated = vec3<f32>(0.0);
+    var transmittance = 1.0;
+
+    for (var i = 0u; i < LIGHT_CLOUD_STEPS; i++) {
+        if (travelled >= span.y || transmittance < 0.02) {
+            break;
+        }
+
+        let p = ray_origin + ray_direction * travelled;
+        travelled += step_size;
+
+        if (any(abs(p) > vec3<f32>(LIGHT_CLOUD_HALF_EXTENT))) {
+            break;
+        }
+
+        let density = light_cloud_density(p, seed_offset);
+        if (density <= 0.01) {
+            continue;
+        }
+
+        var shadow_density = 0.0;
+        for (var j = 0u; j < LIGHT_CLOUD_SHADOW_STEPS; j++) {
+            let shadow_pos = p + local_light_dir * (f32(j) * LIGHT_CLOUD_SHADOW_STEP_SIZE);
+            if (any(abs(shadow_pos) > vec3<f32>(LIGHT_CLOUD_HALF_EXTENT))) {
+                break;
+            }
+            shadow_density += light_cloud_fast_density(shadow_pos, seed_offset);
+        }
+
+        let light_attenuation = exp(-shadow_density * 2.0);
+        let light_color = vec3<f32>(1.0, 0.9, 0.7) * light_attenuation * phase * 3.0;
+        let ambient_color = vec3<f32>(0.2, 0.3, 0.5) * (p.y * 0.5 + 0.5);
+        let scatter = light_color + ambient_color;
+
+        let absorption = density * step_size * 4.5;
+        let step_transmittance = exp(-absorption);
+
+        accumulated += transmittance * (1.0 - step_transmittance) * scatter;
+        transmittance *= step_transmittance;
     }
 
     let coverage = 1.0 - transmittance;

@@ -295,9 +295,13 @@ fn sand_particle(sticker_index: u32, instance_index: u32, anchor: StickerAnchor)
     return styled_particle(style, sticker_index, instance_index, anchor);
 }
 
-// Glowing Light: large soft motes drifting slowly outward and dimming, warm
-// white throughout.
-fn glowing_light_particle(
+// Light: kept only for the one-function-per-kind symmetry every other
+// zero-budget element (Fire, Water, Lightning, Ice, Dark) maintains -
+// `Theme::particles_per_kind` zeroes this kind's budget now that `fs_light`
+// carries the material's whole look, so the `case 5u` dispatch below is
+// never actually invoked at runtime. Values otherwise unchanged from the
+// old glowing-motes look this replaced.
+fn light_particle(
     sticker_index: u32,
     instance_index: u32,
     anchor: StickerAnchor,
@@ -328,7 +332,7 @@ fn water_particle(sticker_index: u32, instance_index: u32, anchor: StickerAnchor
 }
 
 // Dark: kept only for the one-function-per-kind symmetry every other
-// zero-budget element (Fire, Water, Lightning, Ice) maintains -
+// zero-budget element (Fire, Water, Lightning, Ice, Light) maintains -
 // `Theme::particles_per_kind` zeroes this kind's budget, so the `case 7u`
 // dispatch below is never actually invoked at runtime. Values otherwise
 // unchanged from the Crystal material this replaced.
@@ -393,7 +397,7 @@ fn vs_main(
             sample = sand_particle(sticker_index, instance_index, anchor);
         }
         case 5u: {
-            sample = glowing_light_particle(sticker_index, instance_index, anchor);
+            sample = light_particle(sticker_index, instance_index, anchor);
         }
         case 6u: {
             sample = water_particle(sticker_index, instance_index, anchor);
