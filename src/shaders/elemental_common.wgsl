@@ -18,14 +18,6 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453123);
 }
 
-fn value_noise1(x: f32) -> f32 {
-    let i = floor(x);
-    let f = fract(x);
-    let a = hash11(i);
-    let b = hash11(i + 1.0);
-    return mix(a, b, smoothstep(0.0, 1.0, f));
-}
-
 // Bilinearly-interpolated value noise over the 4 hashed corners of the unit
 // cell containing `p`, smoothed by the cubic `3t^2 - 2t^3` - the 2D
 // counterpart of `value_noise3`, built on `hash21` instead of `hash31`.

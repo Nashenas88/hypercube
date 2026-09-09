@@ -1,6 +1,6 @@
 #import math4d::{camera, compute_sticker_anchor, compute_vertex_geometry, instances, inverse3, transform}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
-#import elemental_common::{hash11, hash21, hash31, value_noise1, value_noise2, value_noise3}
+#import elemental_common::{hash11, hash21, hash31, value_noise2, value_noise3}
 
 // Ice's own bind group: iChannel0 (gray noise, for the triplanar bump map)
 // and iChannel1 (a snapshot of the rendered scene so far, copied fresh by
@@ -317,23 +317,211 @@ fn water_color(
     return pow(color, vec3<f32>(0.75));
 }
 
-fn sand_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    let normal = normalize(world_normal);
+// Dirt: a raymarched bumpy rock/earth surface filling each sticker's own
+// local cube. Unlike Water/Moss, which bump-map a flat quad, and unlike
+// Ice's own opaque raymarch, Dirt's rock box (extent ~0.93) doesn't reach a
+// sticker's full local extent (1.0), so it has real transparent regions at
+// a facet's own edges/corners - not just under a degenerate 4D frame. That
+// makes it a fourth member of Fire/Ice/Light's back-to-front batched,
+// blended pass (`fs_dirt`, drawn by `dirt_pipeline` - see `renderer.rs` and
+// `shader_widget::DepthLayer`) rather than a material shaded inline in
+// `fs_main`: an opaque pass has no way to let a farther sticker's own
+// material show correctly through those gaps under 4D perspective.
+// Raymarched in the sticker's own local frame exactly like Fire
+// (`compute_sticker_anchor`/`inverse3`), but with a hard SDF hit/miss
+// instead of a density accumulation, seeded by `piece_slot` like Fire so a
+// piece's own rock pattern travels with it through a move rather than
+// jumping to a new one. Ported from a standalone Shadertoy-style source
+// whose own domain was already normalized to roughly a unit box - the same
+// convention `compute_sticker_anchor`'s local frame uses (1.0 == the
+// sticker mesh cube's own half-extent, see `STICKER_HALF_EXTENT`) - so the
+// source's box and bump literals below carry over unchanged.
+
+// Bounding test for `ray_box`, not the surface itself: the box (extent 0.7)
+// plus its bump displacement (up to ~0.18+0.05) reaches at most ~0.93 from
+// center, so 0.95 gives a small safety margin - mirrors Fire's
+// `FIRE_BASE_EXTENT + FIRE_SURFACE_DISPLACEMENT` bound for `ray_box`.
+const DIRT_BOUND_EXTENT: f32 = 0.95;
+
+// Sphere-trace budget. The source used 96 steps from the open camera ray;
+// `ray_box` above already starts this march right at the box's own
+// boundary instead, eliminating most of that travel for free. What's left
+// is sized between Fire's 16 steps and Light's 28 (`LIGHT_CLOUD_STEPS`),
+// both of which also cover scenes that can show many simultaneous facets.
+const DIRT_MARCH_STEPS: i32 = 36;
+const DIRT_MARCH_EPSILON: f32 = 0.003;
+const DIRT_STEP_SCALE: f32 = 0.75;
+
+// Octaves for `dirt_map`'s rock bump, evaluated on every march/normal/AO
+// sample - kept low for the same reason Fire's `ridged_warp`/`ridged_detail`
+// use 2 octaves apiece rather than the source's full 5: a facet covers too
+// few pixels for the finest octaves to resolve into anything legible.
+const DIRT_BUMP_OCTAVES: i32 = 3;
+
+// Octaves for the one-time macro/micro color noise sampled once per hit
+// (not per march step) - kept at the source's own 5, since this call is
+// cheap relative to the march.
+const DIRT_COLOR_OCTAVES: i32 = 5;
+
+// Reduced from the source's 5-sample AO loop for the same per-step cost
+// reason as `DIRT_BUMP_OCTAVES`.
+const DIRT_AO_STEPS: i32 = 3;
+
+fn dirt_sd_box(p: vec3<f32>, b: vec3<f32>) -> f32 {
+    let q = abs(p) - b;
+    return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+// The project's own `value_noise3` (trilinear value noise) stands in for
+// the source's own hand-rolled `hash`/`noise` pair - both are the same
+// construction, and `value_noise3` is deliberately the non-`sin`-based
+// version this file already prefers for heavily-per-pixel volume sampling
+// (see `elemental_common.wgsl`). `octaves` is a parameter, not the source's
+// fixed 5, so the same function serves both `dirt_map`'s cheap per-step
+// bump (`DIRT_BUMP_OCTAVES`) and the hit point's richer one-shot color
+// noise (`DIRT_COLOR_OCTAVES`).
+fn dirt_fbm(p_in: vec3<f32>, octaves: i32) -> f32 {
+    var p = p_in;
+    var val = 0.0;
+    var amp = 0.5;
+    for (var i = 0; i < octaves; i++) {
+        val += amp * value_noise3(p);
+        p *= 2.07;
+        amp *= 0.5;
+    }
+    return val;
+}
+
+// Scaled box (size 0.7) displaced outwards by up to ~0.23 units - ported
+// verbatim from the source's `map`, whose own domain already matched this
+// file's local-frame convention (see the section comment above).
+// `seed_offset` shifts which patch of the (otherwise infinite) noise field
+// this instance samples, so neighboring Dirt facets - and a piece's own
+// facet before and after a move - don't all show the identical pattern.
+fn dirt_map(p: vec3<f32>, seed_offset: vec3<f32>) -> f32 {
+    let sp = p + seed_offset;
+    let rock_bump = dirt_fbm(sp * 4.0, DIRT_BUMP_OCTAVES) * 0.18
+        + dirt_fbm(sp * 12.0, DIRT_BUMP_OCTAVES) * 0.05;
+    return dirt_sd_box(p, vec3<f32>(0.7)) - rock_bump;
+}
+
+// Ported verbatim from the source's `calcNormal`: a 3-tap gradient that
+// reuses the hit distance itself as a 4th sample instead of a full 6-tap
+// central difference.
+fn dirt_normal(p: vec3<f32>, seed_offset: vec3<f32>) -> vec3<f32> {
+    let e = vec2<f32>(0.002, 0.0);
+    let d = dirt_map(p, seed_offset);
+    let n = d - vec3<f32>(
+        dirt_map(p - e.xyy, seed_offset),
+        dirt_map(p - e.yxy, seed_offset),
+        dirt_map(p - e.yyx, seed_offset),
+    );
+    return normalize(n);
+}
+
+// Ported from the source's `calcAO`, generalized from its fixed 5 samples
+// to `DIRT_AO_STEPS`.
+fn dirt_ao(p: vec3<f32>, n: vec3<f32>, seed_offset: vec3<f32>) -> f32 {
+    var occ = 0.0;
+    var sca = 1.0;
+    for (var i = 0; i < DIRT_AO_STEPS; i++) {
+        let h = 0.01 + 0.12 * f32(i) / f32(DIRT_AO_STEPS - 1);
+        let d = dirt_map(p + h * n, seed_offset);
+        occ += (h - d) * sca;
+        sca *= 0.95;
+    }
+    return clamp(1.0 - 3.0 * occ, 0.0, 1.0);
+}
+
+// Dirt's own entry point, drawn per sticker in back-to-front order over
+// `dirt_pipeline` - premultiplied blending, no depth write, alongside Fire,
+// Ice and Light (see `shader_widget::DepthLayer`). Unlike Fire's volume,
+// Dirt's rock is a hard surface: coverage is always 0.0 (fully transparent,
+// blends through to whatever is behind) or 1.0 (opaque rock), never a
+// density in between.
+@fragment
+fn fs_dirt(in: VertexOutput) -> @location(0) vec4<f32> {
+    let view_dir = normalize(camera.eye_position.xyz - in.world_position);
+    if (dot(normalize(in.world_normal), view_dir) <= 0.0) {
+        discard;
+        return vec4<f32>(0.0);
+    }
+
+    let anchor = compute_sticker_anchor(in.instance_index, STICKER_HALF_EXTENT * transform.sticker_scale);
+    let to_world = mat3x3<f32>(anchor.edge_x, anchor.edge_y, anchor.edge_z);
+
+    let frame_volume = dot(anchor.edge_x, cross(anchor.edge_y, anchor.edge_z));
+    let edge_volume = length(anchor.edge_x) * length(anchor.edge_y) * length(anchor.edge_z);
+    if (abs(frame_volume) < edge_volume * STICKER_MIN_FRAME_VOLUME) {
+        discard;
+        return vec4<f32>(0.0);
+    }
+
+    let to_local = inverse3(to_world);
+    let ray_origin = to_local * (in.world_position - anchor.world_center);
+    let ray_direction = normalize(to_local * (in.world_position - camera.eye_position.xyz));
+
+    let span = ray_box(ray_origin, ray_direction, DIRT_BOUND_EXTENT);
+    if (span.x < 0.0) {
+        discard;
+        return vec4<f32>(0.0);
+    }
+
+    // Seeded by `piece_slot` rather than instance index, so a piece keeps
+    // its own rock pattern when a move relocates it to a different slot -
+    // mirrors Fire's own `seed_offset`.
+    let seed = hash11(f32(in.piece_slot) * 0.073) * 4.0;
+    let seed_offset = vec3<f32>(seed, seed * 1.3, seed * 0.7);
+
+    var t = span.x;
+    var hit = false;
+    for (var i = 0; i < DIRT_MARCH_STEPS; i++) {
+        let p = ray_origin + ray_direction * t;
+        let d = dirt_map(p, seed_offset);
+        if (d < DIRT_MARCH_EPSILON) {
+            hit = true;
+            break;
+        }
+        t += d * DIRT_STEP_SCALE;
+        if (t > span.y) {
+            break;
+        }
+    }
+
+    if (!hit) {
+        discard;
+        return vec4<f32>(0.0);
+    }
+
+    let p = ray_origin + ray_direction * t;
+    let n_local = dirt_normal(p, seed_offset);
+    let ao = dirt_ao(p, n_local, seed_offset);
+    let n_world = normalize(to_world * n_local);
+
     let light_dir = normalize(-light.direction);
-    let view_dir = normalize(-world_position);
+    let diff = max(dot(n_world, light_dir), 0.0);
+    let amb = clamp(0.5 + 0.5 * n_world.y, 0.0, 1.0);
 
-    let grain = value_noise1(f32(instance_index) * 5.3 + transform.elapsed_seconds * 0.3);
-    let albedo = mix(vec3<f32>(0.55, 0.4, 0.2), vec3<f32>(0.75, 0.6, 0.35), grain);
+    let sp = p + seed_offset;
+    let macro_noise = dirt_fbm(sp * 3.5, DIRT_COLOR_OCTAVES);
+    let micro_noise = dirt_fbm(sp * 20.0, DIRT_COLOR_OCTAVES);
 
-    let ambient = light.ambient * albedo;
-    let diffuse_strength = max(dot(normal, light_dir), 0.0);
-    let diffuse = diffuse_strength * light.color * albedo;
+    let dark_earth = vec3<f32>(0.12, 0.08, 0.05);
+    let warm_brown = vec3<f32>(0.32, 0.21, 0.14);
+    let sand_highlight = vec3<f32>(0.55, 0.43, 0.32);
+    var base_color = mix(dark_earth, warm_brown, macro_noise);
+    base_color = mix(base_color, sand_highlight, micro_noise * macro_noise);
 
-    let half_dir = normalize(light_dir + view_dir);
-    let specular_strength = pow(max(dot(normal, half_dir), 0.0), 8.0);
-    let specular = specular_strength * light.color * 0.15;
+    let incident = normalize(in.world_position - camera.eye_position.xyz);
+    let reflect_dir = reflect(incident, n_world);
+    let spec = pow(max(dot(reflect_dir, light_dir), 0.0), 8.0) * micro_noise;
+    base_color += vec3<f32>(0.15, 0.12, 0.10) * spec;
 
-    return ambient + diffuse + specular;
+    let lin = diff * light.color + amb * light.ambient;
+    var col = base_color * lin * ao;
+    col = pow(col, vec3<f32>(0.4545));
+
+    return vec4<f32>(apply_highlight(col, 1.0, in.instance_index, in.piece_slot), 1.0);
 }
 
 // Moss: a static (non-animated) procedural surface pattern, bump-mapped from
@@ -834,8 +1022,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             discard;
             return vec4<f32>(0.0);
         }
+        // Dirt is drawn by `fs_dirt` in its own blended pass, so this one
+        // skips it rather than shading it twice.
         case 4u: {
-            final_color = sand_color(in.instance_index, in.world_position, in.world_normal);
+            discard;
+            return vec4<f32>(0.0);
         }
         // Light is drawn by `fs_light` in its own blended pass, so this one
         // skips it rather than shading it twice.

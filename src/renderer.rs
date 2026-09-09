@@ -111,12 +111,13 @@ enum DepthBatchKind {
     Fire,
     Ice,
     Light,
+    Dirt,
 }
 
 /// One instanced `draw_indexed` call within a depth batch's shared pass:
 /// every sticker of `batch_remap[remap_offset..remap_offset + count]` shares
 /// both `kind` and `face_id`, so they share `fire_pipeline`/`ice_pipeline`/
-/// `light_pipeline` (whichever `kind` picks) and `face_id`'s own winding-corrected index
+/// `light_pipeline`/`dirt_pipeline` (whichever `kind` picks) and `face_id`'s own winding-corrected index
 /// chunk (see `calculate_indices`) - `compute_vertex_geometry` derives a
 /// vertex's local cube face straight from the raw index buffer position, so
 /// mixing chunks across a call would corrupt geometry/normals for whichever
@@ -156,11 +157,14 @@ fn group_depth_batches(
             std::collections::BTreeMap::new();
         let mut light_by_face: std::collections::BTreeMap<u32, Vec<u32>> =
             std::collections::BTreeMap::new();
+        let mut dirt_by_face: std::collections::BTreeMap<u32, Vec<u32>> =
+            std::collections::BTreeMap::new();
         for &layer in batch {
             let (by_face, instance_index) = match layer {
                 DepthLayer::Fire(index) => (&mut fire_by_face, index),
                 DepthLayer::Ice(index) => (&mut ice_by_face, index),
                 DepthLayer::Light(index) => (&mut light_by_face, index),
+                DepthLayer::Dirt(index) => (&mut dirt_by_face, index),
             };
             let face_id = instance_index / facets_per_face;
             by_face.entry(face_id).or_default().push(instance_index);
@@ -171,6 +175,7 @@ fn group_depth_batches(
             (DepthBatchKind::Fire, fire_by_face),
             (DepthBatchKind::Ice, ice_by_face),
             (DepthBatchKind::Light, light_by_face),
+            (DepthBatchKind::Dirt, dirt_by_face),
         ] {
             for (face_id, indices) in by_face {
                 let remap_offset = flat_remap.len() as u32;
@@ -341,6 +346,11 @@ pub(crate) struct Renderer {
     /// rather than opaque - like Fire, but with its own raymarched
     /// volumetric cloud material instead of a flame.
     light_pipeline: wgpu::RenderPipeline,
+    /// Graphics pipeline for the Elemental theme's Dirt stickers, blended
+    /// rather than opaque - like Fire and Light, but with its own
+    /// raymarched bumpy rock material and a hard SDF hit/miss (coverage
+    /// 0.0 or 1.0) rather than a density accumulation.
+    dirt_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for the Elemental theme's billboarded particles
     particle_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for normal visualization
@@ -1235,10 +1245,21 @@ impl Renderer {
         // only the order of indices within it.
         let facets_per_face = (num_stickers / 8) as u32;
         let initial_sticker_order = build_sticker_order(&sticker_instances, facets_per_face);
-        let (initial_particle_instances, initial_particle_ranges) = build_particle_instances(
+        let (mut initial_particle_instances, initial_particle_ranges) = build_particle_instances(
             &initial_sticker_order,
             &Theme::Elemental.particles_per_kind(),
         );
+        // Every kind's Elemental particle budget is zero now that Dirt has
+        // joined Fire/Water/Lightning/Ice/Dark/Light/Moss in carrying its
+        // whole look on the surface, so `initial_particle_instances` is
+        // always empty - `create_buffer_init` can't produce a bindable
+        // buffer from zero-length `contents`, so this pads it the same way
+        // `debug_instance_buffer` below does. Never read: every
+        // `particle_ranges` entry stays an empty range while every budget
+        // is zero.
+        if initial_particle_instances.is_empty() {
+            initial_particle_instances.push(0);
+        }
         let sticker_order_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Sticker Order Buffer"),
             contents: bytemuck::cast_slice(&initial_particle_instances),
@@ -2243,6 +2264,80 @@ impl Renderer {
             multiview: None,
         });
 
+        // Dirt's material raymarches its own bumpy rock box and, like Fire
+        // and Light, carries its whole look as blended emission with no
+        // depth write - so this pipeline is `light_pipeline` in every
+        // particular except its entry point and label. Unlike Fire's/
+        // Light's density accumulation, `fs_dirt` returns a hard 0.0/1.0
+        // coverage, but the same premultiplied blend state still applies:
+        // at 1.0 it behaves like a plain opaque write, and at 0.0 it
+        // contributes nothing, letting whatever is farther in the batch (or
+        // the opaque pass beneath it) show through unchanged.
+        let dirt_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Dirt Pipeline"),
+            layout: Some(&classic_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &elemental_shader,
+                entry_point: Some("vs_main_batched"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &elemental_shader,
+                entry_point: Some("fs_dirt"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    // Premultiplied, like Fire/Light: `fs_dirt` returns
+                    // color already scaled by its own (binary) coverage, so
+                    // the source is added whole and only the destination is
+                    // attenuated.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
         let particle_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Particle Shader"),
             source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
@@ -2674,6 +2769,7 @@ impl Renderer {
             fire_pipeline,
             ice_pipeline,
             light_pipeline,
+            dirt_pipeline,
             particle_pipeline,
             normal_pipeline,
             depth_pipeline,
@@ -3260,8 +3356,9 @@ impl Renderer {
 
                 // Only re-bind pipeline/bind-groups/buffers on a kind
                 // change - `group_depth_batches` already emits every Fire
-                // group before any Ice group before any Light group, so
-                // this is at most two switches per batch.
+                // group before any Ice group before any Light group before
+                // any Dirt group, so this is at most three switches per
+                // batch.
                 let mut bound_kind: Option<DepthBatchKind> = None;
                 for group in batch {
                     if bound_kind != Some(group.kind) {
@@ -3277,6 +3374,10 @@ impl Renderer {
                             }
                             DepthBatchKind::Light => {
                                 batch_pass.set_pipeline(&self.light_pipeline);
+                                batch_pass.set_bind_group(0, &self.main_bind_group, &[]);
+                            }
+                            DepthBatchKind::Dirt => {
+                                batch_pass.set_pipeline(&self.dirt_pipeline);
                                 batch_pass.set_bind_group(0, &self.main_bind_group, &[]);
                             }
                         }

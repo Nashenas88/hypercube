@@ -36,7 +36,9 @@ use crate::ray_casting::{
 use crate::renderer::{DebugInstanceWithDistance, Renderer};
 use crate::settings::RotateButton;
 use crate::snapshot::{self, ViewSnapshot};
-use crate::theme::{ELEMENTAL_FIRE_KIND, ELEMENTAL_ICE_KIND, ELEMENTAL_LIGHT_KIND, Theme};
+use crate::theme::{
+    ELEMENTAL_DIRT_KIND, ELEMENTAL_FIRE_KIND, ELEMENTAL_ICE_KIND, ELEMENTAL_LIGHT_KIND, Theme,
+};
 
 /// An in-progress move's animation: piece state has already been committed
 /// atomically by `apply_move`; this only drives the visual sweep from the
@@ -416,35 +418,39 @@ pub(crate) enum DepthLayer {
     Ice(u32),
     /// Blended, no depth write - see `fs_light`.
     Light(u32),
+    /// Blended, no depth write - see `fs_dirt`.
+    Dirt(u32),
 }
 
-/// The batches Fire's, Ice's and Light's stickers are drawn in together
-/// under `Theme::Elemental`: every instance of `ELEMENTAL_FIRE_KIND`,
-/// `ELEMENTAL_ICE_KIND` or `ELEMENTAL_LIGHT_KIND` on a visible face, grouped
+/// The batches Fire's, Ice's, Light's and Dirt's stickers are drawn in
+/// together under `Theme::Elemental`: every instance of
+/// `ELEMENTAL_FIRE_KIND`, `ELEMENTAL_ICE_KIND`, `ELEMENTAL_LIGHT_KIND` or
+/// `ELEMENTAL_DIRT_KIND` on a visible face, grouped
 /// into passes that must run strictly in the returned order (farthest batch
 /// first), but whose members within one batch can draw in any order - all
-/// three need a back-to-front order because what they draw depends on draw
-/// order, whether from blending (Fire, Light) or from each layer's
+/// four need a back-to-front order because what they draw depends on draw
+/// order, whether from blending (Fire, Light, Dirt) or from each layer's
 /// background snapshot needing to already contain every farther layer's own
-/// result (Ice), and any of the three can sit in front of or behind either
+/// result (Ice), and any of the four can sit in front of or behind any
 /// other one depending on the current 4D rotation.
 ///
-/// Fire and Light draw blended and write no depth, so where two of their
-/// stickers overlap on screen the result depends on the order they are
-/// drawn in. Ice instead writes an opaque result but reads back a snapshot
-/// of the scene so far, so a nearer Ice sticker must draw after every
-/// farther one - Fire and Light included - for its refraction to show them.
-/// Either way, `FireSticker::is_behind` decides each pair exactly, by
-/// casting rays through their real projected corners and testing against
-/// each other's actual geometry - the same ray-vs-cube test hover and click
-/// picking already use - rather than an approximating scalar key. That
-/// relation is combined into batches by topologically sorting it in layers:
-/// every step takes every sticker nothing undrawn still blocks, all at
-/// once, rather than just the single farthest one. A pair with no edge
-/// between them in the relation is a pair `is_behind` found no evidence
-/// occludes the other on screen, which is exactly what makes sharing one
-/// pass safe for Fire and Light, whose blending only depends on
-/// literally-overlapping pixels. It's a deliberately looser bar for Ice,
+/// Fire, Light and Dirt draw blended and write no depth, so where two of
+/// their stickers overlap on screen the result depends on the order they
+/// are drawn in. Ice instead writes an opaque result but reads back a
+/// snapshot of the scene so far, so a nearer Ice sticker must draw after
+/// every farther one - Fire, Light and Dirt included - for its refraction
+/// to show them. Either way, `FireSticker::is_behind` decides each pair
+/// exactly, by casting rays through their real projected corners and
+/// testing against each other's actual geometry - the same ray-vs-cube test
+/// hover and click picking already use - rather than an approximating
+/// scalar key. That relation is combined into batches by topologically
+/// sorting it in layers: every step takes every sticker nothing undrawn
+/// still blocks, all at once, rather than just the single farthest one. A
+/// pair with no edge between them in the relation is a pair `is_behind`
+/// found no evidence occludes the other on screen, which is exactly what
+/// makes sharing one pass safe for Fire, Light and Dirt, whose blending
+/// only depends on literally-overlapping pixels. It's a deliberately looser
+/// bar for Ice,
 /// whose reflection can sample any point on screen regardless of 3D
 /// proximity: two same-batch Ice stickers no longer see each other's own
 /// result the way strictly sequential draws would, so mutual reflection
@@ -497,7 +503,8 @@ pub(crate) fn depth_draw_order(
         .filter(|(index, instance)| {
             (instance.kind == ELEMENTAL_FIRE_KIND
                 || instance.kind == ELEMENTAL_ICE_KIND
-                || instance.kind == ELEMENTAL_LIGHT_KIND)
+                || instance.kind == ELEMENTAL_LIGHT_KIND
+                || instance.kind == ELEMENTAL_DIRT_KIND)
                 && visible_faces[index / facets_per_face]
         })
         .map(|(index, instance)| {
@@ -541,7 +548,8 @@ pub(crate) fn depth_draw_order(
                         ELEMENTAL_FIRE_KIND => DepthLayer::Fire(instance_index),
                         ELEMENTAL_ICE_KIND => DepthLayer::Ice(instance_index),
                         ELEMENTAL_LIGHT_KIND => DepthLayer::Light(instance_index),
-                        // The filter above only lets these three kinds
+                        ELEMENTAL_DIRT_KIND => DepthLayer::Dirt(instance_index),
+                        // The filter above only lets these four kinds
                         // through.
                         _ => unreachable!(),
                     }
@@ -3047,7 +3055,7 @@ mod clockwise_sign_tests {
         .flatten()
         .filter_map(|layer| match layer {
             DepthLayer::Fire(index) => Some(index),
-            DepthLayer::Ice(_) | DepthLayer::Light(_) => None,
+            DepthLayer::Ice(_) | DepthLayer::Light(_) | DepthLayer::Dirt(_) => None,
         })
         .collect()
     }
@@ -3303,7 +3311,10 @@ mod clockwise_sign_tests {
     /// `DepthLayer`'s carried instance index, regardless of kind.
     fn depth_layer_instance_index(layer: &DepthLayer) -> u32 {
         match *layer {
-            DepthLayer::Fire(index) | DepthLayer::Ice(index) | DepthLayer::Light(index) => index,
+            DepthLayer::Fire(index)
+            | DepthLayer::Ice(index)
+            | DepthLayer::Light(index)
+            | DepthLayer::Dirt(index) => index,
         }
     }
 

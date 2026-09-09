@@ -267,9 +267,13 @@ fn fire_particle(sticker_index: u32, instance_index: u32, anchor: StickerAnchor)
     return styled_particle(style, sticker_index, instance_index, anchor);
 }
 
-// Sand: fine dim grains hanging close to the surface, small and numerous
-// enough to read as a haze rather than as separate particles.
-fn sand_particle(sticker_index: u32, instance_index: u32, anchor: StickerAnchor) -> ParticleSample {
+// Dirt: kept only for the one-function-per-kind symmetry every other
+// zero-budget element (Fire, Water, Lightning, Ice, Dark, Light, Moss)
+// maintains - `Theme::particles_per_kind` zeroes this kind's budget now
+// that `fs_dirt` carries the material's whole look, so the `case 4u`
+// dispatch below is never actually invoked at runtime. Values otherwise
+// unchanged from the old flat Sand look this replaced.
+fn dirt_particle(sticker_index: u32, instance_index: u32, anchor: StickerAnchor) -> ParticleSample {
     var style = default_style();
     style.lifetime = 2.0;
     style.speed = 0.8;
@@ -377,7 +381,7 @@ fn vs_main(
             sample = fire_particle(sticker_index, instance_index, anchor);
         }
         case 4u: {
-            sample = sand_particle(sticker_index, instance_index, anchor);
+            sample = dirt_particle(sticker_index, instance_index, anchor);
         }
         case 5u: {
             sample = light_particle(sticker_index, instance_index, anchor);

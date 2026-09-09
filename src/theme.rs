@@ -12,8 +12,8 @@ pub(crate) enum Theme {
 
 /// Particles emitted per sticker under `Theme::Elemental`, indexed by `kind`.
 /// One shared budget for every element that still emits; Fire's, Water's,
-/// Lightning's, Ice's, Dark's, Light's and Moss's own materials carry their
-/// whole look, so they emit none.
+/// Lightning's, Ice's, Dark's, Light's, Moss's and Dirt's own materials
+/// carry their whole look, so they emit none.
 const ELEMENTAL_PARTICLES_PER_STICKER: u32 = 24;
 
 /// The `kind` `Theme::Elemental` renders as Moss, matching `case 1u` in
@@ -57,6 +57,16 @@ pub(crate) const ELEMENTAL_DARK_KIND: u32 = 7;
 /// recognize it to build that pass's draw order.
 pub(crate) const ELEMENTAL_LIGHT_KIND: u32 = 5;
 
+/// The `kind` `Theme::Elemental` renders as Dirt, matching `case 4u` in
+/// `elemental_shader.wgsl`. Dirt raymarches a bumpy rock surface in its own
+/// local frame and carries its whole look directly on the surface, so -
+/// like Fire, Water, Lightning, Ice, Dark and Light - it emits no
+/// particles. Its rock box doesn't fill a sticker's full local extent, so
+/// like Fire, Ice and Light it draws in its own blended, depth-sorted pass
+/// (see `DepthLayer`), and the CPU has to recognize it to build that pass's
+/// draw order.
+pub(crate) const ELEMENTAL_DIRT_KIND: u32 = 4;
+
 impl Theme {
     pub(crate) const ALL: [Theme; 2] = [Theme::Classic, Theme::Elemental];
 
@@ -74,6 +84,7 @@ impl Theme {
                 counts[ELEMENTAL_ICE_KIND as usize] = 0;
                 counts[ELEMENTAL_DARK_KIND as usize] = 0;
                 counts[ELEMENTAL_LIGHT_KIND as usize] = 0;
+                counts[ELEMENTAL_DIRT_KIND as usize] = 0;
                 counts
             }
         }
