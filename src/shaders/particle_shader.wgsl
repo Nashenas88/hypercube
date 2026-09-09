@@ -237,20 +237,6 @@ fn ice_particle(sticker_index: u32, instance_index: u32, anchor: StickerAnchor) 
     return styled_particle(style, sticker_index, instance_index, anchor);
 }
 
-// Leaves: broad flecks tumbling slowly outward, sagging back a little as
-// they go, and darkening from new growth to leaf litter over their life.
-fn leaves_particle(sticker_index: u32, instance_index: u32, anchor: StickerAnchor) -> ParticleSample {
-    var style = default_style();
-    style.lifetime = 3.0;
-    style.speed = 1.0;
-    style.gravity = 0.4;
-    style.size = 0.18;
-    style.color_hot = vec3<f32>(0.45, 0.7, 0.2);
-    style.color_cool = vec3<f32>(0.2, 0.4, 0.08);
-    style.emission = 0.45;
-    return styled_particle(style, sticker_index, instance_index, anchor);
-}
-
 // Lightning: small hard sparks flicked out fast and straight, gated onto the
 // same strobe the material flashes its sticker on so they read as thrown by
 // the flash itself.
@@ -383,9 +369,6 @@ fn vs_main(
     switch (instances[sticker_index].kind) {
         case 0u: {
             sample = ice_particle(sticker_index, instance_index, anchor);
-        }
-        case 1u: {
-            sample = leaves_particle(sticker_index, instance_index, anchor);
         }
         case 2u: {
             sample = lightning_particle(sticker_index, instance_index, anchor);

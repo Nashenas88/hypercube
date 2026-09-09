@@ -12,9 +12,15 @@ pub(crate) enum Theme {
 
 /// Particles emitted per sticker under `Theme::Elemental`, indexed by `kind`.
 /// One shared budget for every element that still emits; Fire's, Water's,
-/// Lightning's, Ice's, Dark's and Light's own materials carry their whole
-/// look, so they emit none.
+/// Lightning's, Ice's, Dark's, Light's and Moss's own materials carry their
+/// whole look, so they emit none.
 const ELEMENTAL_PARTICLES_PER_STICKER: u32 = 24;
+
+/// The `kind` `Theme::Elemental` renders as Moss, matching `case 1u` in
+/// `elemental_shader.wgsl`. Moss's material bump-maps its own normal per
+/// fragment and carries its whole look without particles, so - like Water -
+/// it emits none.
+pub(crate) const ELEMENTAL_MOSS_KIND: u32 = 1;
 
 /// The `kind` `Theme::Elemental` renders as Ice, matching `case 0u` in
 /// `elemental_shader.wgsl`. Ice's material raymarches its own refraction and
@@ -61,6 +67,7 @@ impl Theme {
             Theme::Classic => [0; 8],
             Theme::Elemental => {
                 let mut counts = [ELEMENTAL_PARTICLES_PER_STICKER; 8];
+                counts[ELEMENTAL_MOSS_KIND as usize] = 0;
                 counts[ELEMENTAL_FIRE_KIND as usize] = 0;
                 counts[ELEMENTAL_WATER_KIND as usize] = 0;
                 counts[ELEMENTAL_LIGHTNING_KIND as usize] = 0;

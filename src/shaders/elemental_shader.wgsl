@@ -1,6 +1,6 @@
 #import math4d::{camera, compute_sticker_anchor, compute_vertex_geometry, instances, inverse3, transform}
 #import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
-#import elemental_common::{hash11, hash21, hash31, value_noise1, value_noise3}
+#import elemental_common::{hash11, hash21, hash31, value_noise1, value_noise2, value_noise3}
 
 // Ice's own bind group: iChannel0 (gray noise, for the triplanar bump map)
 // and iChannel1 (a snapshot of the rendered scene so far, copied fresh by
@@ -336,24 +336,137 @@ fn sand_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3
     return ambient + diffuse + specular;
 }
 
-fn leaves_color(instance_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    let normal = normalize(world_normal);
+// Moss: a static (non-animated) procedural surface pattern, bump-mapped from
+// its own height field. `moss_fbm`/`moss_pattern`/`evaluate_moss` are a
+// direct port of a domain-warped fbm moss texture, adapted to sample the
+// sticker's own local face UV (`sticker_face_uv`) instead of a mesh UV
+// attribute this project's stickers don't have.
+struct MossEval {
+    color: vec3<f32>,
+    height: f32,
+};
+
+fn moss_fbm(p_in: vec2<f32>) -> f32 {
+    var p = p_in;
+    var total = 0.0;
+    var amplitude = 0.5;
+    let rot = mat2x2<f32>(0.8, 0.6, -0.6, 0.8);
+
+    for (var i = 0; i < 6; i++) {
+        total += amplitude * value_noise2(p);
+        p = rot * p * 2.02;
+        amplitude *= 0.5;
+    }
+    return total;
+}
+
+// Domain warping for organic moss clustering: two nested layers of fbm
+// distort the sample point before a final fbm reads the pattern there.
+fn moss_pattern(p: vec2<f32>) -> f32 {
+    let q = vec2<f32>(moss_fbm(p), moss_fbm(p + vec2<f32>(5.2, 1.3)));
+    let r = vec2<f32>(
+        moss_fbm(p + 4.0 * q + vec2<f32>(1.7, 9.2)),
+        moss_fbm(p + 4.0 * q + vec2<f32>(8.3, 2.8))
+    );
+    return moss_fbm(p + 4.0 * r);
+}
+
+fn evaluate_moss(uv: vec2<f32>, seed_offset: vec2<f32>) -> MossEval {
+    let scale = 6.0;
+    let st = uv * scale + seed_offset;
+
+    let base_noise = moss_pattern(st);
+    let micro_grit = value_noise2(st * 18.0);
+
+    let height = mix(base_noise, micro_grit, 0.25);
+
+    let deep_soil = vec3<f32>(0.08, 0.07, 0.03);
+    let dark_moss = vec3<f32>(0.12, 0.28, 0.04);
+    let bright_moss = vec3<f32>(0.38, 0.62, 0.08);
+    let dry_moss = vec3<f32>(0.55, 0.58, 0.15);
+
+    var col = mix(deep_soil, dark_moss, smoothstep(0.15, 0.40, height));
+    col = mix(col, bright_moss, smoothstep(0.40, 0.70, height));
+    col = mix(col, dry_moss, smoothstep(0.72, 0.90, height));
+
+    return MossEval(col, height);
+}
+
+// Bump-mapped normal in the sticker's own local (pre-rotation) frame, from
+// finite-differencing `evaluate_moss`'s height across the facet's UV. Mirrors
+// `water_face_normal`'s recipe (including reuse of `water_edge_mask`, pure
+// local-mesh geometry despite the name) rather than the reference's arbitrary
+// TBN-from-world-normal construction, so it stays correct under the
+// sticker's own warped 4D-projected frame.
+fn moss_face_normal(uv: vec2<f32>, seed_offset: vec2<f32>, face_normal: vec3<f32>, box_extent: f32) -> vec3<f32> {
+    let eps = vec2<f32>(0.005, 0.0);
+    let mask = water_edge_mask(uv, box_extent);
+    let h0 = evaluate_moss(uv, seed_offset).height * mask;
+    let hx = evaluate_moss(uv + eps.xy, seed_offset).height * water_edge_mask(uv + eps.xy, box_extent) - h0;
+    let hy = evaluate_moss(uv + eps.yx, seed_offset).height * water_edge_mask(uv + eps.yx, box_extent) - h0;
+    let abs_n = abs(face_normal);
+    var bump_n: vec3<f32>;
+    if (abs_n.x > 0.5) {
+        bump_n = vec3<f32>(sign(face_normal.x), -hy / eps.x, -hx / eps.x);
+    } else if (abs_n.y > 0.5) {
+        bump_n = vec3<f32>(-hx / eps.x, sign(face_normal.y), -hy / eps.x);
+    } else {
+        bump_n = vec3<f32>(-hx / eps.x, -hy / eps.x, sign(face_normal.z));
+    }
+    return normalize(bump_n);
+}
+
+fn moss_color(
+    instance_index: u32,
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    local_position: vec3<f32>,
+) -> vec3<f32> {
+    let local_face_normal = sticker_local_face_normal(local_position);
+    let normalized_local = local_position / STICKER_HALF_EXTENT;
+    let local_uv = sticker_face_uv(normalized_local, local_face_normal);
+
+    // Offsets which patch of the (otherwise infinite) procedural field this
+    // sticker samples, so neighboring Moss-kind stickers don't repeat the
+    // same pattern - the same idea as Water's/Sand's per-instance seeding.
+    let seed_offset = vec2<f32>(
+        hash11(f32(instance_index) * 1.7) * 100.0,
+        hash11(f32(instance_index) * 3.1 + 50.0) * 100.0,
+    );
+
+    let eval = evaluate_moss(local_uv, seed_offset);
+
+    // Map the local bump-mapped normal into world space through the
+    // sticker's own projected frame - see `water_color`'s identical
+    // technique and its comment on the degenerate-frame fallback.
+    let anchor = compute_sticker_anchor(instance_index, STICKER_HALF_EXTENT * transform.sticker_scale);
+    let frame_volume = dot(anchor.edge_x, cross(anchor.edge_y, anchor.edge_z));
+    let edge_volume = length(anchor.edge_x) * length(anchor.edge_y) * length(anchor.edge_z);
+
+    var perturbed_world_normal = normalize(world_normal);
+    if (anchor.visible && abs(frame_volume) >= edge_volume * STICKER_MIN_FRAME_VOLUME) {
+        let to_world = mat3x3<f32>(anchor.edge_x, anchor.edge_y, anchor.edge_z);
+        let local_normal = moss_face_normal(local_uv, seed_offset, local_face_normal, 1.0);
+        perturbed_world_normal = normalize(to_world * local_normal);
+    }
+
+    let normal = perturbed_world_normal;
     let light_dir = normalize(-light.direction);
     let view_dir = normalize(-world_position);
 
-    let sway = value_noise1(f32(instance_index) * 1.7 + transform.elapsed_seconds * 0.8);
-    let dapple = value_noise1(f32(instance_index) * 9.3 + transform.elapsed_seconds * 2.5);
-    let albedo = mix(vec3<f32>(0.1, 0.35, 0.05), vec3<f32>(0.35, 0.6, 0.15), sway) * mix(0.7, 1.0, dapple);
-
-    let ambient = light.ambient * albedo;
+    let ambient = light.ambient * eval.color;
     let diffuse_strength = max(dot(normal, light_dir), 0.0);
-    let diffuse = diffuse_strength * light.color * albedo;
+    let diffuse = diffuse_strength * light.color * eval.color;
 
     let half_dir = normalize(light_dir + view_dir);
     let specular_strength = pow(max(dot(normal, half_dir), 0.0), 16.0);
     let specular = specular_strength * light.color * 0.2;
 
-    return ambient + diffuse + specular;
+    var final_color = ambient + diffuse + specular;
+    // Ambient-occlusion-style darkening inside deep crevasses.
+    final_color *= smoothstep(0.0, 0.5, eval.height * 0.8 + 0.2);
+
+    return final_color;
 }
 
 // Dark: a raymarched window into one shared toxic-void "portal world" -
@@ -710,7 +823,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(0.0);
         }
         case 1u: {
-            final_color = leaves_color(in.instance_index, in.world_position, in.world_normal);
+            final_color = moss_color(in.instance_index, in.world_position, in.world_normal, in.local_position);
         }
         case 2u: {
             final_color = lightning_color(in.instance_index, in.world_position, in.world_normal, in.local_position);
@@ -1092,7 +1205,7 @@ fn fs_light(in: VertexOutput) -> @location(0) vec4<f32> {
     let ray_origin = to_local * (in.world_position - anchor.world_center);
     let ray_direction = normalize(to_local * (in.world_position - camera.eye_position.xyz));
     // `-light.direction`, matching every other material's "toward the
-    // light" convention (see e.g. `leaves_color`), rather than the raw
+    // light" convention (see e.g. `moss_color`), rather than the raw
     // direction the light travels.
     let local_light_dir = normalize(to_local * (-light.direction));
 

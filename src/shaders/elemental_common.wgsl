@@ -26,6 +26,22 @@ fn value_noise1(x: f32) -> f32 {
     return mix(a, b, smoothstep(0.0, 1.0, f));
 }
 
+// Bilinearly-interpolated value noise over the 4 hashed corners of the unit
+// cell containing `p`, smoothed by the cubic `3t^2 - 2t^3` - the 2D
+// counterpart of `value_noise3`, built on `hash21` instead of `hash31`.
+fn value_noise2(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+
+    let a = hash21(i);
+    let b = hash21(i + vec2<f32>(1.0, 0.0));
+    let c = hash21(i + vec2<f32>(0.0, 1.0));
+    let d = hash21(i + vec2<f32>(1.0, 1.0));
+
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
 // Deliberately not the `sin`-based construction `hash11`/`hash21` use: a
 // volume sampled at thousands of points per pixel drives its argument far
 // enough out that `sin`'s periodicity starts aliasing against the multiply,
