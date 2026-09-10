@@ -433,6 +433,39 @@ fn dirt_ao(p: vec3<f32>, n: vec3<f32>, seed_offset: vec3<f32>) -> f32 {
     return clamp(1.0 - 3.0 * occ, 0.0, 1.0);
 }
 
+struct DirtMarchHit {
+    t: f32,
+    hit: bool,
+}
+
+// The SDF march shared by `fs_dirt` and its depth-only sibling
+// `fs_dirt_depth`. Unlike Fire/Light, this loop never touches color - all of
+// that (`dirt_normal`/`dirt_ao`/`dirt_fbm`) runs once after it breaks - so
+// both entry points share this one implementation outright with no
+// duplicated control flow.
+fn dirt_march(
+    ray_origin: vec3<f32>,
+    ray_direction: vec3<f32>,
+    span: vec2<f32>,
+    seed_offset: vec3<f32>,
+) -> DirtMarchHit {
+    var t = span.x;
+    var hit = false;
+    for (var i = 0; i < DIRT_MARCH_STEPS; i++) {
+        let p = ray_origin + ray_direction * t;
+        let d = dirt_map(p, seed_offset);
+        if (d < DIRT_MARCH_EPSILON) {
+            hit = true;
+            break;
+        }
+        t += d * DIRT_STEP_SCALE;
+        if (t > span.y) {
+            break;
+        }
+    }
+    return DirtMarchHit(t, hit);
+}
+
 // Dirt's own entry point, drawn per sticker in back-to-front order over
 // `dirt_pipeline` - premultiplied blending, no depth write, alongside Fire,
 // Ice and Light (see `shader_widget::DepthLayer`). Unlike Fire's volume,
@@ -473,27 +506,13 @@ fn fs_dirt(in: VertexOutput) -> @location(0) vec4<f32> {
     let seed = hash11(f32(in.piece_slot) * 0.073) * 4.0;
     let seed_offset = vec3<f32>(seed, seed * 1.3, seed * 0.7);
 
-    var t = span.x;
-    var hit = false;
-    for (var i = 0; i < DIRT_MARCH_STEPS; i++) {
-        let p = ray_origin + ray_direction * t;
-        let d = dirt_map(p, seed_offset);
-        if (d < DIRT_MARCH_EPSILON) {
-            hit = true;
-            break;
-        }
-        t += d * DIRT_STEP_SCALE;
-        if (t > span.y) {
-            break;
-        }
-    }
-
-    if (!hit) {
+    let march = dirt_march(ray_origin, ray_direction, span, seed_offset);
+    if (!march.hit) {
         discard;
         return vec4<f32>(0.0);
     }
 
-    let p = ray_origin + ray_direction * t;
+    let p = ray_origin + ray_direction * march.t;
     let n_local = dirt_normal(p, seed_offset);
     let ao = dirt_ao(p, n_local, seed_offset);
     let n_world = normalize(to_world * n_local);
@@ -522,6 +541,53 @@ fn fs_dirt(in: VertexOutput) -> @location(0) vec4<f32> {
     col = pow(col, vec3<f32>(0.4545));
 
     return vec4<f32>(apply_highlight(col, 1.0, in.instance_index, in.piece_slot), 1.0);
+}
+
+// Depth-only sibling of `fs_dirt`, drawn by `dirt_depth_prepass_pipeline`
+// ahead of the color pass so hardware early-Z can reject fragments a nearer
+// Fire/Light/Dirt sticker has already covered - see `perf_improvements.md`
+// item 1. Shares `dirt_march` with `fs_dirt` outright and skips every
+// shading-only call that follows it there (`dirt_normal`, `dirt_ao`, the
+// color `dirt_fbm` octaves), since none of that affects where the rock
+// surface is.
+@fragment
+fn fs_dirt_depth(in: VertexOutput) -> @builtin(frag_depth) f32 {
+    let view_dir = normalize(camera.eye_position.xyz - in.world_position);
+    if (dot(normalize(in.world_normal), view_dir) <= 0.0) {
+        discard;
+        return 0.0;
+    }
+
+    let anchor = compute_sticker_anchor(in.instance_index, STICKER_HALF_EXTENT * transform.sticker_scale);
+    let to_world = mat3x3<f32>(anchor.edge_x, anchor.edge_y, anchor.edge_z);
+
+    let frame_volume = dot(anchor.edge_x, cross(anchor.edge_y, anchor.edge_z));
+    let edge_volume = length(anchor.edge_x) * length(anchor.edge_y) * length(anchor.edge_z);
+    if (abs(frame_volume) < edge_volume * STICKER_MIN_FRAME_VOLUME) {
+        discard;
+        return 0.0;
+    }
+
+    let to_local = inverse3(to_world);
+    let ray_origin = to_local * (in.world_position - anchor.world_center);
+    let ray_direction = normalize(to_local * (in.world_position - camera.eye_position.xyz));
+
+    let span = ray_box(ray_origin, ray_direction, DIRT_BOUND_EXTENT);
+    if (span.x < 0.0) {
+        discard;
+        return 0.0;
+    }
+
+    let seed = hash11(f32(in.piece_slot) * 0.073) * 4.0;
+    let seed_offset = vec3<f32>(seed, seed * 1.3, seed * 0.7);
+
+    let march = dirt_march(ray_origin, ray_direction, span, seed_offset);
+    if (!march.hit) {
+        discard;
+        return 0.0;
+    }
+
+    return sticker_local_to_frag_depth(anchor.world_center, to_world, ray_origin + ray_direction * march.t);
 }
 
 // Moss: a static (non-animated) procedural surface pattern, bump-mapped from
@@ -1220,6 +1286,81 @@ fn ray_box(ro: vec3<f32>, rd: vec3<f32>, half_extent: f32) -> vec2<f32> {
     return vec2<f32>(max(near, 0.0), far);
 }
 
+// Converts a point in a sticker's own local frame (as marched by
+// `fire_plasma_march`/`light_cloud_march`/`dirt_march`) to the clip depth
+// `@builtin(frag_depth)` expects - world space via the same
+// `anchor.world_center`/`to_world` every material already uses, then clip
+// space via `camera.view_proj`, taking `clip.z / clip.w` with no further
+// remap (wgpu's own NDC z already spans `[0,1]` - see `depth_shader.wgsl`'s
+// identical conversion). Shared by all three depth-only entry points' final
+// hit point.
+fn sticker_local_to_frag_depth(world_center: vec3<f32>, to_world: mat3x3<f32>, local_point: vec3<f32>) -> f32 {
+    let world_point = world_center + to_world * local_point;
+    let clip = camera.view_proj * vec4<f32>(world_point, 1.0);
+    return clip.z / clip.w;
+}
+
+struct FireMarchHit {
+    hit_position: vec3<f32>,
+    transmittance: f32,
+}
+
+// Depth-only subset of `fs_fire`'s march: the same density/transmittance
+// integration, without `sun_palette` or the color accumulation it feeds -
+// shading-only work with no bearing on where the flame becomes solid.
+// Unlike `dirt_march`, this isn't called by `fs_fire` itself: `fs_fire`'s
+// color accumulation depends on every step's transmittance value, not just
+// the final one, so it still needs its own loop interleaving that work,
+// and WGSL has no closures/function pointers to share one loop body between
+// a shading and a non-shading caller. The saving here is smaller than
+// Light's or Dirt's, since Fire's density calculation feeds color and alpha
+// about equally - see `perf_improvements.md` item 1.
+fn fire_plasma_march(
+    ray_origin: vec3<f32>,
+    ray_direction: vec3<f32>,
+    span: vec2<f32>,
+    time: f32,
+    seed_offset: vec3<f32>,
+    jitter: f32,
+) -> FireMarchHit {
+    let step_size = (span.y - span.x) / f32(FIRE_STEPS);
+    let step_radii = step_size / FIRE_BASE_EXTENT;
+    var travelled = span.x + step_size * jitter;
+
+    var transmittance = 1.0;
+    var hit_position = ray_origin + ray_direction * travelled;
+
+    for (var i = 0; i < FIRE_STEPS; i++) {
+        if (transmittance < 0.01) {
+            break;
+        }
+
+        let p = ray_origin + ray_direction * travelled;
+        travelled += step_size;
+
+        let center_extent = max(max(abs(p.x), abs(p.y)), abs(p.z));
+        let plasma = solar_plasma(p * FIRE_NOISE_SCALE + seed_offset, time * FIRE_CHURN_SPEED);
+        let surface_extent = FIRE_BASE_EXTENT + plasma * FIRE_SURFACE_DISPLACEMENT;
+        if (center_extent > surface_extent) {
+            continue;
+        }
+
+        let normalized_extent = center_extent / FIRE_BASE_EXTENT;
+        let core_density = exp(-normalized_extent * 3.5) * 14.0;
+        let surface_density = plasma * 4.5;
+        var density = core_density + surface_density * smoothstep(1.3, 0.4, normalized_extent);
+        density *= smoothstep(surface_extent, surface_extent - 0.15, center_extent);
+        if (density <= 0.01) {
+            continue;
+        }
+
+        transmittance *= exp(-density * FIRE_ABSORPTION * step_radii);
+        hit_position = p;
+    }
+
+    return FireMarchHit(hit_position, transmittance);
+}
+
 // Fire's own entry point, drawn per sticker in back-to-front order over a
 // pipeline with premultiplied blending and no depth write. Emission is
 // accumulated against a transmittance along a ray through the flame cube, so
@@ -1337,6 +1478,53 @@ fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
     );
 }
 
+// Depth-only sibling of `fs_fire`, drawn by `fire_depth_prepass_pipeline`
+// ahead of the color pass so hardware early-Z can reject fragments a nearer
+// Fire/Light/Dirt sticker has already covered - see `perf_improvements.md`
+// item 1. Uses `fire_plasma_march` instead of `fs_fire`'s own loop, so it
+// never evaluates `sun_palette` or accumulates color.
+@fragment
+fn fs_fire_depth(in: VertexOutput) -> @builtin(frag_depth) f32 {
+    let view_dir = normalize(camera.eye_position.xyz - in.world_position);
+    if (dot(normalize(in.world_normal), view_dir) <= 0.0) {
+        discard;
+        return 0.0;
+    }
+
+    let anchor = compute_sticker_anchor(in.instance_index, STICKER_HALF_EXTENT * transform.sticker_scale);
+    let to_world = mat3x3<f32>(anchor.edge_x, anchor.edge_y, anchor.edge_z);
+
+    let frame_volume = dot(anchor.edge_x, cross(anchor.edge_y, anchor.edge_z));
+    let edge_volume = length(anchor.edge_x) * length(anchor.edge_y) * length(anchor.edge_z);
+    if (abs(frame_volume) < edge_volume * STICKER_MIN_FRAME_VOLUME) {
+        discard;
+        return 0.0;
+    }
+
+    let to_local = inverse3(to_world);
+    let ray_origin = to_local * (in.world_position - anchor.world_center);
+    let ray_direction = normalize(to_local * (in.world_position - camera.eye_position.xyz));
+
+    let span = ray_box(ray_origin, ray_direction, FIRE_BASE_EXTENT + FIRE_SURFACE_DISPLACEMENT);
+    if (span.x < 0.0) {
+        discard;
+        return 0.0;
+    }
+
+    let time = transform.elapsed_seconds % FIRE_TIME_WRAP;
+    let seed = hash11(f32(in.piece_slot) * 0.073) * 4.0;
+    let seed_offset = vec3<f32>(seed, seed * 1.3, seed * 0.7);
+    let jitter = hash31(vec3<f32>(in.clip_position.xy, 0.0));
+
+    let march = fire_plasma_march(ray_origin, ray_direction, span, time, seed_offset, jitter);
+    if (march.transmittance >= 0.01) {
+        discard;
+        return 0.0;
+    }
+
+    return sticker_local_to_frag_depth(anchor.world_center, to_world, march.hit_position);
+}
+
 // Light: a raymarched volumetric cloud filling each sticker's own local
 // cube, shaded by density-based self-shadowing toward the scene's real
 // directional light plus a fixed warm/ambient palette. Drawn the same way
@@ -1389,6 +1577,58 @@ fn light_cloud_fast_density(pos: vec3<f32>, seed_offset: vec3<f32>) -> f32 {
         + vec3<f32>(transform.elapsed_seconds * 0.15, transform.elapsed_seconds * 0.08, 0.0);
     let d = value_noise3(animated_pos);
     return clamp((d - 0.3) * 1.8, 0.0, 1.0) * light_cloud_box_mask(pos);
+}
+
+struct LightMarchHit {
+    hit_position: vec3<f32>,
+    transmittance: f32,
+}
+
+// Depth-only subset of `fs_light`'s march: the same density/transmittance
+// integration, without the nested `LIGHT_CLOUD_SHADOW_STEPS` self-shadow
+// sub-march or the color terms it feeds (`light_color`/`ambient_color`/
+// `scatter`) - none of that affects where the cloud becomes solid, and
+// skipping it is the main saving `fs_light_depth` gets over a naive
+// full-shader prepass (see `perf_improvements.md` item 1). Not called by
+// `fs_light` itself - see `fire_plasma_march`'s doc comment for why WGSL
+// can't share one loop body between a shading and a non-shading caller.
+fn light_cloud_march(
+    ray_origin: vec3<f32>,
+    ray_direction: vec3<f32>,
+    span: vec2<f32>,
+    seed_offset: vec3<f32>,
+    jitter: f32,
+) -> LightMarchHit {
+    let step_size = (span.y - span.x) / f32(LIGHT_CLOUD_STEPS);
+    var travelled = span.x + step_size * jitter;
+
+    var transmittance = 1.0;
+    var hit_position = ray_origin + ray_direction * travelled;
+
+    for (var i = 0u; i < LIGHT_CLOUD_STEPS; i++) {
+        if (travelled >= span.y || transmittance < 0.02) {
+            break;
+        }
+
+        let p = ray_origin + ray_direction * travelled;
+        travelled += step_size;
+
+        if (any(abs(p) > vec3<f32>(LIGHT_CLOUD_HALF_EXTENT))) {
+            break;
+        }
+
+        let density = light_cloud_density(p, seed_offset);
+        if (density <= 0.01) {
+            continue;
+        }
+
+        let absorption = density * step_size * 4.5;
+        let step_transmittance = exp(-absorption);
+        transmittance *= step_transmittance;
+        hit_position = p;
+    }
+
+    return LightMarchHit(hit_position, transmittance);
 }
 
 // Light's own entry point, drawn per sticker in back-to-front order over a
@@ -1496,6 +1736,52 @@ fn fs_light(in: VertexOutput) -> @location(0) vec4<f32> {
         apply_highlight(accumulated, coverage, in.instance_index, in.piece_slot),
         coverage,
     );
+}
+
+// Depth-only sibling of `fs_light`, drawn by `light_depth_prepass_pipeline`
+// ahead of the color pass so hardware early-Z can reject fragments a nearer
+// Fire/Light/Dirt sticker has already covered - see `perf_improvements.md`
+// item 1. Uses `light_cloud_march` instead of `fs_light`'s own loop, so it
+// never runs the self-shadow sub-march or any of the color terms it feeds.
+@fragment
+fn fs_light_depth(in: VertexOutput) -> @builtin(frag_depth) f32 {
+    let view_dir = normalize(camera.eye_position.xyz - in.world_position);
+    if (dot(normalize(in.world_normal), view_dir) <= 0.0) {
+        discard;
+        return 0.0;
+    }
+
+    let anchor = compute_sticker_anchor(in.instance_index, STICKER_HALF_EXTENT * transform.sticker_scale);
+    let to_world = mat3x3<f32>(anchor.edge_x, anchor.edge_y, anchor.edge_z);
+
+    let frame_volume = dot(anchor.edge_x, cross(anchor.edge_y, anchor.edge_z));
+    let edge_volume = length(anchor.edge_x) * length(anchor.edge_y) * length(anchor.edge_z);
+    if (abs(frame_volume) < edge_volume * STICKER_MIN_FRAME_VOLUME) {
+        discard;
+        return 0.0;
+    }
+
+    let to_local = inverse3(to_world);
+    let ray_origin = to_local * (in.world_position - anchor.world_center);
+    let ray_direction = normalize(to_local * (in.world_position - camera.eye_position.xyz));
+
+    let span = ray_box(ray_origin, ray_direction, LIGHT_CLOUD_HALF_EXTENT);
+    if (span.x < 0.0) {
+        discard;
+        return 0.0;
+    }
+
+    let jitter = hash31(vec3<f32>(in.clip_position.xy, 0.0));
+    let seed = hash11(f32(in.piece_slot) * 0.073) * 4.0;
+    let seed_offset = vec3<f32>(seed, seed * 1.3, seed * 0.7);
+
+    let march = light_cloud_march(ray_origin, ray_direction, span, seed_offset, jitter);
+    if (march.transmittance >= 0.02) {
+        discard;
+        return 0.0;
+    }
+
+    return sticker_local_to_frag_depth(anchor.world_center, to_world, march.hit_position);
 }
 
 // Ice: a raymarched glass cube with real refraction and reflection, ported

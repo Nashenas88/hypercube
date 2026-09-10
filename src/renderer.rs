@@ -351,6 +351,14 @@ pub(crate) struct Renderer {
     /// raymarched bumpy rock material and a hard SDF hit/miss (coverage
     /// 0.0 or 1.0) rather than a density accumulation.
     dirt_pipeline: wgpu::RenderPipeline,
+    /// Depth-only prepass pipelines for Fire/Light/Dirt, drawn front-to-back
+    /// before their color pipelines above so hardware early-Z can reject
+    /// fragments a nearer sticker already covers - see `render()`'s "Depth
+    /// Prepass" pass and `perf_improvements.md` item 1. Ice needs no
+    /// equivalent: `ice_pipeline` already writes real depth itself.
+    fire_depth_prepass_pipeline: wgpu::RenderPipeline,
+    light_depth_prepass_pipeline: wgpu::RenderPipeline,
+    dirt_depth_prepass_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for the Elemental theme's billboarded particles
     particle_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for normal visualization
@@ -2338,6 +2346,70 @@ impl Renderer {
             multiview: None,
         });
 
+        // Fire/Light/Dirt's depth-only prepass pipelines: same vertex stage,
+        // bind group layout and depth format as their color counterparts
+        // above, but no color target (depth-only) and `depth_write_enabled:
+        // true` so the write actually lands. Drawn front-to-back ahead of
+        // the existing color passes, into the same `depth_view`, so those
+        // passes' own `depth_compare: Less` can reject fragments a nearer
+        // sticker already covered before their raymarch shader ever runs -
+        // see `perf_improvements.md` item 1 and `render()`'s "Depth
+        // Prepass" pass. Ice is excluded: it already writes real depth from
+        // its own color pipeline.
+        let create_depth_prepass_pipeline = |label: &str, entry_point: &'static str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&classic_pipeline_layout),
+                cache: None,
+                vertex: wgpu::VertexState {
+                    module: &elemental_shader,
+                    entry_point: Some("vs_main_batched"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                    }],
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[],
+                        zero_initialize_workgroup_memory: false,
+                    },
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &elemental_shader,
+                    entry_point: Some(entry_point),
+                    targets: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[],
+                        zero_initialize_workgroup_memory: false,
+                    },
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+            })
+        };
+        let fire_depth_prepass_pipeline =
+            create_depth_prepass_pipeline("Fire Depth Prepass Pipeline", "fs_fire_depth");
+        let light_depth_prepass_pipeline =
+            create_depth_prepass_pipeline("Light Depth Prepass Pipeline", "fs_light_depth");
+        let dirt_depth_prepass_pipeline =
+            create_depth_prepass_pipeline("Dirt Depth Prepass Pipeline", "fs_dirt_depth");
+
         let particle_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Particle Shader"),
             source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
@@ -2757,7 +2829,6 @@ impl Renderer {
             &post_process_sampler,
             &ice_background_transform_buffer,
         );
-
         Self {
             bounds,
             target_format: format,
@@ -2770,6 +2841,9 @@ impl Renderer {
             ice_pipeline,
             light_pipeline,
             dirt_pipeline,
+            fire_depth_prepass_pipeline,
+            light_depth_prepass_pipeline,
+            dirt_depth_prepass_pipeline,
             particle_pipeline,
             normal_pipeline,
             depth_pipeline,
@@ -3280,6 +3354,85 @@ impl Renderer {
             // Fire's and Ice's stickers draw after the opaque ones, so the
             // depth they test against is complete; both are handled below,
             // batched by `depth_batches` rather than in this pass.
+        }
+
+        if is_elemental_standard {
+            // Depth-only prepass: the same batches the color loop below
+            // draws, walked front-to-back via `.rev()` of the back-to-front
+            // partition `group_depth_batches` already computed (see its own
+            // doc comment - reversing it is still a valid partition, just
+            // walked the other way) so a nearer sticker's solid depth lands
+            // in `depth_view` before the color loop's own `depth_compare:
+            // Less` tests farther ones against it. Ice is skipped: its own
+            // color pass already writes real depth (`ice_pipeline`'s
+            // `depth_write_enabled: true`), so it needs no prepass draw.
+            // See `perf_improvements.md` item 1.
+            for batch in self.depth_batch_groups.iter().rev() {
+                let has_prepass_kind = batch.iter().any(|group| group.kind != DepthBatchKind::Ice);
+                if !has_prepass_kind {
+                    continue;
+                }
+
+                let mut prepass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Depth Prepass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                prepass.set_viewport(
+                    self.bounds.x,
+                    self.bounds.y,
+                    self.bounds.width,
+                    self.bounds.height,
+                    0.0,
+                    1.0,
+                );
+
+                let mut bound_kind: Option<DepthBatchKind> = None;
+                for group in batch {
+                    if group.kind == DepthBatchKind::Ice {
+                        continue;
+                    }
+                    if bound_kind != Some(group.kind) {
+                        match group.kind {
+                            DepthBatchKind::Fire => {
+                                prepass.set_pipeline(&self.fire_depth_prepass_pipeline)
+                            }
+                            DepthBatchKind::Light => {
+                                prepass.set_pipeline(&self.light_depth_prepass_pipeline)
+                            }
+                            DepthBatchKind::Dirt => {
+                                prepass.set_pipeline(&self.dirt_depth_prepass_pipeline)
+                            }
+                            DepthBatchKind::Ice => {
+                                unreachable!("Ice groups are filtered out above")
+                            }
+                        }
+                        prepass.set_bind_group(0, &self.main_bind_group, &[]);
+                        prepass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                        prepass.set_index_buffer(
+                            self.face_index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint16,
+                        );
+                        bound_kind = Some(group.kind);
+                    }
+
+                    let index_start = group.face_id * indices_per_face;
+                    prepass.draw_indexed(
+                        index_start..index_start + indices_per_face,
+                        0,
+                        group.remap_offset..group.remap_offset + group.count,
+                    );
+                }
+            }
         }
 
         if is_elemental_standard {
