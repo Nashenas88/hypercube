@@ -1348,9 +1348,9 @@ fn fs_fire(in: VertexOutput) -> @location(0) vec4<f32> {
 // as lit, so it shades against the same directional light every other
 // material does.
 const LIGHT_CLOUD_HALF_EXTENT: f32 = 1.0;
-const LIGHT_CLOUD_STEPS: u32 = 28u;
-const LIGHT_CLOUD_SHADOW_STEPS: u32 = 5u;
-const LIGHT_CLOUD_SHADOW_STEP_SIZE: f32 = 0.12;
+const LIGHT_CLOUD_STEPS: u32 = 18u;
+const LIGHT_CLOUD_SHADOW_STEPS: u32 = 3u;
+const LIGHT_CLOUD_SHADOW_STEP_SIZE: f32 = 0.2;
 
 // Soft fade to zero near the cube's own boundary, so the cloud has no hard
 // edge at the sticker's face.
@@ -1473,7 +1473,13 @@ fn fs_light(in: VertexOutput) -> @location(0) vec4<f32> {
             shadow_density += light_cloud_fast_density(shadow_pos, seed_offset);
         }
 
-        let light_attenuation = exp(-shadow_density * 2.0);
+        // shadow_density is an unweighted sum of samples (unlike the main
+        // march's step_size-scaled absorption), so trimming
+        // LIGHT_CLOUD_SHADOW_STEPS from its original 5 down to 3 would
+        // otherwise lighten the self-shadowing at the same sample spacing;
+        // rescale by the old/new step ratio to keep attenuation strength
+        // consistent with the wider-but-fewer sample change above.
+        let light_attenuation = exp(-shadow_density * 2.0 * 5.0 / f32(LIGHT_CLOUD_SHADOW_STEPS));
         let light_color = vec3<f32>(1.0, 0.9, 0.7) * light_attenuation * phase * 3.0;
         let ambient_color = vec3<f32>(0.2, 0.3, 0.5) * (p.y * 0.5 + 0.5);
         let scatter = light_color + ambient_color;
