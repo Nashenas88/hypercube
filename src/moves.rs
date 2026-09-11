@@ -8,11 +8,126 @@
 //! corner-type turn.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::sync::LazyLock;
 
 use nalgebra::{Matrix4, Rotation3, Unit, Vector3, Vector4};
 
 use crate::math::{VIEWER_DISTANCE, project_4d_to_3d};
 use crate::piece::{FACET_TABLE, FacetGeometry, Hypercube, Piece, free_axes, index_of};
+
+/// A move, as an inert value rather than an immediate call: `side_axis`/
+/// `side_sign` select the affected side, `local_coords`/`angle` the rotation,
+/// exactly as in `Hypercube::apply_move`. Lets `solver` build up a solution
+/// as data before applying or merging any of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Move {
+    pub(crate) side_axis: usize,
+    pub(crate) side_sign: i8,
+    pub(crate) local_coords: [i8; 3],
+    pub(crate) angle: f32,
+}
+
+impl Hypercube {
+    /// Applies a `Move` value; equivalent to calling `apply_move` with its
+    /// fields.
+    #[allow(
+        dead_code,
+        reason = "will be used by solve playback in shader_widget.rs"
+    )]
+    pub(crate) fn apply(&mut self, mv: &Move) {
+        self.apply_move(mv.side_axis, mv.side_sign, mv.local_coords, mv.angle);
+    }
+}
+
+/// A 3x3 signed-permutation rotation matrix acting on a `local_coords`-style
+/// vector: `(rot3_of(local_coords, angle) * v)[row] = sum_col
+/// rot3[row][col] * v[col]`. One of the 24 elements of the cube's rotation
+/// group (signed permutation matrices with determinant +1).
+pub(crate) type Rot3 = [[i8; 3]; 3];
+
+/// The identity rotation.
+pub(crate) const ROT3_IDENTITY: Rot3 = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+
+/// Composes two rotations: `rot3_mul(a, b)` is "apply `b`, then `a`" (i.e.
+/// ordinary matrix multiplication `a * b`).
+pub(crate) fn rot3_mul(a: &Rot3, b: &Rot3) -> Rot3 {
+    let mut out = [[0i8; 3]; 3];
+    for row in 0..3 {
+        for col in 0..3 {
+            out[row][col] = (0..3).map(|k| a[row][k] * b[k][col]).sum::<i8>();
+        }
+    }
+    out
+}
+
+/// The `Rot3` matrix corresponding to `discrete_rotation(local_coords, angle)`.
+pub(crate) fn rot3_of(local_coords: [i8; 3], angle: f32) -> Rot3 {
+    let (perm, sign) = discrete_rotation(local_coords, angle);
+    let mut m = [[0i8; 3]; 3];
+    for row in 0..3 {
+        m[row][perm[row]] = sign[row];
+    }
+    m
+}
+
+/// The 23 non-identity elements of the cube's rotation group, each paired
+/// with one clickable `(local_coords, angle)` that produces it - the
+/// canonical representative `native_move_for_rotation` returns. Built from an
+/// explicit candidate list (rather than generated) so that representative is
+/// deterministic: 3 face axes x {+-90 deg, 180 deg} = 9, 3 axis pairs x 2
+/// diagonal signs x 180 deg = 6, 4 corner-diagonal sign combinations x
+/// {+-120 deg} = 8.
+pub(crate) static NATIVE_ROTATIONS: LazyLock<[(Rot3, [i8; 3], f32); 23]> = LazyLock::new(|| {
+    let mut candidates: Vec<([i8; 3], f32)> = Vec::with_capacity(23);
+    for axis in 0..3usize {
+        let mut local_coords = [0i8; 3];
+        local_coords[axis] = 1;
+        for angle in [FRAC_PI_2, -FRAC_PI_2, PI] {
+            candidates.push((local_coords, angle));
+        }
+    }
+    for (i, j) in [(0usize, 1usize), (0, 2), (1, 2)] {
+        for j_sign in [1i8, -1] {
+            let mut local_coords = [0i8; 3];
+            local_coords[i] = 1;
+            local_coords[j] = j_sign;
+            candidates.push((local_coords, PI));
+        }
+    }
+    for j_sign in [1i8, -1] {
+        for k_sign in [1i8, -1] {
+            let local_coords = [1i8, j_sign, k_sign];
+            for angle in [TAU / 3.0, -TAU / 3.0] {
+                candidates.push((local_coords, angle));
+            }
+        }
+    }
+    debug_assert_eq!(candidates.len(), 23);
+    let entries: Vec<(Rot3, [i8; 3], f32)> = candidates
+        .into_iter()
+        .map(|(local_coords, angle)| (rot3_of(local_coords, angle), local_coords, angle))
+        .collect();
+    debug_assert!(entries.iter().all(|(rot, ..)| *rot != ROT3_IDENTITY));
+    entries
+        .try_into()
+        .unwrap_or_else(|v: Vec<_>| panic!("expected 23 native rotations, got {}", v.len()))
+});
+
+/// The canonical `(local_coords, angle)` for a rotation, or `None` for the
+/// identity. Every product of elements of the cube's rotation group stays in
+/// that group, so `rot` is always found when it isn't the identity - a
+/// missing match is an internal bug in the caller's composition, not a
+/// reachable runtime case.
+pub(crate) fn native_move_for_rotation(rot: &Rot3) -> Option<([i8; 3], f32)> {
+    if *rot == ROT3_IDENTITY {
+        return None;
+    }
+    NATIVE_ROTATIONS
+        .iter()
+        .find(|(candidate, ..)| candidate == rot)
+        .map(|(_, local_coords, angle)| (*local_coords, *angle))
+        .or_else(|| panic!("rot3 not in the cube's rotation group: {rot:?}"))
+}
 
 /// Rounds a continuous 3D rotation matrix (about `local_coords`, by `angle`)
 /// to an exact signed permutation: `new[row] = sign[row] * old[perm[row]]`.
@@ -484,5 +599,72 @@ mod tests {
         let mut rng = fastrand::Rng::with_seed(3);
         cube.apply_random_moves(0, &mut rng);
         assert_eq!(cube, solved);
+    }
+
+    fn rot3_det(m: &Rot3) -> i32 {
+        let m = m.map(|row| row.map(|c| c as i32));
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    }
+
+    #[test]
+    fn native_rotations_are_23_distinct_nonidentity_proper_rotations() {
+        let mut seen = std::collections::HashSet::new();
+        for (rot, ..) in NATIVE_ROTATIONS.iter() {
+            assert_ne!(*rot, ROT3_IDENTITY);
+            assert_eq!(rot3_det(rot), 1);
+            assert!(seen.insert(*rot), "duplicate rotation {rot:?}");
+        }
+        assert_eq!(seen.len(), 23);
+    }
+
+    #[test]
+    fn native_rotations_plus_identity_closed_under_composition() {
+        let mut group: Vec<Rot3> = vec![ROT3_IDENTITY];
+        group.extend(NATIVE_ROTATIONS.iter().map(|(rot, ..)| *rot));
+        for a in &group {
+            for b in &group {
+                let product = rot3_mul(a, b);
+                assert!(
+                    group.contains(&product),
+                    "product not in group: {a:?} * {b:?} = {product:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_rotations_cover_every_clickable_local_coords_and_angle() {
+        for facet in FACET_TABLE.iter().filter(|f| f.is_actionable) {
+            let nonzero = facet.local_coords.iter().filter(|c| **c != 0).count();
+            let magnitude = base_angle(nonzero);
+            for angle in [magnitude, -magnitude] {
+                let rot = rot3_of(facet.local_coords, angle);
+                assert!(
+                    NATIVE_ROTATIONS
+                        .iter()
+                        .any(|(candidate, ..)| *candidate == rot),
+                    "no native rotation for local_coords={:?} angle={angle}",
+                    facet.local_coords
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_move_for_rotation_round_trips() {
+        for &(rot, local_coords, angle) in NATIVE_ROTATIONS.iter() {
+            let (found_coords, found_angle) = native_move_for_rotation(&rot).unwrap();
+            assert_eq!(rot3_of(found_coords, found_angle), rot);
+            // The returned representative need not be bit-identical to the
+            // candidate that built the table entry, only produce the same rotation.
+            let _ = (local_coords, angle);
+        }
+    }
+
+    #[test]
+    fn native_move_for_rotation_identity_is_none() {
+        assert_eq!(native_move_for_rotation(&ROT3_IDENTITY), None);
     }
 }

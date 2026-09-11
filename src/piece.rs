@@ -100,6 +100,18 @@ pub(crate) fn side_kind(axis: usize, sign: i8) -> u8 {
     face_id_for(axis, sign) as u8
 }
 
+/// Inverse of `side_kind`/`face_id_for`: the `(axis, sign)` home side for a
+/// given sticker kind, or `None` if `kind` isn't one of the 8 valid kinds.
+/// Used by `solver` to work out where a sticker "wants" to go, without
+/// exposing `FACE_AXIS_SIGN` itself.
+#[allow(
+    dead_code,
+    reason = "will be used by solver::coords once the position/orient stages land"
+)]
+pub(crate) fn side_for_kind(kind: u8) -> Option<(usize, i8)> {
+    FACE_AXIS_SIGN.get(kind as usize).copied()
+}
+
 /// The 3 axes other than `fixed`, in ascending order.
 pub(crate) fn free_axes(fixed: usize) -> [usize; 3] {
     let mut out = [0usize; 3];
@@ -405,6 +417,21 @@ mod tests {
                 [position[axes[0]], position[axes[1]], position[axes[2]]]
             );
         }
+    }
+
+    #[test]
+    fn side_for_kind_is_the_inverse_of_side_kind() {
+        for axis in 0..4 {
+            for &sign in &[-1i8, 1] {
+                let kind = side_kind(axis, sign);
+                assert_eq!(side_for_kind(kind), Some((axis, sign)));
+            }
+        }
+    }
+
+    #[test]
+    fn side_for_kind_out_of_range_is_none() {
+        assert_eq!(side_for_kind(8), None);
     }
 
     #[test]

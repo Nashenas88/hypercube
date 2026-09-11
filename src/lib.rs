@@ -20,6 +20,7 @@ mod renderer;
 mod settings;
 pub mod shader_widget;
 mod snapshot;
+mod solver;
 mod theme;
 
 /// Entry point for the hypercube visualization application
