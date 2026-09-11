@@ -11,7 +11,7 @@ A 4D Rubik's-cube visualizer built in Rust with `iced` 0.14 (wgpu + advanced fea
 - Build: `cargo build`
 - Run: `cargo run`
 - Test all: `cargo test`
-- Test one: `cargo test <test_name>` (all tests are inline `#[cfg(test)] mod tests` blocks — no `tests/` directory — in `app.rs`, `camera.rs`, `piece.rs`, `math.rs`, `moves.rs`, `shader_widget.rs`, `solver/*.rs`)
+- Test one: `cargo test <test_name>` (all tests are inline `#[cfg(test)] mod tests` blocks — no `tests/` directory — in `app.rs`, `camera.rs`, `piece.rs`, `math.rs`, `menu_layout.rs`, `moves.rs`, `shader_widget.rs`, `solver/*.rs`)
 - Format: `cargo fmt`
 - Lint: `cargo clippy --all-targets`
 
@@ -43,7 +43,7 @@ short pointer:
 - `piece.rs` — core domain model (`Piece`, `Hypercube`, `FACET_TABLE`, sticker instance generation). See `context/piece.md`.
 - `moves.rs` — move application: rotates a 3×3×3 side, snaps to an exact permutation. See `context/moves.md`.
 - `ray_casting.rs` — CPU-side ray/AABB/triangle intersection for hover and click picking. See `context/ray_casting.md`.
-- `solver/` — a solver, under construction. See `context/solver.md`.
+- `solver/` — a port of NdSolve (Magic Cube 4D's solver) behind Puzzle → Solve; `shader_widget.rs` plays its moves back. See `context/solver.md`.
 - `settings.rs` — `AppSettings` persisted via `serde`/`toml`/`directories`. See `context/settings.md`.
 - `shaders/*.wgsl` — WGSL shaders sharing structs/math via `math4d.wgsl`, composed with `naga_oil`. See `context/shaders.md`.
 

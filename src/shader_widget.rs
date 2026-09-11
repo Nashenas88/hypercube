@@ -6,6 +6,7 @@
 
 use std::cell::Cell;
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,7 @@ use iced::{Event, Point, Rectangle, event, mouse};
 use nalgebra::{Matrix4, Point3, UnitQuaternion, Vector3, Vector4};
 
 use crate::animation::ease;
-use crate::app::{AABBMode, Message, RenderMode};
+use crate::app::{AABBMode, Message, RenderMode, SolveOutcome};
 use crate::camera::{Camera, CameraController, Projection};
 use crate::geometry::{
     BASE_CUBE_VERTICES, FACE_CENTERS, FIXED_DIMS, NORMAL_TO_BASE_INDICES, VERTEX_NORMAL_INDICES,
@@ -36,6 +37,7 @@ use crate::ray_casting::{
 use crate::renderer::{DebugInstanceWithDistance, Renderer};
 use crate::settings::RotateButton;
 use crate::snapshot::{self, ViewSnapshot};
+use crate::solver::{self, SolveStep};
 use crate::theme::{
     ELEMENTAL_DIRT_KIND, ELEMENTAL_FIRE_KIND, ELEMENTAL_ICE_KIND, ELEMENTAL_LIGHT_KIND, Theme,
 };
@@ -107,6 +109,27 @@ struct AnimatingReveal {
     duration: Duration,
 }
 
+/// What `HypercubeApp` last asked of solve playback, carried alongside
+/// `solve_command_generation` since a bare generation bump carries no
+/// payload (mirrors `random_move_count` alongside `random_moves_generation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SolveCommand {
+    /// Solve the live puzzle and start playing the solution back.
+    Start,
+    /// Abandon playback; the move in flight still finishes animating.
+    Stop,
+}
+
+/// A solution being played back one move at a time, each starting as soon
+/// as the previous one finishes animating.
+struct SolvePlayback {
+    /// The `solve_command_generation` that started it, echoed in every
+    /// message so `HypercubeApp` can drop any from a cancelled run.
+    generation: u64,
+    queue: VecDeque<SolveStep>,
+    total: usize,
+}
+
 /// Max cursor movement between a rotate-button press and release for it to
 /// still count as a click rather than a drag.
 const CLICK_DRAG_THRESHOLD_PX: f32 = 4.0;
@@ -118,6 +141,10 @@ const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 /// independent of `animation_duration_ms` which is tuned for quick move/focus
 /// animations rather than a two-revolution camera spin.
 pub(crate) const REVEAL_ANIMATION_DURATION: Duration = Duration::from_millis(2500);
+/// Duration of each move while a solve plays back - a fixed fast pace,
+/// independent of `animation_duration_ms`, since a solution runs to over a
+/// thousand moves.
+pub(crate) const SOLVE_MOVE_DURATION: Duration = Duration::from_millis(40);
 /// Camera yaw delta applied by a single reveal or hide flourish. A multiple
 /// of 360 degrees, so the camera always visually ends up where it started.
 const REVEAL_YAW_SPIN_DEGREES: f32 = 720.0;
@@ -800,6 +827,16 @@ pub struct HypercubeShaderState {
     /// next `HypercubePrimitive` - `Cell` because `draw()` only gets
     /// `&State`, mirroring `HypercubeShaderProgram::pending_load`.
     pending_snapshot: Cell<Option<ViewSnapshot>>,
+    solve_command_generation: u64,
+    solve_playback: Option<SolvePlayback>,
+    /// A solve progress/end message waiting to be published: `update` can
+    /// publish only one message per call and a completed reveal's goes
+    /// first, so this holds the solve's until the next call.
+    solve_outbox: Option<Message>,
+    /// How far the last move animation ran past its duration, carried into
+    /// the next solve move so playback keeps pace with wall-clock time
+    /// instead of losing part of a frame on every move.
+    move_overshoot: Duration,
 }
 
 impl HypercubeShaderState {
@@ -841,6 +878,8 @@ pub struct HypercubeShaderProgram {
     /// Puzzle state loaded by a `LoadPuzzle` press, if any.
     pending_load: Cell<Option<Hypercube>>,
     save_snapshot_generation: u64,
+    solve_command_generation: u64,
+    solve_command: SolveCommand,
 }
 
 impl HypercubeShaderProgram {
@@ -866,6 +905,8 @@ impl HypercubeShaderProgram {
         load_generation: u64,
         pending_load: Option<Hypercube>,
         save_snapshot_generation: u64,
+        solve_command_generation: u64,
+        solve_command: SolveCommand,
     ) -> Self {
         Self {
             sticker_scale,
@@ -887,6 +928,8 @@ impl HypercubeShaderProgram {
             load_generation,
             pending_load: Cell::new(pending_load),
             save_snapshot_generation,
+            solve_command_generation,
+            solve_command,
         }
     }
 }
@@ -910,6 +953,8 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.pending_face_click = None;
             state.hovered_sticker = None;
             state.debug_instances.clear();
+            state.solve_playback = None;
+            state.solve_outbox = None;
             state.reset_generation = self.reset_generation;
 
             let (start_p, start_q) = decompose_so4(&state.rotation_4d);
@@ -937,6 +982,8 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.last_redraw_instant = None;
             state.hovered_sticker = None;
             state.debug_instances.clear();
+            state.solve_playback = None;
+            state.solve_outbox = None;
             state.random_moves_generation = self.random_moves_generation;
             let instances = sticker_instances_for_render(state);
             state.set_cached_sticker_instances(instances);
@@ -962,10 +1009,22 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                 state.hovered_sticker = None;
                 state.debug_instances.clear();
                 state.last_redraw_instant = None;
+                state.solve_playback = None;
+                state.solve_outbox = None;
 
                 let instances = sticker_instances_for_render(state);
                 state.set_cached_sticker_instances(instances);
                 return Some(Action::request_redraw());
+            }
+        }
+
+        if self.solve_command_generation != state.solve_command_generation {
+            state.solve_command_generation = self.solve_command_generation;
+            state.solve_playback = None;
+            state.solve_outbox = None;
+            if self.solve_command == SolveCommand::Start {
+                let message = Self::start_solve(state, self.solve_command_generation);
+                return Some(Action::publish(message));
             }
         }
 
@@ -1091,6 +1150,13 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 
                 let was_animating = state.animating_move.is_some();
                 let move_tick = Self::advance_animation(state, delta);
+                // Chain straight into the next solve move within the same
+                // tick, so playback never idles a frame between moves.
+                if state.animating_move.is_none()
+                    && let Some(message) = Self::advance_solve_playback(state)
+                {
+                    state.solve_outbox = Some(message);
+                }
                 let focus_tick = Self::advance_focus_animation(state, delta);
                 let reset_tick = Self::advance_reset_animation(state, delta);
                 let reveal_tick = Self::advance_reveal_animation(state, delta);
@@ -1126,6 +1192,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
                         | (_, _, AnimationTick::Completed, _)
                         | (_, _, _, AnimationTick::Completed)
                 ) && !state.mouse_pressed
+                    && state.solve_playback.is_none()
                     && let Some(position) = cursor.position_in(bounds)
                 {
                     self.update_hover(state, position, bounds);
@@ -1174,7 +1241,10 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.set_cached_sticker_instances(instances);
         }
 
-        if let Some(message) = reveal_completed_message {
+        // A completed reveal's message goes first; a pending solve message
+        // waits in the outbox for the next call (publishing makes iced
+        // request another redraw, so there always is one).
+        if let Some(message) = reveal_completed_message.or_else(|| state.solve_outbox.take()) {
             return Some(Action::publish(message));
         }
 
@@ -1397,7 +1467,10 @@ impl HypercubeShaderProgram {
                 // Perform ray casting for sticker hover detection (only when not
                 // dragging or mid-animation, since state has already moved past
                 // what's currently rendering)
-                if !state.mouse_pressed && state.animating_move.is_none() {
+                if !state.mouse_pressed
+                    && state.animating_move.is_none()
+                    && state.solve_playback.is_none()
+                {
                     self.update_hover(state, position, bounds);
                 }
 
@@ -1426,6 +1499,7 @@ impl HypercubeShaderProgram {
                     && state.animating_focus.is_none()
                     && state.animating_reset.is_none()
                     && state.animating_reveal.is_none()
+                    && state.solve_playback.is_none()
                     && let Some(sticker_index) = state.hovered_sticker
                 {
                     self.handle_facet_click(state, sticker_index);
@@ -1614,11 +1688,104 @@ impl HypercubeShaderProgram {
         animating.elapsed += delta;
 
         if animating.elapsed >= animating.duration {
+            // Capped, so one long stall can't make every following solve
+            // move complete the instant it starts.
+            let overshoot = (animating.elapsed - animating.duration).min(SOLVE_MOVE_DURATION);
+            state.move_overshoot = overshoot;
             state.animating_move = None;
             return AnimationTick::Completed;
         }
 
         AnimationTick::Running
+    }
+
+    /// Handles `SolveCommand::Start`: solves the live puzzle (a few
+    /// milliseconds, so synchronously) and sets up playback, starting the
+    /// first move now unless one is already animating - then it starts as
+    /// soon as that one finishes. Returns the message to publish.
+    fn start_solve(state: &mut HypercubeShaderState, generation: u64) -> Message {
+        let solution = match solver::solve(&state.hypercube) {
+            Ok(solution) => solution,
+            Err(error) => {
+                log::warn!("can't solve the puzzle: {error}");
+                return Message::SolveEnded {
+                    generation,
+                    outcome: SolveOutcome::Failed(error),
+                };
+            }
+        };
+        let Some(first_stage) = solution.steps.first().map(|step| step.stage) else {
+            return Message::SolveEnded {
+                generation,
+                outcome: SolveOutcome::AlreadySolved,
+            };
+        };
+        log::info!(
+            "solved in {} moves, merged from {} quarter turns",
+            solution.steps.len(),
+            solution.raw_twists
+        );
+        let total = solution.steps.len();
+        state.solve_playback = Some(SolvePlayback {
+            generation,
+            queue: solution.steps.into(),
+            total,
+        });
+        state.rotate_press = None;
+        state.pending_face_click = None;
+        state.hovered_sticker = None;
+        state.debug_instances.clear();
+
+        let waiting = Message::SolveProgress {
+            generation,
+            stage: first_stage,
+            done: 0,
+            total,
+        };
+        if state.animating_move.is_some() {
+            return waiting;
+        }
+        state.move_overshoot = Duration::ZERO;
+        state.last_redraw_instant = None;
+        let message = Self::advance_solve_playback(state).unwrap_or(waiting);
+        let instances = sticker_instances_for_render(state);
+        state.set_cached_sticker_instances(instances);
+        message
+    }
+
+    /// Starts the next move of the solve being played back (the caller has
+    /// checked nothing is animating), or ends playback once its queue is
+    /// empty. Returns the progress/end message to publish, or `None` if no
+    /// solve is playing.
+    fn advance_solve_playback(state: &mut HypercubeShaderState) -> Option<Message> {
+        let playback = state.solve_playback.as_mut()?;
+        let (generation, total) = (playback.generation, playback.total);
+        let Some(step) = playback.queue.pop_front() else {
+            state.solve_playback = None;
+            return Some(Message::SolveEnded {
+                generation,
+                outcome: SolveOutcome::Completed { total },
+            });
+        };
+        let done = total - playback.queue.len();
+
+        let pre_move_pieces = state.hypercube.pieces.clone();
+        state.hypercube.apply(&step.mv);
+        state.animating_move = Some(AnimatingMove {
+            side_axis: step.mv.side_axis,
+            side_sign: step.mv.side_sign,
+            local_coords: step.mv.local_coords,
+            angle: step.mv.angle,
+            pre_move_pieces,
+            elapsed: std::mem::take(&mut state.move_overshoot),
+            duration: SOLVE_MOVE_DURATION,
+        });
+        Some(Message::SolveProgress {
+            generation,
+            stage: step.stage,
+            done,
+            total,
+        })
     }
 
     /// Advances an in-progress "center this face" animation (see
@@ -1815,6 +1982,10 @@ impl Default for HypercubeShaderState {
             load_generation: 0,
             save_snapshot_generation: 0,
             pending_snapshot: Cell::new(None),
+            solve_command_generation: 0,
+            solve_playback: None,
+            solve_outbox: None,
+            move_overshoot: Duration::ZERO,
         }
     }
 }
@@ -2234,6 +2405,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -2308,6 +2481,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -2356,6 +2531,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -2398,6 +2575,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -2446,6 +2625,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
@@ -2503,6 +2684,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -2646,6 +2829,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -2697,6 +2882,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         program.update(
@@ -2747,6 +2934,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
         stale_program.update(
             &mut state,
@@ -2777,6 +2966,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
         caught_up_program.update(
             &mut state,
@@ -2830,6 +3021,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let action = program.update(
@@ -2854,6 +3047,324 @@ mod tests {
             }
             other => panic!("expected RevealAnimationComplete, got {other:?}"),
         }
+    }
+
+    /// A program at the given solve command, with everything else idle and
+    /// in sync with `state`.
+    fn solve_program(
+        state: &HypercubeShaderState,
+        generation: u64,
+        command: SolveCommand,
+    ) -> HypercubeShaderProgram {
+        HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            RotateButton::default(),
+            250,
+            state.reset_generation,
+            state.random_moves_generation,
+            0,
+            state.reveal_generation,
+            false,
+            state.save_generation,
+            state.load_generation,
+            None,
+            state.save_snapshot_generation,
+            generation,
+            command,
+        )
+    }
+
+    fn redraw_at(now: Instant) -> Event {
+        Event::Window(iced::window::Event::RedrawRequested(now))
+    }
+
+    fn published(action: Option<Action<Message>>) -> Option<Message> {
+        action.and_then(|action| action.into_inner().0)
+    }
+
+    fn scrambled_state(seed: u64) -> HypercubeShaderState {
+        let mut state = HypercubeShaderState::default();
+        state
+            .hypercube
+            .apply_random_moves(3, &mut fastrand::Rng::with_seed(seed));
+        state
+    }
+
+    fn test_bounds() -> Rectangle {
+        Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0))
+    }
+
+    #[test]
+    fn solve_start_begins_the_first_move_and_publishes_progress() {
+        let mut state = scrambled_state(1);
+        let program = solve_program(&state, 1, SolveCommand::Start);
+        let message = published(program.update(
+            &mut state,
+            &redraw_at(Instant::now()),
+            test_bounds(),
+            mouse::Cursor::Unavailable,
+        ));
+
+        match message {
+            Some(Message::SolveProgress {
+                generation: 1,
+                done: 1,
+                total,
+                ..
+            }) => assert!(total > 0),
+            other => panic!("expected progress for move 1, got {other:?}"),
+        }
+        let animating = state
+            .animating_move
+            .as_ref()
+            .expect("the first solve move must start right away");
+        assert_eq!(animating.duration, SOLVE_MOVE_DURATION);
+        assert!(state.solve_playback.is_some());
+    }
+
+    #[test]
+    fn solve_start_on_a_solved_cube_publishes_already_solved() {
+        let mut state = HypercubeShaderState::default();
+        let program = solve_program(&state, 1, SolveCommand::Start);
+        let message = published(program.update(
+            &mut state,
+            &redraw_at(Instant::now()),
+            test_bounds(),
+            mouse::Cursor::Unavailable,
+        ));
+
+        assert!(matches!(
+            message,
+            Some(Message::SolveEnded {
+                generation: 1,
+                outcome: SolveOutcome::AlreadySolved
+            })
+        ));
+        assert!(state.solve_playback.is_none());
+        assert!(state.animating_move.is_none());
+    }
+
+    #[test]
+    fn solve_playback_runs_to_solved_and_reports_completion() {
+        let mut state = scrambled_state(2);
+        let program = solve_program(&state, 1, SolveCommand::Start);
+        let start = Instant::now();
+        let first = published(program.update(
+            &mut state,
+            &redraw_at(start),
+            test_bounds(),
+            mouse::Cursor::Unavailable,
+        ));
+        let Some(Message::SolveProgress { total, .. }) = first else {
+            panic!("expected progress, got {first:?}");
+        };
+
+        // 50ms frames against 40ms moves: one move completes (and the next
+        // starts) every frame.
+        let mut ended = None;
+        for frame in 1..=(total as u32 * 2 + 10) {
+            let now = start + Duration::from_millis(50) * frame;
+            if let Some(Message::SolveEnded { outcome, .. }) = published(program.update(
+                &mut state,
+                &redraw_at(now),
+                test_bounds(),
+                mouse::Cursor::Unavailable,
+            )) {
+                ended = Some(outcome);
+                break;
+            }
+        }
+
+        assert_eq!(ended, Some(SolveOutcome::Completed { total }));
+        assert!(state.hypercube.is_solved());
+        assert!(state.solve_playback.is_none());
+    }
+
+    #[test]
+    fn solve_stop_cancels_playback_but_lets_the_move_in_flight_finish() {
+        let mut state = scrambled_state(3);
+        let now = Instant::now();
+        solve_program(&state, 1, SolveCommand::Start).update(
+            &mut state,
+            &redraw_at(now),
+            test_bounds(),
+            mouse::Cursor::Unavailable,
+        );
+        assert!(state.solve_playback.is_some());
+
+        let message = published(solve_program(&state, 2, SolveCommand::Stop).update(
+            &mut state,
+            &redraw_at(now),
+            test_bounds(),
+            mouse::Cursor::Unavailable,
+        ));
+
+        assert!(message.is_none());
+        assert!(state.solve_playback.is_none());
+        assert!(state.solve_outbox.is_none());
+        assert!(state.animating_move.is_some());
+    }
+
+    #[test]
+    fn reset_random_moves_and_a_successful_load_cancel_solve_playback() {
+        // (reset, random moves, load, pending load, expect playback left)
+        let cases = [
+            (1, 0, 0, None, false),
+            (0, 1, 0, None, false),
+            (0, 0, 1, Some(Hypercube::solved()), false),
+            (0, 0, 1, None, true),
+        ];
+        for (reset, random, load, pending, survives) in cases {
+            let mut state = scrambled_state(4);
+            solve_program(&state, 1, SolveCommand::Start).update(
+                &mut state,
+                &redraw_at(Instant::now()),
+                test_bounds(),
+                mouse::Cursor::Unavailable,
+            );
+            let program = HypercubeShaderProgram::new(
+                0.9,
+                0.0,
+                1.0,
+                VIEWER_DISTANCE,
+                RenderMode::Standard,
+                Theme::Classic,
+                AABBMode::None,
+                false,
+                RotateButton::default(),
+                250,
+                reset,
+                random,
+                0,
+                0,
+                false,
+                0,
+                load,
+                pending,
+                0,
+                1,
+                SolveCommand::Start,
+            );
+            program.update(
+                &mut state,
+                &redraw_at(Instant::now()),
+                test_bounds(),
+                mouse::Cursor::Unavailable,
+            );
+            assert_eq!(
+                state.solve_playback.is_some(),
+                survives,
+                "reset={reset} random={random} load={load}"
+            );
+        }
+    }
+
+    #[test]
+    fn turn_clicks_are_ignored_during_solve_playback() {
+        let mut state = scrambled_state(5);
+        let program = solve_program(&state, 1, SolveCommand::Start);
+        program.update(
+            &mut state,
+            &redraw_at(Instant::now()),
+            test_bounds(),
+            mouse::Cursor::Unavailable,
+        );
+        // Isolate the playback guard from the move-in-flight one.
+        state.animating_move = None;
+        state.hovered_sticker = FACET_TABLE.iter().position(|f| f.is_actionable);
+        let before = state.hypercube.clone();
+
+        program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(
+                RotateButton::default().click_button(),
+            )),
+            test_bounds(),
+            mouse::Cursor::Available(Point::new(10.0, 10.0)),
+        );
+
+        assert!(state.animating_move.is_none());
+        assert_eq!(state.hypercube, before);
+    }
+
+    #[test]
+    fn reveal_completion_and_solve_end_on_one_tick_are_both_published() {
+        let mut state = HypercubeShaderState {
+            animating_reveal: Some(AnimatingReveal {
+                start_scale: 1.0 - PRIMARY_STICKER_SCALE,
+                target_scale: 1.0 - SECONDARY_STICKER_SCALE,
+                start_gap: PRIMARY_FACE_GAP,
+                target_gap: SECONDARY_FACE_GAP,
+                start_gap_4d: PRIMARY_FACE_GAP_4D,
+                target_gap_4d: SECONDARY_FACE_GAP_4D,
+                start_yaw: 0.0,
+                target_yaw: REVEAL_YAW_SPIN_DEGREES,
+                elapsed: REVEAL_ANIMATION_DURATION + Duration::from_millis(100),
+                duration: REVEAL_ANIMATION_DURATION,
+            }),
+            solve_command_generation: 1,
+            solve_playback: Some(SolvePlayback {
+                generation: 1,
+                queue: VecDeque::new(),
+                total: 7,
+            }),
+            ..Default::default()
+        };
+        let program = HypercubeShaderProgram::new(
+            1.0 - PRIMARY_STICKER_SCALE,
+            PRIMARY_FACE_GAP,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            RotateButton::default(),
+            250,
+            0,
+            0,
+            0,
+            0,
+            true,
+            0,
+            0,
+            None,
+            0,
+            1,
+            SolveCommand::Start,
+        );
+        let now = Instant::now();
+        let first = published(program.update(
+            &mut state,
+            &redraw_at(now),
+            test_bounds(),
+            mouse::Cursor::Unavailable,
+        ));
+        let second = published(program.update(
+            &mut state,
+            &redraw_at(now),
+            test_bounds(),
+            mouse::Cursor::Unavailable,
+        ));
+
+        assert!(matches!(
+            first,
+            Some(Message::RevealAnimationComplete { .. })
+        ));
+        assert!(matches!(
+            second,
+            Some(Message::SolveEnded {
+                generation: 1,
+                outcome: SolveOutcome::Completed { total: 7 }
+            })
+        ));
     }
 
     /// Camera-drag orbit start and facet turn-clicks must both be ignored
@@ -2897,6 +3408,8 @@ mod tests {
             0,
             None,
             0,
+            0,
+            SolveCommand::Stop,
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));

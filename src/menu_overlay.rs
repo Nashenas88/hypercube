@@ -24,15 +24,16 @@ use crate::menu_layout::{
 
 /// The File/Puzzle/View/Help menu bar, built from `render_mode`/`aabb_mode`
 /// (for the View menu's checkmarks), `revealed`/`reveal_animating` (for the
-/// Puzzle menu's Reveal/Hide label), and `debug_mode` (which gates whether
-/// View is present) - snapshotted fresh each `view()` call, same as
-/// `HypercubeShaderProgram`.
+/// Puzzle menu's Reveal/Hide label), `solving` (for its Solve/Stop Solving
+/// item), and `debug_mode` (which gates whether View is present) -
+/// snapshotted fresh each `view()` call, same as `HypercubeShaderProgram`.
 pub(crate) fn bar<'a>(
     debug_mode: bool,
     render_mode: RenderMode,
     aabb_mode: AABBMode,
     revealed: bool,
     reveal_animating: bool,
+    solving: bool,
 ) -> Element<'a, Message> {
     let visible: Vec<TopMenu> = TopMenu::ALL
         .into_iter()
@@ -41,7 +42,7 @@ pub(crate) fn bar<'a>(
 
     Element::new(MenuBar {
         file_items: menu_layout::file_items(),
-        puzzle_items: menu_layout::puzzle_items(revealed, reveal_animating),
+        puzzle_items: menu_layout::puzzle_items(revealed, reveal_animating, solving),
         view_items: menu_layout::view_items(render_mode, aabb_mode),
         help_items: menu_layout::help_items(),
         visible,

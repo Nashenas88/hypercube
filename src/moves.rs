@@ -30,10 +30,6 @@ pub(crate) struct Move {
 impl Hypercube {
     /// Applies a `Move` value; equivalent to calling `apply_move` with its
     /// fields.
-    #[allow(
-        dead_code,
-        reason = "will be used by solve playback in shader_widget.rs"
-    )]
     pub(crate) fn apply(&mut self, mv: &Move) {
         self.apply_move(mv.side_axis, mv.side_sign, mv.local_coords, mv.angle);
     }

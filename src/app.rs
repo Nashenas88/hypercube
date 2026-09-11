@@ -14,7 +14,9 @@ use crate::settings::{self, ANIMATION_DURATION_MS_RANGE, AppSettings, RotateButt
 use crate::shader_widget::{
     HypercubeShaderProgram, PRIMARY_FACE_GAP, PRIMARY_FACE_GAP_4D, PRIMARY_STICKER_SCALE,
     REVEAL_ANIMATION_DURATION, SECONDARY_FACE_GAP, SECONDARY_FACE_GAP_4D, SECONDARY_STICKER_SCALE,
+    SolveCommand,
 };
+use crate::solver::{SolveError, Stage};
 use crate::theme::Theme;
 
 /// Rendering modes for visualization
@@ -110,6 +112,69 @@ pub(crate) fn reveal_button_label(revealed: bool, reveal_animating: bool) -> &'s
         (true, true) => "Reveal",
         (false, true) => "Hide",
     }
+}
+
+/// Label for the Puzzle menu's solve item, which doubles as its stop control
+/// while a solve plays back.
+pub(crate) fn solve_button_label(solving: bool) -> &'static str {
+    if solving { "Stop Solving" } else { "Solve" }
+}
+
+/// `n` with thousands separators, e.g. "1,904".
+fn format_count(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// How long a solve's closing notice ("Solved in N moves", ...) stays up.
+const SOLVE_NOTICE_DURATION: Duration = Duration::from_millis(2500);
+
+/// How a solve ended, as reported by `shader_widget.rs`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SolveOutcome {
+    Completed { total: usize },
+    AlreadySolved,
+    Failed(SolveError),
+}
+
+/// The closing notice shown for a solve outcome.
+fn solve_notice_text(outcome: &SolveOutcome) -> String {
+    match outcome {
+        SolveOutcome::Completed { total } => format!(
+            "Solved in {} {}",
+            format_count(*total),
+            if *total == 1 { "move" } else { "moves" }
+        ),
+        SolveOutcome::AlreadySolved => "Already solved".to_string(),
+        SolveOutcome::Failed(error) => format!("Can't solve: {error}"),
+    }
+}
+
+/// The viewport overlay's text: live progress while solving, the closing
+/// notice for a while afterwards, otherwise nothing.
+fn solve_overlay_text(
+    solving: bool,
+    progress: Option<(Stage, usize, usize)>,
+    notice: Option<&str>,
+) -> Option<String> {
+    if solving {
+        return Some(match progress {
+            Some((stage, done, total)) => format!(
+                "Solving: {stage} \u{b7} move {} / {}",
+                format_count(done),
+                format_count(total)
+            ),
+            None => "Solving\u{2026}".to_string(),
+        });
+    }
+    notice.map(str::to_string)
 }
 
 /// Exact natural height, in pixels, of a single default-size label+slider
@@ -215,6 +280,18 @@ pub(crate) struct HypercubeApp {
     load_generation: u64,
     pending_load: Option<Hypercube>,
     save_snapshot_generation: u64,
+    solve_command_generation: u64,
+    /// Carried alongside `solve_command_generation` (see
+    /// `shader_widget::SolveCommand`).
+    solve_command: SolveCommand,
+    /// True from a `Solve` press until playback ends or is cancelled; flips
+    /// the Puzzle menu's solve item to "Stop Solving".
+    solving: bool,
+    /// The latest (stage, move number, total moves) reported by playback.
+    solve_progress: Option<(Stage, usize, usize)>,
+    /// A finished solve's closing notice and when it was posted; cleared by
+    /// `SolveNoticeTick` once `SOLVE_NOTICE_DURATION` has passed.
+    solve_notice: Option<(String, Instant)>,
 }
 
 /// Number of scripted flourishes still to run, after the one the boot task
@@ -268,6 +345,24 @@ pub(crate) enum Message {
     AnimationDurationReleased,
     Reset,
     RandomMoves(u32),
+    /// Solve the puzzle and play the solution back.
+    Solve,
+    /// Stop solve playback (the Puzzle menu while solving, or Esc).
+    StopSolving,
+    /// Published by `shader_widget.rs` as each solve move starts.
+    SolveProgress {
+        generation: u64,
+        stage: Stage,
+        done: usize,
+        total: usize,
+    },
+    /// Published by `shader_widget.rs` once a solve finishes or can't start.
+    SolveEnded {
+        generation: u64,
+        outcome: SolveOutcome,
+    },
+    /// Per-frame tick while a solve notice is showing, to expire it.
+    SolveNoticeTick(Instant),
     ToggleReveal,
     RevealAnimationTick(Instant),
     RevealAnimationComplete {
@@ -325,7 +420,25 @@ impl HypercubeApp {
             load_generation: 0,
             pending_load: None,
             save_snapshot_generation: 0,
+            solve_command_generation: 0,
+            solve_command: SolveCommand::Stop,
+            solving: false,
+            solve_progress: None,
+            solve_notice: None,
         }
+    }
+
+    fn send_solve_command(&mut self, command: SolveCommand) {
+        self.solve_command = command;
+        self.solve_command_generation = self.solve_command_generation.wrapping_add(1);
+    }
+
+    /// Forgets any solve in progress. Reset, Random Moves and a successful
+    /// Load already cancel playback inside `shader_widget.rs`, so this is all
+    /// they need; any late message from the cancelled run is then ignored.
+    fn stop_solving_locally(&mut self) {
+        self.solving = false;
+        self.solve_progress = None;
     }
 
     /// Create a new application instance
@@ -432,10 +545,54 @@ impl HypercubeApp {
             }
             Message::Reset => {
                 self.reset_generation = self.reset_generation.wrapping_add(1);
+                self.stop_solving_locally();
             }
             Message::RandomMoves(count) => {
                 self.pending_random_move_count = count;
                 self.random_moves_generation = self.random_moves_generation.wrapping_add(1);
+                self.stop_solving_locally();
+            }
+            Message::Solve => {
+                if !self.solving {
+                    self.send_solve_command(SolveCommand::Start);
+                    self.solving = true;
+                    self.solve_progress = None;
+                    self.solve_notice = None;
+                }
+            }
+            Message::StopSolving => {
+                if self.solving {
+                    self.send_solve_command(SolveCommand::Stop);
+                    self.stop_solving_locally();
+                }
+            }
+            Message::SolveProgress {
+                generation,
+                stage,
+                done,
+                total,
+            } => {
+                if self.solving && generation == self.solve_command_generation {
+                    self.solve_progress = Some((stage, done, total));
+                }
+            }
+            Message::SolveEnded {
+                generation,
+                outcome,
+            } => {
+                if self.solving && generation == self.solve_command_generation {
+                    self.stop_solving_locally();
+                    self.solve_notice = Some((solve_notice_text(&outcome), Instant::now()));
+                }
+            }
+            Message::SolveNoticeTick(now) => {
+                if self
+                    .solve_notice
+                    .as_ref()
+                    .is_some_and(|(_, posted)| now.duration_since(*posted) >= SOLVE_NOTICE_DURATION)
+                {
+                    self.solve_notice = None;
+                }
             }
             Message::ToggleReveal => {
                 self.revealed = !self.revealed;
@@ -513,6 +670,9 @@ impl HypercubeApp {
             Message::LoadPuzzle => {
                 self.pending_load = puzzle_state::load();
                 self.load_generation = self.load_generation.wrapping_add(1);
+                if self.pending_load.is_some() {
+                    self.stop_solving_locally();
+                }
             }
             Message::Quit => return iced::exit(),
             Message::OpenAbout => {
@@ -527,9 +687,11 @@ impl HypercubeApp {
         Task::none()
     }
 
-    /// Global keyboard shortcuts, mirroring the File/Help menu items, plus a
-    /// per-frame tick while a reveal/hide flourish is animating and another
-    /// while `debug_mode` is on (driving the FPS overlay).
+    /// Global keyboard shortcuts, mirroring the File/Help menu items (plus
+    /// Esc for Stop Solving - gated in `update`, since these closures can't
+    /// capture `self`), a per-frame tick while a reveal/hide flourish is
+    /// animating, another while `debug_mode` is on (driving the FPS overlay),
+    /// and another while a solve notice is showing (to expire it).
     pub(crate) fn subscription(&self) -> Subscription<Message> {
         use iced::keyboard::{Key, key};
 
@@ -543,6 +705,7 @@ impl HypercubeApp {
                 (Key::Character("s"), true) => Some(Message::SavePuzzle),
                 (Key::Character("o"), true) => Some(Message::LoadPuzzle),
                 (Key::Named(key::Named::F1), _) => Some(Message::OpenAbout),
+                (Key::Named(key::Named::Escape), _) => Some(Message::StopSolving),
                 _ => None,
             }
         });
@@ -553,6 +716,9 @@ impl HypercubeApp {
         }
         if self.debug_mode {
             subscriptions.push(window::frames().map(Message::FpsTick));
+        }
+        if self.solve_notice.is_some() {
+            subscriptions.push(window::frames().map(Message::SolveNoticeTick));
         }
         Subscription::batch(subscriptions)
     }
@@ -770,6 +936,8 @@ impl HypercubeApp {
             self.load_generation,
             self.pending_load.clone(),
             self.save_snapshot_generation,
+            self.solve_command_generation,
+            self.solve_command,
         ))
         .width(Length::Fill)
         .height(Length::Fill);
@@ -791,13 +959,33 @@ impl HypercubeApp {
             self.aabb_mode,
             self.revealed,
             self.reveal_animating,
+            self.solving,
         );
 
         let content: Element<'_, Message> = Column::new().push(menu_bar).push(main_row).into();
 
-        // Always a 3-layer stack regardless of `about_open`/`debug_mode`,
-        // not a conditional stack - keeps `content`'s widget-tree position
-        // stable.
+        // Always a 4-layer stack regardless of `about_open`/`debug_mode`/
+        // solve state, not a conditional stack - keeps `content`'s
+        // widget-tree position stable.
+        let solve_layer: Element<'_, Message> = match solve_overlay_text(
+            self.solving,
+            self.solve_progress,
+            self.solve_notice.as_ref().map(|(text, _)| text.as_str()),
+        ) {
+            Some(text) => iced::widget::container(
+                iced::widget::container(iced::widget::text(text))
+                    .padding(6)
+                    .style(iced::widget::container::rounded_box),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Bottom)
+            .padding(10)
+            .into(),
+            None => Space::new().into(),
+        };
+
         let about_layer: Element<'_, Message> = if self.about_open {
             about_modal()
         } else {
@@ -820,7 +1008,7 @@ impl HypercubeApp {
             Space::new().into()
         };
 
-        iced::widget::stack([content, about_layer, fps_layer]).into()
+        iced::widget::stack([content, solve_layer, about_layer, fps_layer]).into()
     }
 }
 
@@ -846,7 +1034,14 @@ fn about_modal<'a>() -> Element<'a, Message> {
         ))
         .push(iced::widget::text("Double-click a face to center it."))
         .push(iced::widget::text(
+            "Puzzle > Solve plays back a solution; Esc stops it.",
+        ))
+        .push(iced::widget::text(
             "Ctrl+S save puzzle, Ctrl+O load puzzle, Ctrl+Q quit.",
+        ))
+        .push(iced::widget::text(
+            "Solver: a port of NdSolve by Don Hatch, from Magic Cube 4D by \
+             Melinda Green & Don Hatch - superliminal.com/cube/cube.htm",
         ))
         .push(Button::new("Close").on_press(Message::CloseAbout));
 
@@ -1001,6 +1196,133 @@ mod tests {
 
         assert_eq!(app.sticker_scale, scale_before);
         assert_eq!(app.face_gap, gap_before);
+    }
+
+    #[test]
+    fn solve_starts_once_and_stop_cancels_it() {
+        let mut app = HypercubeApp::new_inner();
+        let _ = app.update(Message::StopSolving);
+        assert_eq!(
+            app.solve_command_generation, 0,
+            "stopping while idle is a no-op"
+        );
+
+        let _ = app.update(Message::Solve);
+        assert!(app.solving);
+        assert_eq!(app.solve_command, SolveCommand::Start);
+        assert_eq!(app.solve_command_generation, 1);
+
+        let _ = app.update(Message::Solve);
+        assert_eq!(app.solve_command_generation, 1, "already solving");
+
+        let _ = app.update(Message::StopSolving);
+        assert!(!app.solving);
+        assert_eq!(app.solve_command, SolveCommand::Stop);
+        assert_eq!(app.solve_command_generation, 2);
+    }
+
+    #[test]
+    fn stale_and_post_cancel_solve_messages_are_ignored() {
+        let mut app = HypercubeApp::new_inner();
+        let _ = app.update(Message::Solve);
+        let progress = |generation| Message::SolveProgress {
+            generation,
+            stage: Stage::Position(2),
+            done: 3,
+            total: 9,
+        };
+
+        let _ = app.update(progress(0));
+        assert_eq!(app.solve_progress, None, "wrong generation");
+        let _ = app.update(progress(1));
+        assert_eq!(app.solve_progress, Some((Stage::Position(2), 3, 9)));
+
+        let _ = app.update(Message::Reset);
+        assert!(!app.solving);
+        assert_eq!(app.solve_progress, None);
+        let _ = app.update(progress(1));
+        let _ = app.update(Message::SolveEnded {
+            generation: 1,
+            outcome: SolveOutcome::Completed { total: 9 },
+        });
+        assert_eq!(app.solve_progress, None);
+        assert_eq!(app.solve_notice, None);
+
+        let _ = app.update(Message::Solve);
+        let _ = app.update(Message::RandomMoves(1));
+        assert!(!app.solving, "random moves cancel a solve too");
+    }
+
+    #[test]
+    fn solve_ended_posts_the_matching_notice() {
+        use crate::solver::Unsolvable;
+        for (outcome, expected) in [
+            (
+                SolveOutcome::Completed { total: 1904 },
+                "Solved in 1,904 moves",
+            ),
+            (SolveOutcome::AlreadySolved, "Already solved"),
+            (
+                SolveOutcome::Failed(SolveError::Unsolvable(Unsolvable::TwirlParity)),
+                "Can't solve: a corner piece is twisted",
+            ),
+        ] {
+            let mut app = HypercubeApp::new_inner();
+            let _ = app.update(Message::Solve);
+            let _ = app.update(Message::SolveEnded {
+                generation: app.solve_command_generation,
+                outcome,
+            });
+            assert!(!app.solving);
+            assert_eq!(
+                app.solve_notice.as_ref().map(|(text, _)| text.as_str()),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn solve_notice_expires_after_its_duration() {
+        let mut app = HypercubeApp::new_inner();
+        let posted = Instant::now();
+        app.solve_notice = Some(("Already solved".to_string(), posted));
+        let _ = app.update(Message::SolveNoticeTick(posted + SOLVE_NOTICE_DURATION / 2));
+        assert!(app.solve_notice.is_some());
+        let _ = app.update(Message::SolveNoticeTick(posted + SOLVE_NOTICE_DURATION));
+        assert!(app.solve_notice.is_none());
+    }
+
+    #[test]
+    fn format_count_groups_thousands() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1000), "1,000");
+        assert_eq!(format_count(1904), "1,904");
+        assert_eq!(format_count(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn solve_labels_and_overlay_text() {
+        assert_eq!(solve_button_label(false), "Solve");
+        assert_eq!(solve_button_label(true), "Stop Solving");
+
+        assert_eq!(
+            solve_overlay_text(true, Some((Stage::Orient(3), 812, 1904)), None).as_deref(),
+            Some("Solving: orienting 3-sticker pieces \u{b7} move 812 / 1,904")
+        );
+        assert_eq!(
+            solve_overlay_text(true, None, None).as_deref(),
+            Some("Solving\u{2026}")
+        );
+        assert_eq!(
+            solve_overlay_text(false, None, Some("Already solved")).as_deref(),
+            Some("Already solved")
+        );
+        assert_eq!(solve_overlay_text(false, None, None), None);
+        assert_eq!(
+            solve_notice_text(&SolveOutcome::Completed { total: 1 }),
+            "Solved in 1 move"
+        );
     }
 
     #[cfg(feature = "gpu-capture-hooks")]

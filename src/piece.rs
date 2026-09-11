@@ -104,10 +104,6 @@ pub(crate) fn side_kind(axis: usize, sign: i8) -> u8 {
 /// given sticker kind, or `None` if `kind` isn't one of the 8 valid kinds.
 /// Used by `solver` to work out where a sticker "wants" to go, without
 /// exposing `FACE_AXIS_SIGN` itself.
-#[allow(
-    dead_code,
-    reason = "will be used by solver::coords once the position/orient stages land"
-)]
 pub(crate) fn side_for_kind(kind: u8) -> Option<(usize, i8)> {
     FACE_AXIS_SIGN.get(kind as usize).copied()
 }

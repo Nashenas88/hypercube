@@ -2,7 +2,7 @@
 //! label/action pairing for each top-level menu is defined in one place
 //! away from the low-level widget code.
 
-use crate::app::{AABBMode, Message, RenderMode, reveal_button_label};
+use crate::app::{AABBMode, Message, RenderMode, reveal_button_label, solve_button_label};
 
 /// Fixed per-button width, so a dropdown's position can be computed from
 /// its button's index in `TopMenu::ALL` without measuring rendered text.
@@ -89,11 +89,20 @@ fn spacer_item() -> MenuItem {
     }
 }
 
-pub(crate) fn puzzle_items(revealed: bool, reveal_animating: bool) -> Vec<MenuItem> {
+pub(crate) fn puzzle_items(revealed: bool, reveal_animating: bool, solving: bool) -> Vec<MenuItem> {
     vec![
         MenuItem {
             label: "Reset".to_string(),
             message: Message::Reset,
+            selected: false,
+        },
+        MenuItem {
+            label: solve_button_label(solving).to_string(),
+            message: if solving {
+                Message::StopSolving
+            } else {
+                Message::Solve
+            },
             selected: false,
         },
         spacer_item(),
@@ -148,4 +157,20 @@ pub(crate) fn help_items() -> Vec<MenuItem> {
         message: Message::OpenAbout,
         selected: false,
     }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solve_item_pairs_its_label_with_its_message() {
+        let idle = puzzle_items(false, false, false);
+        assert_eq!(idle[1].label, "Solve");
+        assert!(matches!(idle[1].message, Message::Solve));
+
+        let solving = puzzle_items(false, false, true);
+        assert_eq!(solving[1].label, "Stop Solving");
+        assert!(matches!(solving[1].message, Message::StopSolving));
+    }
 }
