@@ -36,7 +36,7 @@ use crate::ray_casting::{
     ray_intersects_aabb, ray_sticker_intersection,
 };
 use crate::renderer::{DebugInstanceWithDistance, GizmoVertex, Renderer};
-use crate::settings::{RotateButton, RotationGizmoDisplay};
+use crate::settings::RotateButton;
 use crate::snapshot::{self, ViewSnapshot};
 use crate::solver::{self, SolveStep};
 use crate::theme::{
@@ -67,6 +67,10 @@ enum AnimationTick {
     Completed,
 }
 
+/// A pair of orthogonal 4D vectors spanning a rotation plane (or, for the
+/// rotation-axis gizmo, an invariant plane - see `orthogonal_complement_plane`).
+type GizmoPlane = (Vector4<f32>, Vector4<f32>);
+
 /// An in-progress "center this face" animation, triggered by double-clicking
 /// a sticker: sweeps `rotation_4d` from its value when the double-click
 /// landed toward `start_rotation` rotated by `total_angle` in `plane`, which
@@ -74,7 +78,7 @@ enum AnimationTick {
 /// screen-centered pole (see `shortest_arc_plane` and its call site below).
 struct AnimatingFocus {
     start_rotation: Matrix4<f32>,
-    plane: (Vector4<f32>, Vector4<f32>),
+    plane: GizmoPlane,
     total_angle: f32,
     elapsed: Duration,
     duration: Duration,
@@ -176,52 +180,116 @@ pub(crate) const PRIMARY_FACE_GAP_4D: f32 = 1.0;
 /// 4D face gap in the app's raw (slider) domain a reveal animates toward.
 pub(crate) const SECONDARY_FACE_GAP_4D: f32 = 2.0;
 
-/// Number of angular samples around the rotation-axis gizmo's ring.
+/// Number of angular samples around the rotation-axis gizmo's main torus.
 const GIZMO_RING_SEGMENTS: usize = 48;
-/// Radius of the gizmo ring, in the puzzle's own 4D/3D unit scale (the
-/// hypercube itself spans roughly [-1, 1]).
+/// Radius of the gizmo ring's centerline, in the puzzle's own 4D/3D unit
+/// scale (the hypercube itself spans roughly [-1, 1]).
 const GIZMO_RING_RADIUS: f32 = 1.6;
-/// Half-thickness of the ring ribbon.
-const GIZMO_RING_HALF_WIDTH: f32 = 0.02;
+/// Minor radius of the main ring's tube cross-section - giving the ring
+/// real 3D thickness is what keeps it from ever collapsing to a zero-width
+/// line when its invariant plane happens to include the camera's own
+/// viewing axis (see this module's rotation-axis-gizmo doc comment).
+const GIZMO_RING_TUBE_MINOR_RADIUS: f32 = 0.05;
+/// Number of angular samples around the main ring's tube cross-section.
+const GIZMO_RING_TUBE_SEGMENTS: usize = 8;
+/// Number of alternating-hue color bands running around the main ring.
+const GIZMO_BAND_COUNT: usize = 4;
 /// Number of small "field loop" markers threaded around the ring like the
 /// loops of a magnetic field around a current-carrying wire, fixed
 /// equidistant positions along the ring - unlike the arrows drawn on each
 /// one, which creep around that marker's *own* circumference as rotation
-/// progresses (see `gizmo_ring_vertices`'s doc comment).
+/// progresses (see `gizmo_torus_vertices`'s doc comment).
 const GIZMO_MARKER_COUNT: usize = 4;
-/// Radius of a field-loop marker.
+/// Radius of a field-loop marker's centerline circle.
 const GIZMO_MARKER_RADIUS: f32 = 0.12;
-/// Half-thickness of a field-loop marker's ribbon.
-const GIZMO_MARKER_HALF_WIDTH: f32 = 0.015;
-/// Number of angular samples around each field-loop marker.
-const GIZMO_MARKER_SEGMENTS: usize = 16;
+/// Number of angular samples around each field-loop marker's centerline.
+const GIZMO_MARKER_SEGMENTS: usize = 12;
+/// Number of angular samples around a marker tube's cross-section.
+const GIZMO_MARKER_TUBE_SEGMENTS: usize = 6;
+/// Minor radius of a marker's tube cross-section.
+const GIZMO_MARKER_TUBE_MINOR_RADIUS: f32 = 0.012;
 /// Number of small arrow marks evenly spaced around each field-loop
 /// marker's own circumference.
 const GIZMO_MARKER_ARROW_COUNT: usize = 3;
-/// How far a marker arrow's tip/back edge reach beyond/before the marker's
-/// own radius.
-const GIZMO_MARKER_ARROW_HALF_HEIGHT: f32 = 0.05;
-/// Angular half-width, in radians, of a marker arrow's base along the
-/// marker's own circumference.
-const GIZMO_MARKER_ARROW_HALF_ANGLE: f32 = 0.35;
+/// Length of a marker arrow's cone, from its base to its tip.
+const GIZMO_ARROW_LENGTH: f32 = 0.06;
+/// How far behind the arrow's anchor point its base sits, giving the cone
+/// visible depth rather than a flat fan.
+const GIZMO_ARROW_BACK_OFFSET: f32 = 0.03;
+/// Radius of an arrow cone's circular base.
+const GIZMO_ARROW_BASE_RADIUS: f32 = 0.025;
 /// Small angular offset used to numerically estimate the main ring's
 /// tangent direction (in already-projected 3D space) at a marker's position.
 const GIZMO_TANGENT_EPSILON: f32 = 0.01;
-/// Below this accumulated drag angle (radians), a Shift+drag component's
-/// ring is treated as not yet meaningfully rotating and is hidden even in
-/// `RotationGizmoDisplay::BothAxes` mode.
+/// Below this accumulated drag angle (radians), a Shift+drag's combined
+/// ring is treated as not yet meaningfully rotating and is hidden.
 const GIZMO_MIN_DRAG_ANGLE: f32 = 1e-3;
 
-const GIZMO_FOCUS_COLOR: [f32; 4] = [0.3, 0.85, 1.0, 0.55];
-const GIZMO_HORIZONTAL_DRAG_COLOR: [f32; 4] = [1.0, 0.55, 0.15, 0.55];
-const GIZMO_VERTICAL_DRAG_COLOR: [f32; 4] = [0.6, 0.4, 1.0, 0.55];
+/// Alternating-hue band palette for the click-to-focus gizmo ring
+/// (`palette[0]` doubles as the flat color of its field-loop markers).
+const GIZMO_FOCUS_PALETTE: [[f32; 4]; GIZMO_BAND_COUNT] = [
+    [0.3, 0.85, 1.0, 0.55],
+    [0.1, 0.45, 0.9, 0.55],
+    [0.3, 0.85, 1.0, 0.55],
+    [0.1, 0.45, 0.9, 0.55],
+];
+/// Alternating-hue band palette for the Shift+drag gizmo ring (`palette[0]`
+/// doubles as the flat color of its field-loop markers).
+const GIZMO_DRAG_PALETTE: [[f32; 4]; GIZMO_BAND_COUNT] = [
+    [1.0, 0.55, 0.15, 0.55],
+    [0.6, 0.4, 1.0, 0.55],
+    [1.0, 0.55, 0.15, 0.55],
+    [0.6, 0.4, 1.0, 0.55],
+];
+/// Shared bright accent color for marker arrows, distinct from either ring
+/// palette so it reads clearly against the translucent tube.
+const GIZMO_ARROW_COLOR: [f32; 4] = [0.95, 0.95, 1.0, 0.9];
 
-/// Appends the rotation-axis gizmo's ring + field-loop-marker geometry to
-/// `out`: `GIZMO_RING_SEGMENTS` points sampled around the unit circle in the
-/// invariant plane `(u, v)` - the 2D subspace a 4D rotation in some *other*
-/// plane leaves fixed (see `math::orthogonal_complement_plane`) - emitted as
-/// a thin ribbon (`TriangleList`) rather than a line list so it's visible
-/// without wide-line support.
+/// Builds one `GizmoVertex`, converting a `Point3` to the plain `[f32; 3]`
+/// the GPU buffer wants.
+fn gizmo_vertex(p: Point3<f32>, color: [f32; 4]) -> GizmoVertex {
+    GizmoVertex {
+        position: [p.x, p.y, p.z],
+        color,
+    }
+}
+
+/// Appends a two-triangle quad spanning corners `(p00, p01, p10, p11)`
+/// (indexed by two independent parameters, e.g. a major/minor angle pair),
+/// with each corner's own color - shared by the main ring's and markers'
+/// tube geometry.
+#[allow(clippy::too_many_arguments)]
+fn gizmo_push_quad(
+    out: &mut Vec<GizmoVertex>,
+    p00: Point3<f32>,
+    c00: [f32; 4],
+    p10: Point3<f32>,
+    c10: [f32; 4],
+    p01: Point3<f32>,
+    c01: [f32; 4],
+    p11: Point3<f32>,
+    c11: [f32; 4],
+) {
+    out.push(gizmo_vertex(p00, c00));
+    out.push(gizmo_vertex(p10, c10));
+    out.push(gizmo_vertex(p01, c01));
+
+    out.push(gizmo_vertex(p01, c01));
+    out.push(gizmo_vertex(p10, c10));
+    out.push(gizmo_vertex(p11, c11));
+}
+
+/// Appends the rotation-axis gizmo's main-ring-torus + field-loop-marker
+/// geometry to `out`. The main ring is a genuine tube (not a flat ribbon)
+/// swept around the unit circle in the invariant plane `(u, v)` - the 2D
+/// subspace a 4D rotation in some *other* plane leaves fixed (see
+/// `math::orthogonal_complement_plane`). Real 3D thickness is what keeps the
+/// ring visible from *any* camera angle: a live Shift+drag's invariant plane
+/// always contains the camera's own forward axis (a provable, unavoidable
+/// fact of `process_4d_rotation`'s basis, not a bug), so a flat ribbon in
+/// that plane collapses to a literal zero-width line - a tube instead
+/// presents a visible cross-section from every angle, including squarely
+/// edge-on.
 ///
 /// `u`/`v` are always projected with an *identity* rotation, never the
 /// puzzle's live `rotation_4d`: both callers derive them from vectors
@@ -237,124 +305,200 @@ const GIZMO_VERTICAL_DRAG_COLOR: [f32; 4] = [0.6, 0.4, 1.0, 0.55];
 /// for whichever starting orientations happen to leave the invariant plane
 /// unmoved by that extra multiplication.
 ///
-/// `GIZMO_MARKER_COUNT` field-loop markers - small circles perpendicular to
-/// the ring's own tangent, like the loops of a magnetic field around a
-/// current-carrying wire - sit at fixed, equidistant positions along the
-/// ring (they do not travel around it). Each carries `GIZMO_MARKER_ARROW_COUNT`
-/// small arrows that creep around *that marker's own* circumference only as
-/// `phase_angle` advances, driven by the rotation's own accumulated angle
-/// (see `ActiveShiftDrag`/`AnimatingFocus`) rather than wall-clock time, so
-/// they freeze the instant the rotation itself does.
-fn gizmo_ring_vertices(
+/// The ring's own per-major-angle frame (`radial`/`binormal`, from which its
+/// tube cross-section is built) is recomputed from scratch at every sampled
+/// angle rather than propagated from the previous one, so the tube closes
+/// with zero seam/twist automatically. `GIZMO_BAND_COUNT` alternating-hue
+/// color bands run around the tube's *cross-section* (a function of the
+/// minor angle and `phase_angle` alone, not the major angle), so the whole
+/// tube reads as spinning in place about its own centerline in sync with
+/// accumulated rotation progress, freezing the instant the rotation does -
+/// never driven by wall-clock time, matching every other animation in this
+/// feature.
+///
+/// `GIZMO_MARKER_COUNT` field-loop marker toruses - small tubes
+/// perpendicular to the main ring's own tangent, like the loops of a
+/// magnetic field around a current-carrying wire - sit at fixed, equidistant
+/// positions along the ring (they do not travel around it) and carry a flat,
+/// non-banded `marker_color`. Each carries `GIZMO_MARKER_ARROW_COUNT` small
+/// solid 3D arrow cones that creep around *that marker's own* circumference
+/// only as `phase_angle` advances, always pointing tangentially in the
+/// actual direction of rotation (reversing if it reverses).
+#[allow(clippy::too_many_arguments)]
+fn gizmo_torus_vertices(
     center: Vector4<f32>,
-    (u, v): (Vector4<f32>, Vector4<f32>),
+    (u, v): GizmoPlane,
     phase_angle: f32,
-    color: [f32; 4],
+    palette: [[f32; 4]; GIZMO_BAND_COUNT],
+    marker_color: [f32; 4],
+    arrow_color: [f32; 4],
     viewer_distance: f32,
     out: &mut Vec<GizmoVertex>,
 ) {
+    use std::f32::consts::TAU;
+
     let identity = Matrix4::identity();
     let project = |angle: f32, radius: f32| -> Point3<f32> {
         let point_4d = center + (u * angle.cos() + v * angle.sin()) * radius;
         project_4d_to_3d(point_4d, &identity, viewer_distance)
     };
-    let vertex = |p: Point3<f32>| GizmoVertex {
-        position: [p.x, p.y, p.z],
-        color,
-    };
-
-    for i in 0..GIZMO_RING_SEGMENTS {
-        let a0 = (i as f32 / GIZMO_RING_SEGMENTS as f32) * std::f32::consts::TAU;
-        let a1 = ((i + 1) as f32 / GIZMO_RING_SEGMENTS as f32) * std::f32::consts::TAU;
-
-        let inner0 = project(a0, GIZMO_RING_RADIUS - GIZMO_RING_HALF_WIDTH);
-        let outer0 = project(a0, GIZMO_RING_RADIUS + GIZMO_RING_HALF_WIDTH);
-        let inner1 = project(a1, GIZMO_RING_RADIUS - GIZMO_RING_HALF_WIDTH);
-        let outer1 = project(a1, GIZMO_RING_RADIUS + GIZMO_RING_HALF_WIDTH);
-
-        out.push(vertex(inner0));
-        out.push(vertex(outer0));
-        out.push(vertex(inner1));
-
-        out.push(vertex(inner1));
-        out.push(vertex(outer0));
-        out.push(vertex(outer1));
-    }
-
-    // Field-loop marker(s): small circles threaded around the main ring,
-    // perpendicular to its own tangent at that point. Built directly in
-    // already-projected 3D space (rather than in the 4D invariant plane)
-    // since the loop is a purely decorative screen-space visual, not a real
-    // 4D subspace of its own.
     let ring_center_3d = project(0.0, 0.0);
-    let marker_spacing = std::f32::consts::TAU / GIZMO_MARKER_COUNT as f32;
-    for i in 0..GIZMO_MARKER_COUNT {
-        let marker_angle = i as f32 * marker_spacing;
-        let center_3d = project(marker_angle, GIZMO_RING_RADIUS);
-        let ahead_3d = project(marker_angle + GIZMO_TANGENT_EPSILON, GIZMO_RING_RADIUS);
 
+    // The main ring's frame at major angle `a`: its projected centerline
+    // point plus a unit `radial`/`binormal` pair spanning the plane
+    // perpendicular to its own tangent there. Shared by the main ring's
+    // tube and by each marker's outer (fixed) positioning, which is exactly
+    // this same frame evaluated at that marker's own fixed angle.
+    let ring_frame = |a: f32| -> Option<(Point3<f32>, Vector3<f32>, Vector3<f32>)> {
+        let center_3d = project(a, GIZMO_RING_RADIUS);
+        let ahead_3d = project(a + GIZMO_TANGENT_EPSILON, GIZMO_RING_RADIUS);
         let tangent = ahead_3d - center_3d;
         let radial = center_3d - ring_center_3d;
         let binormal = tangent.cross(&radial);
         // Degenerate near the projection's own singularity (radial or
         // tangent collapsing to zero) - skip rather than divide by zero.
         if binormal.norm() < 1e-5 || radial.norm() < 1e-5 {
-            continue;
+            return None;
         }
-        let radial = radial.normalize();
-        let binormal = binormal.normalize();
+        Some((center_3d, radial.normalize(), binormal.normalize()))
+    };
+    let ring_tube_point =
+        |(center_3d, radial, binormal): (Point3<f32>, Vector3<f32>, Vector3<f32>),
+         beta: f32|
+         -> Point3<f32> {
+            center_3d + (radial * beta.cos() + binormal * beta.sin()) * GIZMO_RING_TUBE_MINOR_RADIUS
+        };
+    let band_color = |beta: f32| -> [f32; 4] {
+        let band_width = TAU / GIZMO_BAND_COUNT as f32;
+        let offset = (beta - phase_angle).rem_euclid(TAU);
+        let band_index = (offset / band_width) as usize % GIZMO_BAND_COUNT;
+        palette[band_index]
+    };
 
-        for j in 0..GIZMO_MARKER_SEGMENTS {
-            let a0 = (j as f32 / GIZMO_MARKER_SEGMENTS as f32) * std::f32::consts::TAU;
-            let a1 = ((j + 1) as f32 / GIZMO_MARKER_SEGMENTS as f32) * std::f32::consts::TAU;
-            let offset = |angle: f32, radius: f32| -> Point3<f32> {
-                center_3d + (radial * angle.cos() + binormal * angle.sin()) * radius
+    for i in 0..GIZMO_RING_SEGMENTS {
+        let a0 = (i as f32 / GIZMO_RING_SEGMENTS as f32) * TAU;
+        let a1 = ((i + 1) as f32 / GIZMO_RING_SEGMENTS as f32) * TAU;
+        let (Some(frame0), Some(frame1)) = (ring_frame(a0), ring_frame(a1)) else {
+            continue;
+        };
+
+        for j in 0..GIZMO_RING_TUBE_SEGMENTS {
+            let b0 = (j as f32 / GIZMO_RING_TUBE_SEGMENTS as f32) * TAU;
+            let b1 = ((j + 1) as f32 / GIZMO_RING_TUBE_SEGMENTS as f32) * TAU;
+            let c0 = band_color(b0);
+            let c1 = band_color(b1);
+
+            gizmo_push_quad(
+                out,
+                ring_tube_point(frame0, b0),
+                c0,
+                ring_tube_point(frame1, b0),
+                c0,
+                ring_tube_point(frame0, b1),
+                c1,
+                ring_tube_point(frame1, b1),
+                c1,
+            );
+        }
+    }
+
+    // Field-loop marker toruses: small tubes threaded around the main ring,
+    // perpendicular to its own tangent at that point. Built directly in
+    // already-projected 3D space (rather than in the 4D invariant plane)
+    // since the loop is a purely decorative screen-space visual, not a real
+    // 4D subspace of its own.
+    let marker_spacing = TAU / GIZMO_MARKER_COUNT as f32;
+    for i in 0..GIZMO_MARKER_COUNT {
+        let marker_angle = i as f32 * marker_spacing;
+        let Some((center_3d, radial, binormal)) = ring_frame(marker_angle) else {
+            continue;
+        };
+
+        // The marker's own secondary frame at angle `a2` around its small
+        // circle: an exact closed form (no finite differencing needed,
+        // since the marker circle is already fully known analytically from
+        // `radial`/`binormal`).
+        let marker_secondary_frame =
+            |a2: f32| -> (Point3<f32>, Vector3<f32>, Vector3<f32>, Vector3<f32>) {
+                let radial2 = radial * a2.cos() + binormal * a2.sin();
+                let tangent2 = binormal * a2.cos() - radial * a2.sin();
+                let q = center_3d + radial2 * GIZMO_MARKER_RADIUS;
+                let binormal2 = tangent2.cross(&radial2).normalize();
+                (q, tangent2, radial2, binormal2)
             };
 
-            let inner0 = offset(a0, GIZMO_MARKER_RADIUS - GIZMO_MARKER_HALF_WIDTH);
-            let outer0 = offset(a0, GIZMO_MARKER_RADIUS + GIZMO_MARKER_HALF_WIDTH);
-            let inner1 = offset(a1, GIZMO_MARKER_RADIUS - GIZMO_MARKER_HALF_WIDTH);
-            let outer1 = offset(a1, GIZMO_MARKER_RADIUS + GIZMO_MARKER_HALF_WIDTH);
+        for j in 0..GIZMO_MARKER_SEGMENTS {
+            let a2_0 = (j as f32 / GIZMO_MARKER_SEGMENTS as f32) * TAU;
+            let a2_1 = ((j + 1) as f32 / GIZMO_MARKER_SEGMENTS as f32) * TAU;
+            let (q0, _, radial2_0, binormal2_0) = marker_secondary_frame(a2_0);
+            let (q1, _, radial2_1, binormal2_1) = marker_secondary_frame(a2_1);
 
-            out.push(vertex(inner0));
-            out.push(vertex(outer0));
-            out.push(vertex(inner1));
+            for k in 0..GIZMO_MARKER_TUBE_SEGMENTS {
+                let g0 = (k as f32 / GIZMO_MARKER_TUBE_SEGMENTS as f32) * TAU;
+                let g1 = ((k + 1) as f32 / GIZMO_MARKER_TUBE_SEGMENTS as f32) * TAU;
 
-            out.push(vertex(inner1));
-            out.push(vertex(outer0));
-            out.push(vertex(outer1));
+                let p00 = q0
+                    + (radial2_0 * g0.cos() + binormal2_0 * g0.sin())
+                        * GIZMO_MARKER_TUBE_MINOR_RADIUS;
+                let p01 = q0
+                    + (radial2_0 * g1.cos() + binormal2_0 * g1.sin())
+                        * GIZMO_MARKER_TUBE_MINOR_RADIUS;
+                let p10 = q1
+                    + (radial2_1 * g0.cos() + binormal2_1 * g0.sin())
+                        * GIZMO_MARKER_TUBE_MINOR_RADIUS;
+                let p11 = q1
+                    + (radial2_1 * g1.cos() + binormal2_1 * g1.sin())
+                        * GIZMO_MARKER_TUBE_MINOR_RADIUS;
+
+                gizmo_push_quad(
+                    out,
+                    p00,
+                    marker_color,
+                    p10,
+                    marker_color,
+                    p01,
+                    marker_color,
+                    p11,
+                    marker_color,
+                );
+            }
         }
 
         // Arrows around this marker's own circumference: evenly spaced,
         // creeping by `phase_angle` modulo one arrow's own spacing - like
         // the flow of a field around its own field line - so their motion
         // is purely a function of accumulated rotation, never wall-clock
-        // time. Their point leans in the direction of rotation (the sign of
-        // `phase_angle`).
-        let arrow_spacing = std::f32::consts::TAU / GIZMO_MARKER_ARROW_COUNT as f32;
+        // time. Each is a solid 3D cone anchored on the marker tube's outer
+        // surface, always pointing tangentially in the direction of
+        // rotation (the sign of `phase_angle`).
+        let arrow_spacing = TAU / GIZMO_MARKER_ARROW_COUNT as f32;
         let creep = phase_angle.rem_euclid(arrow_spacing);
         let direction = if phase_angle < 0.0 { -1.0 } else { 1.0 };
-        let arrow_offset = |angle: f32, radius: f32| -> Point3<f32> {
-            center_3d + (radial * angle.cos() + binormal * angle.sin()) * radius
-        };
+        const ARROW_BASE_POINTS: usize = 4;
         for k in 0..GIZMO_MARKER_ARROW_COUNT {
-            let base_angle = k as f32 * arrow_spacing + creep;
-            let tip_angle = base_angle + GIZMO_MARKER_ARROW_HALF_ANGLE * direction;
-            let back_angle = base_angle - GIZMO_MARKER_ARROW_HALF_ANGLE * direction;
+            let a2 = k as f32 * arrow_spacing + creep;
+            let (q, tangent2, radial2, binormal2) = marker_secondary_frame(a2);
 
-            let tip = arrow_offset(tip_angle, GIZMO_MARKER_RADIUS);
-            let back_outer = arrow_offset(
-                back_angle,
-                GIZMO_MARKER_RADIUS + GIZMO_MARKER_ARROW_HALF_HEIGHT,
-            );
-            let back_inner = arrow_offset(
-                back_angle,
-                GIZMO_MARKER_RADIUS - GIZMO_MARKER_ARROW_HALF_HEIGHT,
-            );
+            let surface = q + radial2 * GIZMO_MARKER_TUBE_MINOR_RADIUS;
+            let tip = surface + tangent2 * direction * GIZMO_ARROW_LENGTH;
+            let base_center = surface - tangent2 * direction * GIZMO_ARROW_BACK_OFFSET;
+            let bases: [Point3<f32>; ARROW_BASE_POINTS] = std::array::from_fn(|b| {
+                let phi = (b as f32 / ARROW_BASE_POINTS as f32) * TAU;
+                base_center
+                    + (radial2 * phi.cos() + binormal2 * phi.sin()) * GIZMO_ARROW_BASE_RADIUS
+            });
 
-            out.push(vertex(tip));
-            out.push(vertex(back_outer));
-            out.push(vertex(back_inner));
+            for b in 0..ARROW_BASE_POINTS {
+                let next = (b + 1) % ARROW_BASE_POINTS;
+                out.push(gizmo_vertex(tip, arrow_color));
+                out.push(gizmo_vertex(bases[b], arrow_color));
+                out.push(gizmo_vertex(bases[next], arrow_color));
+            }
+            for b in 1..ARROW_BASE_POINTS - 1 {
+                out.push(gizmo_vertex(bases[0], arrow_color));
+                out.push(gizmo_vertex(bases[b], arrow_color));
+                out.push(gizmo_vertex(bases[b + 1], arrow_color));
+            }
         }
     }
 }
@@ -892,7 +1036,7 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) indices_generation: u64,
     pub(crate) hovered_sticker: Option<usize>,
     pub(crate) debug_instances: Vec<DebugInstanceWithDistance>,
-    /// This frame's rotation-axis gizmo geometry (see `gizmo_ring_vertices`);
+    /// This frame's rotation-axis gizmo geometry (see `gizmo_torus_vertices`);
     /// empty unless a focus animation or Shift+drag is currently in
     /// progress.
     pub(crate) gizmo_vertices: Vec<GizmoVertex>,
@@ -1078,7 +1222,6 @@ pub struct HypercubeShaderProgram {
     fire_ground_truth_debug: bool,
     rotate_button: RotateButton,
     animation_duration_ms: u32,
-    gizmo_display: RotationGizmoDisplay,
     reset_generation: u64,
     random_moves_generation: u64,
     random_move_count: u32,
@@ -1107,7 +1250,6 @@ impl HypercubeShaderProgram {
         fire_ground_truth_debug: bool,
         rotate_button: RotateButton,
         animation_duration_ms: u32,
-        gizmo_display: RotationGizmoDisplay,
         reset_generation: u64,
         random_moves_generation: u64,
         random_move_count: u32,
@@ -1131,7 +1273,6 @@ impl HypercubeShaderProgram {
             fire_ground_truth_debug,
             rotate_button,
             animation_duration_ms,
-            gizmo_display,
             reset_generation,
             random_moves_generation,
             random_move_count,
@@ -1539,7 +1680,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 
 impl HypercubeShaderProgram {
     /// Builds this frame's rotation-axis gizmo geometry (see
-    /// `gizmo_ring_vertices`), or an empty `Vec` when neither a focus
+    /// `gizmo_torus_vertices`), or an empty `Vec` when neither a focus
     /// animation nor a Shift+drag is currently in progress - scope is
     /// deliberately limited to those two interactions (see `AnimatingFocus`/
     /// `ActiveShiftDrag`'s docs): puzzle moves and the Reset animation have
@@ -1555,56 +1696,31 @@ impl HypercubeShaderProgram {
             };
             let phase_angle = animating.total_angle * ease(t);
             let invariant_plane = orthogonal_complement_plane(animating.plane.0, animating.plane.1);
-            gizmo_ring_vertices(
+            gizmo_torus_vertices(
                 Vector4::zeros(),
                 invariant_plane,
                 phase_angle,
-                GIZMO_FOCUS_COLOR,
+                GIZMO_FOCUS_PALETTE,
+                GIZMO_FOCUS_PALETTE[0],
+                GIZMO_ARROW_COLOR,
                 self.viewer_distance,
                 &mut vertices,
             );
         } else if let Some(drag) = state.active_shift_drag {
-            let w_axis = Vector4::new(0.0, 0.0, 0.0, 1.0);
             let (right, up) = state.camera.right_and_up();
             let right_4d = Vector4::new(right.x, right.y, right.z, 0.0);
             let up_4d = Vector4::new(up.x, up.y, up.z, 0.0);
 
-            let show_horizontal = drag.horizontal_angle.abs() > GIZMO_MIN_DRAG_ANGLE;
-            let show_vertical = drag.vertical_angle.abs() > GIZMO_MIN_DRAG_ANGLE;
-
-            let dominant_is_horizontal = drag.horizontal_angle.abs() >= drag.vertical_angle.abs();
-
-            let want_horizontal = match self.gizmo_display {
-                RotationGizmoDisplay::BothAxes => show_horizontal,
-                RotationGizmoDisplay::DominantAxis => {
-                    (show_horizontal || show_vertical) && dominant_is_horizontal
-                }
-            };
-            let want_vertical = match self.gizmo_display {
-                RotationGizmoDisplay::BothAxes => show_vertical,
-                RotationGizmoDisplay::DominantAxis => {
-                    (show_horizontal || show_vertical) && !dominant_is_horizontal
-                }
-            };
-
-            if want_horizontal {
-                let invariant_plane = orthogonal_complement_plane(right_4d, w_axis);
-                gizmo_ring_vertices(
+            if let Some((invariant_plane, phase_angle)) =
+                combined_drag_plane_and_phase(drag, right_4d, up_4d)
+            {
+                gizmo_torus_vertices(
                     Vector4::zeros(),
                     invariant_plane,
-                    drag.horizontal_angle,
-                    GIZMO_HORIZONTAL_DRAG_COLOR,
-                    self.viewer_distance,
-                    &mut vertices,
-                );
-            }
-            if want_vertical {
-                let invariant_plane = orthogonal_complement_plane(up_4d, w_axis);
-                gizmo_ring_vertices(
-                    Vector4::zeros(),
-                    invariant_plane,
-                    drag.vertical_angle,
-                    GIZMO_VERTICAL_DRAG_COLOR,
+                    phase_angle,
+                    GIZMO_DRAG_PALETTE,
+                    GIZMO_DRAG_PALETTE[0],
+                    GIZMO_ARROW_COLOR,
                     self.viewer_distance,
                     &mut vertices,
                 );
@@ -1613,6 +1729,56 @@ impl HypercubeShaderProgram {
 
         vertices
     }
+}
+
+/// Combines a Shift+drag's two independent component rotations
+/// (`process_4d_rotation`'s horizontal camera-right/W and vertical
+/// camera-up/W planes) into the single ring "whose angle is determined by
+/// the relative motion of the two original rings": to first order, applying
+/// both simultaneously is exactly equivalent to one rotation about
+/// `span(normalize(h*right + v*up), w)` by angle `sqrt(h^2 + v^2)` (their
+/// generators add linearly since `right_4d ⊥ up_4d`). Returns `None` once
+/// that combined angle is too small to show meaningfully (`GIZMO_MIN_DRAG_ANGLE`).
+///
+/// `orthogonal_complement_plane` is sign-invariant in its first argument, so
+/// only `phase_angle`'s sign (not the returned plane's) carries the drag's
+/// direction - taken from whichever component has accumulated the larger
+/// magnitude so far. A drag along a single axis (the other component
+/// exactly zero) degenerates to exactly that axis's own plane and angle,
+/// since the zero component contributes nothing to `combined_4d` and
+/// `dominant_sign` reduces to the nonzero component's own sign.
+fn combined_drag_plane_and_phase(
+    drag: ActiveShiftDrag,
+    right_4d: Vector4<f32>,
+    up_4d: Vector4<f32>,
+) -> Option<(GizmoPlane, f32)> {
+    let w_axis = Vector4::new(0.0, 0.0, 0.0, 1.0);
+
+    let dominant_sign = if drag.horizontal_angle.abs() >= drag.vertical_angle.abs() {
+        if drag.horizontal_angle < 0.0 {
+            -1.0
+        } else {
+            1.0
+        }
+    } else if drag.vertical_angle < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    let phase_angle =
+        dominant_sign * (drag.horizontal_angle.powi(2) + drag.vertical_angle.powi(2)).sqrt();
+
+    if phase_angle.abs() <= GIZMO_MIN_DRAG_ANGLE {
+        return None;
+    }
+
+    let combined_4d = (dominant_sign
+        * (drag.horizontal_angle * right_4d + drag.vertical_angle * up_4d))
+        .normalize();
+    Some((
+        orthogonal_complement_plane(combined_4d, w_axis),
+        phase_angle,
+    ))
 }
 
 impl HypercubeShaderProgram {
@@ -2700,7 +2866,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             1,
             0,
             0,
@@ -2777,7 +2942,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             0,
             1,
             3,
@@ -2828,7 +2992,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             0,
             1,
             0,
@@ -2873,7 +3036,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             state.reset_generation,
             state.random_moves_generation,
             0,
@@ -2924,7 +3086,6 @@ mod tests {
             false,
             rotate_button,
             250,
-            RotationGizmoDisplay::default(),
             state.reset_generation,
             state.random_moves_generation,
             0,
@@ -2984,7 +3145,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             state.reset_generation,
             state.random_moves_generation,
             0,
@@ -3130,7 +3290,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -3184,7 +3343,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -3237,7 +3395,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -3270,7 +3427,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -3326,7 +3482,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -3382,7 +3537,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             state.reset_generation,
             state.random_moves_generation,
             0,
@@ -3556,7 +3710,6 @@ mod tests {
                 false,
                 RotateButton::default(),
                 250,
-                RotationGizmoDisplay::default(),
                 reset,
                 random,
                 0,
@@ -3645,7 +3798,6 @@ mod tests {
             false,
             RotateButton::default(),
             250,
-            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -3717,7 +3869,6 @@ mod tests {
             false,
             rotate_button,
             250,
-            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -3757,6 +3908,36 @@ mod tests {
             state.hypercube.pieces, pieces_before,
             "facet turn must not apply during the reveal flourish"
         );
+    }
+
+    #[test]
+    fn combined_drag_degenerates_to_single_axis_case() {
+        let right_4d = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let up_4d = Vector4::new(0.0, 1.0, 0.0, 0.0);
+        let w_axis = Vector4::new(0.0, 0.0, 0.0, 1.0);
+
+        let drag = ActiveShiftDrag {
+            horizontal_angle: 0.37,
+            vertical_angle: 0.0,
+        };
+        let (plane, phase_angle) = combined_drag_plane_and_phase(drag, right_4d, up_4d)
+            .expect("angle exceeds GIZMO_MIN_DRAG_ANGLE");
+        let expected_plane = orthogonal_complement_plane(right_4d, w_axis);
+
+        assert!((phase_angle - 0.37).abs() < 1e-6);
+        assert!((plane.0 - expected_plane.0).norm() < 1e-6);
+        assert!((plane.1 - expected_plane.1).norm() < 1e-6);
+    }
+
+    #[test]
+    fn combined_drag_below_threshold_is_hidden() {
+        let right_4d = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let up_4d = Vector4::new(0.0, 1.0, 0.0, 0.0);
+        let drag = ActiveShiftDrag {
+            horizontal_angle: GIZMO_MIN_DRAG_ANGLE * 0.5,
+            vertical_angle: 0.0,
+        };
+        assert!(combined_drag_plane_and_phase(drag, right_4d, up_4d).is_none());
     }
 }
 

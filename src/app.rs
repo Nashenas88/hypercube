@@ -10,9 +10,7 @@ use crate::animation::{ease, lerp};
 use crate::menu_overlay;
 use crate::piece::Hypercube;
 use crate::puzzle_state;
-use crate::settings::{
-    self, ANIMATION_DURATION_MS_RANGE, AppSettings, RotateButton, RotationGizmoDisplay,
-};
+use crate::settings::{self, ANIMATION_DURATION_MS_RANGE, AppSettings, RotateButton};
 use crate::shader_widget::{
     HypercubeShaderProgram, PRIMARY_FACE_GAP, PRIMARY_FACE_GAP_4D, PRIMARY_STICKER_SCALE,
     REVEAL_ANIMATION_DURATION, SECONDARY_FACE_GAP, SECONDARY_FACE_GAP_4D, SECONDARY_STICKER_SCALE,
@@ -343,7 +341,6 @@ pub(crate) enum Message {
     FpsTick(Instant),
     RotateButton(RotateButton),
     Theme(Theme),
-    RotationGizmoDisplay(RotationGizmoDisplay),
     AnimationDuration(u32),
     AnimationDurationReleased,
     Reset,
@@ -539,10 +536,6 @@ impl HypercubeApp {
             }
             Message::Theme(theme) => {
                 self.settings.theme = theme;
-                settings::save(&self.settings);
-            }
-            Message::RotationGizmoDisplay(mode) => {
-                self.settings.rotation_gizmo_display = mode;
                 settings::save(&self.settings);
             }
             Message::AnimationDuration(duration_ms) => {
@@ -769,19 +762,6 @@ impl HypercubeApp {
                         PickList::new(&Theme::ALL[..], Some(self.settings.theme), Message::Theme)
                             .width(250),
                     ),
-            )
-            .push(
-                Column::new()
-                    .spacing(5)
-                    .push(iced::widget::text("4D Rotation Axis Indicator"))
-                    .push(
-                        PickList::new(
-                            &RotationGizmoDisplay::ALL[..],
-                            Some(self.settings.rotation_gizmo_display),
-                            Message::RotationGizmoDisplay,
-                        )
-                        .width(250),
-                    ),
             );
 
         if self.debug_mode {
@@ -955,7 +935,6 @@ impl HypercubeApp {
             self.fire_ground_truth_debug,
             self.settings.rotate_button,
             self.settings.animation_duration_ms,
-            self.settings.rotation_gizmo_display,
             self.reset_generation,
             self.random_moves_generation,
             self.pending_random_move_count,

@@ -633,11 +633,14 @@ pub(crate) struct DebugInstanceWithDistance {
 }
 
 /// Fixed capacity for `gizmo_vertex_buffer`, sized comfortably above the
-/// worst case `shader_widget::gizmo_ring_vertices` can emit (two rings, each
-/// a segmented ribbon plus four field-loop marker ribbons, each carrying
-/// three small arrows) so `update_gizmo` never needs per-frame
-/// buffer-growth logic.
-const GIZMO_VERTEX_CAPACITY: usize = 2048;
+/// worst case `shader_widget::gizmo_torus_vertices` can emit for a single
+/// call (a focus animation or a Shift+drag renders exactly one ring, never
+/// both at once): a segmented main-ring torus (48 major x 8 minor x 6
+/// vertices = 2304) plus four field-loop marker toruses (12 major x 6 minor
+/// x 6 vertices x 4 markers = 1728) plus their arrow cones (3 arrows x 4
+/// markers x 18 vertices = 216), for a worst case of 4248 - so `update_gizmo`
+/// never needs per-frame buffer-growth logic.
+const GIZMO_VERTEX_CAPACITY: usize = 8192;
 
 /// Per-vertex data for the 4D-rotation-axis gizmo: CPU-projected 3D
 /// positions (see `shader_widget::gizmo_ring_vertices`) with per-vertex
