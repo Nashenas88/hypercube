@@ -47,7 +47,7 @@ short pointer:
 - `settings.rs` — `AppSettings` persisted via `serde`/`toml`/`directories`. See `context/settings.md`.
 - `shaders/*.wgsl` — WGSL shaders sharing structs/math via `math4d.wgsl`, composed with `naga_oil`. See `context/shaders.md`.
 
-**Render/interaction flow:** `main.rs` → `app.rs`'s `HypercubeApp::view()` embeds the `Shader` widget → iced calls `HypercubeShaderProgram::update()` per event (mutates `HypercubeShaderState`) → `draw()` builds a `HypercubePrimitive` snapshot → iced calls `Primitive::prepare()` (uploads buffers via `Renderer::update_*`) then `Primitive::render()` (`Renderer::render()` draws the scene into an offscreen HDR target, `Renderer::composite()` blits it - plus bloom, under the Elemental theme - into iced's surface, then `render_debug_aabb()` draws debug overlays directly onto that surface, all encoding actual wgpu render passes).
+**Render/interaction flow:** `main.rs` → `app.rs`'s `HypercubeApp::view()` embeds the `Shader` widget → iced calls `HypercubeShaderProgram::update()` per event (mutates `HypercubeShaderState`) → `draw()` builds a `HypercubePrimitive` snapshot → iced calls `Primitive::prepare()` (uploads buffers via `Renderer::update_*`) then `Primitive::render()` (`Renderer::render()` draws the scene into an offscreen HDR target, `Renderer::composite()` blits it - plus bloom, under the Elemental theme - into iced's surface, then `render_debug_aabb()` draws debug overlays and `render_gizmo()` draws the 4D-rotation-axis gizmo directly onto that surface, all encoding actual wgpu render passes).
 
 ## Guidance
 

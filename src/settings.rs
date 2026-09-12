@@ -47,6 +47,35 @@ impl std::fmt::Display for RotateButton {
 pub(crate) const ANIMATION_DURATION_MS_RANGE: std::ops::RangeInclusive<u32> = 100..=3000;
 const DEFAULT_ANIMATION_DURATION_MS: u32 = 250;
 
+/// How the 4D-rotation-axis gizmo displays a Shift+drag that combines
+/// horizontal and vertical mouse movement (each its own independent
+/// rotation plane).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub(crate) enum RotationGizmoDisplay {
+    /// Show only the ring for whichever component has accumulated the
+    /// larger rotation angle so far this drag.
+    #[default]
+    DominantAxis,
+    /// Show both rings at once.
+    BothAxes,
+}
+
+impl RotationGizmoDisplay {
+    pub(crate) const ALL: [RotationGizmoDisplay; 2] = [
+        RotationGizmoDisplay::DominantAxis,
+        RotationGizmoDisplay::BothAxes,
+    ];
+}
+
+impl std::fmt::Display for RotationGizmoDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RotationGizmoDisplay::DominantAxis => write!(f, "Dominant Axis"),
+            RotationGizmoDisplay::BothAxes => write!(f, "Both Axes"),
+        }
+    }
+}
+
 /// Settings persisted across application runs.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct AppSettings {
@@ -55,6 +84,8 @@ pub(crate) struct AppSettings {
     pub(crate) animation_duration_ms: u32,
     #[serde(default)]
     pub(crate) theme: Theme,
+    #[serde(default)]
+    pub(crate) rotation_gizmo_display: RotationGizmoDisplay,
 }
 
 impl Default for AppSettings {
@@ -63,6 +94,7 @@ impl Default for AppSettings {
             rotate_button: RotateButton::default(),
             animation_duration_ms: DEFAULT_ANIMATION_DURATION_MS,
             theme: Theme::default(),
+            rotation_gizmo_display: RotationGizmoDisplay::default(),
         }
     }
 }

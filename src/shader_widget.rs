@@ -23,8 +23,9 @@ use crate::geometry::{
 };
 use crate::math::{
     GRID_EXTENT, VIEWER_DISTANCE, compose_so4, create_4d_plane_rotation, decompose_so4,
-    process_4d_rotation, project_cube_point, project_face_point, quat_slerp_exact,
-    shortest_arc_plane, transform_sticker_vertices_to_3d, visible_faces,
+    mouse_delta_to_plane_angles, orthogonal_complement_plane, process_4d_rotation,
+    project_4d_to_3d, project_cube_point, project_face_point, quat_slerp_exact, shortest_arc_plane,
+    transform_sticker_vertices_to_3d, visible_faces,
 };
 use crate::moves::{base_angle, clockwise_sign, rotate_local_position};
 use crate::piece::{
@@ -34,8 +35,8 @@ use crate::ray_casting::{
     AABB, Ray, calculate_mouse_ray, calculate_sticker_aabb, find_intersected_sticker,
     ray_intersects_aabb, ray_sticker_intersection,
 };
-use crate::renderer::{DebugInstanceWithDistance, Renderer};
-use crate::settings::RotateButton;
+use crate::renderer::{DebugInstanceWithDistance, GizmoVertex, Renderer};
+use crate::settings::{RotateButton, RotationGizmoDisplay};
 use crate::snapshot::{self, ViewSnapshot};
 use crate::solver::{self, SolveStep};
 use crate::theme::{
@@ -90,6 +91,20 @@ struct AnimatingReset {
     start_q: UnitQuaternion<f32>,
     elapsed: Duration,
     duration: Duration,
+}
+
+/// Tracks a live Shift+drag 4D rotation gesture, for the rotation-axis
+/// gizmo: the *signed* angle applied by each of `process_4d_rotation`'s two
+/// independent component rotations (horizontal: camera-right/W plane;
+/// vertical: camera-up/W plane), accumulated since the drag began. Created
+/// lazily on the first Shift+drag mouse-move of a gesture and cleared
+/// whenever the gesture ends (button release, Shift released, or a reset
+/// animation taking over `rotation_4d`), so the gizmo only ever reflects an
+/// actively-in-progress drag.
+#[derive(Debug, Clone, Copy, Default)]
+struct ActiveShiftDrag {
+    horizontal_angle: f32,
+    vertical_angle: f32,
 }
 
 /// An in-progress reveal/hide flourish: sweeps sticker scale, face gap, 4D
@@ -160,6 +175,189 @@ pub(crate) const SECONDARY_FACE_GAP: f32 = 0.45;
 pub(crate) const PRIMARY_FACE_GAP_4D: f32 = 1.0;
 /// 4D face gap in the app's raw (slider) domain a reveal animates toward.
 pub(crate) const SECONDARY_FACE_GAP_4D: f32 = 2.0;
+
+/// Number of angular samples around the rotation-axis gizmo's ring.
+const GIZMO_RING_SEGMENTS: usize = 48;
+/// Radius of the gizmo ring, in the puzzle's own 4D/3D unit scale (the
+/// hypercube itself spans roughly [-1, 1]).
+const GIZMO_RING_RADIUS: f32 = 1.6;
+/// Half-thickness of the ring ribbon.
+const GIZMO_RING_HALF_WIDTH: f32 = 0.02;
+/// Number of small "field loop" markers threaded around the ring like the
+/// loops of a magnetic field around a current-carrying wire, fixed
+/// equidistant positions along the ring - unlike the arrows drawn on each
+/// one, which creep around that marker's *own* circumference as rotation
+/// progresses (see `gizmo_ring_vertices`'s doc comment).
+const GIZMO_MARKER_COUNT: usize = 4;
+/// Radius of a field-loop marker.
+const GIZMO_MARKER_RADIUS: f32 = 0.12;
+/// Half-thickness of a field-loop marker's ribbon.
+const GIZMO_MARKER_HALF_WIDTH: f32 = 0.015;
+/// Number of angular samples around each field-loop marker.
+const GIZMO_MARKER_SEGMENTS: usize = 16;
+/// Number of small arrow marks evenly spaced around each field-loop
+/// marker's own circumference.
+const GIZMO_MARKER_ARROW_COUNT: usize = 3;
+/// How far a marker arrow's tip/back edge reach beyond/before the marker's
+/// own radius.
+const GIZMO_MARKER_ARROW_HALF_HEIGHT: f32 = 0.05;
+/// Angular half-width, in radians, of a marker arrow's base along the
+/// marker's own circumference.
+const GIZMO_MARKER_ARROW_HALF_ANGLE: f32 = 0.35;
+/// Small angular offset used to numerically estimate the main ring's
+/// tangent direction (in already-projected 3D space) at a marker's position.
+const GIZMO_TANGENT_EPSILON: f32 = 0.01;
+/// Below this accumulated drag angle (radians), a Shift+drag component's
+/// ring is treated as not yet meaningfully rotating and is hidden even in
+/// `RotationGizmoDisplay::BothAxes` mode.
+const GIZMO_MIN_DRAG_ANGLE: f32 = 1e-3;
+
+const GIZMO_FOCUS_COLOR: [f32; 4] = [0.3, 0.85, 1.0, 0.55];
+const GIZMO_HORIZONTAL_DRAG_COLOR: [f32; 4] = [1.0, 0.55, 0.15, 0.55];
+const GIZMO_VERTICAL_DRAG_COLOR: [f32; 4] = [0.6, 0.4, 1.0, 0.55];
+
+/// Appends the rotation-axis gizmo's ring + field-loop-marker geometry to
+/// `out`: `GIZMO_RING_SEGMENTS` points sampled around the unit circle in the
+/// invariant plane `(u, v)` - the 2D subspace a 4D rotation in some *other*
+/// plane leaves fixed (see `math::orthogonal_complement_plane`) - emitted as
+/// a thin ribbon (`TriangleList`) rather than a line list so it's visible
+/// without wide-line support.
+///
+/// `u`/`v` are always projected with an *identity* rotation, never the
+/// puzzle's live `rotation_4d`: both callers derive them from vectors
+/// already expressed in the same display-space frame `project_4d_to_3d`'s
+/// perspective divide expects directly (`AnimatingFocus::plane`'s vectors
+/// come from `state.rotation_4d`-multiplied face normals; a drag's come from
+/// the camera's own basis) - see `math::project_4d_to_3d`'s "rotation_4d
+/// maps *local* points into display space" contract. Multiplying by
+/// `rotation_4d` again would double-apply whatever orientation the puzzle
+/// had when the animation/drag began, so the ring would visibly drift/warp
+/// as that *separate* rotation composes on top of the sweep this ring is
+/// meant to hold still against - it would only look right by coincidence,
+/// for whichever starting orientations happen to leave the invariant plane
+/// unmoved by that extra multiplication.
+///
+/// `GIZMO_MARKER_COUNT` field-loop markers - small circles perpendicular to
+/// the ring's own tangent, like the loops of a magnetic field around a
+/// current-carrying wire - sit at fixed, equidistant positions along the
+/// ring (they do not travel around it). Each carries `GIZMO_MARKER_ARROW_COUNT`
+/// small arrows that creep around *that marker's own* circumference only as
+/// `phase_angle` advances, driven by the rotation's own accumulated angle
+/// (see `ActiveShiftDrag`/`AnimatingFocus`) rather than wall-clock time, so
+/// they freeze the instant the rotation itself does.
+fn gizmo_ring_vertices(
+    center: Vector4<f32>,
+    (u, v): (Vector4<f32>, Vector4<f32>),
+    phase_angle: f32,
+    color: [f32; 4],
+    viewer_distance: f32,
+    out: &mut Vec<GizmoVertex>,
+) {
+    let identity = Matrix4::identity();
+    let project = |angle: f32, radius: f32| -> Point3<f32> {
+        let point_4d = center + (u * angle.cos() + v * angle.sin()) * radius;
+        project_4d_to_3d(point_4d, &identity, viewer_distance)
+    };
+    let vertex = |p: Point3<f32>| GizmoVertex {
+        position: [p.x, p.y, p.z],
+        color,
+    };
+
+    for i in 0..GIZMO_RING_SEGMENTS {
+        let a0 = (i as f32 / GIZMO_RING_SEGMENTS as f32) * std::f32::consts::TAU;
+        let a1 = ((i + 1) as f32 / GIZMO_RING_SEGMENTS as f32) * std::f32::consts::TAU;
+
+        let inner0 = project(a0, GIZMO_RING_RADIUS - GIZMO_RING_HALF_WIDTH);
+        let outer0 = project(a0, GIZMO_RING_RADIUS + GIZMO_RING_HALF_WIDTH);
+        let inner1 = project(a1, GIZMO_RING_RADIUS - GIZMO_RING_HALF_WIDTH);
+        let outer1 = project(a1, GIZMO_RING_RADIUS + GIZMO_RING_HALF_WIDTH);
+
+        out.push(vertex(inner0));
+        out.push(vertex(outer0));
+        out.push(vertex(inner1));
+
+        out.push(vertex(inner1));
+        out.push(vertex(outer0));
+        out.push(vertex(outer1));
+    }
+
+    // Field-loop marker(s): small circles threaded around the main ring,
+    // perpendicular to its own tangent at that point. Built directly in
+    // already-projected 3D space (rather than in the 4D invariant plane)
+    // since the loop is a purely decorative screen-space visual, not a real
+    // 4D subspace of its own.
+    let ring_center_3d = project(0.0, 0.0);
+    let marker_spacing = std::f32::consts::TAU / GIZMO_MARKER_COUNT as f32;
+    for i in 0..GIZMO_MARKER_COUNT {
+        let marker_angle = i as f32 * marker_spacing;
+        let center_3d = project(marker_angle, GIZMO_RING_RADIUS);
+        let ahead_3d = project(marker_angle + GIZMO_TANGENT_EPSILON, GIZMO_RING_RADIUS);
+
+        let tangent = ahead_3d - center_3d;
+        let radial = center_3d - ring_center_3d;
+        let binormal = tangent.cross(&radial);
+        // Degenerate near the projection's own singularity (radial or
+        // tangent collapsing to zero) - skip rather than divide by zero.
+        if binormal.norm() < 1e-5 || radial.norm() < 1e-5 {
+            continue;
+        }
+        let radial = radial.normalize();
+        let binormal = binormal.normalize();
+
+        for j in 0..GIZMO_MARKER_SEGMENTS {
+            let a0 = (j as f32 / GIZMO_MARKER_SEGMENTS as f32) * std::f32::consts::TAU;
+            let a1 = ((j + 1) as f32 / GIZMO_MARKER_SEGMENTS as f32) * std::f32::consts::TAU;
+            let offset = |angle: f32, radius: f32| -> Point3<f32> {
+                center_3d + (radial * angle.cos() + binormal * angle.sin()) * radius
+            };
+
+            let inner0 = offset(a0, GIZMO_MARKER_RADIUS - GIZMO_MARKER_HALF_WIDTH);
+            let outer0 = offset(a0, GIZMO_MARKER_RADIUS + GIZMO_MARKER_HALF_WIDTH);
+            let inner1 = offset(a1, GIZMO_MARKER_RADIUS - GIZMO_MARKER_HALF_WIDTH);
+            let outer1 = offset(a1, GIZMO_MARKER_RADIUS + GIZMO_MARKER_HALF_WIDTH);
+
+            out.push(vertex(inner0));
+            out.push(vertex(outer0));
+            out.push(vertex(inner1));
+
+            out.push(vertex(inner1));
+            out.push(vertex(outer0));
+            out.push(vertex(outer1));
+        }
+
+        // Arrows around this marker's own circumference: evenly spaced,
+        // creeping by `phase_angle` modulo one arrow's own spacing - like
+        // the flow of a field around its own field line - so their motion
+        // is purely a function of accumulated rotation, never wall-clock
+        // time. Their point leans in the direction of rotation (the sign of
+        // `phase_angle`).
+        let arrow_spacing = std::f32::consts::TAU / GIZMO_MARKER_ARROW_COUNT as f32;
+        let creep = phase_angle.rem_euclid(arrow_spacing);
+        let direction = if phase_angle < 0.0 { -1.0 } else { 1.0 };
+        let arrow_offset = |angle: f32, radius: f32| -> Point3<f32> {
+            center_3d + (radial * angle.cos() + binormal * angle.sin()) * radius
+        };
+        for k in 0..GIZMO_MARKER_ARROW_COUNT {
+            let base_angle = k as f32 * arrow_spacing + creep;
+            let tip_angle = base_angle + GIZMO_MARKER_ARROW_HALF_ANGLE * direction;
+            let back_angle = base_angle - GIZMO_MARKER_ARROW_HALF_ANGLE * direction;
+
+            let tip = arrow_offset(tip_angle, GIZMO_MARKER_RADIUS);
+            let back_outer = arrow_offset(
+                back_angle,
+                GIZMO_MARKER_RADIUS + GIZMO_MARKER_ARROW_HALF_HEIGHT,
+            );
+            let back_inner = arrow_offset(
+                back_angle,
+                GIZMO_MARKER_RADIUS - GIZMO_MARKER_ARROW_HALF_HEIGHT,
+            );
+
+            out.push(vertex(tip));
+            out.push(vertex(back_outer));
+            out.push(vertex(back_inner));
+        }
+    }
+}
 
 /// Builds the GPU instance list for the current frame. Piece state is
 /// already final (`apply_move` commits atomically) - while a move is
@@ -694,6 +892,10 @@ pub(crate) struct HypercubePrimitive {
     pub(crate) indices_generation: u64,
     pub(crate) hovered_sticker: Option<usize>,
     pub(crate) debug_instances: Vec<DebugInstanceWithDistance>,
+    /// This frame's rotation-axis gizmo geometry (see `gizmo_ring_vertices`);
+    /// empty unless a focus animation or Shift+drag is currently in
+    /// progress.
+    pub(crate) gizmo_vertices: Vec<GizmoVertex>,
     pub(crate) sticker_instances: Arc<[StickerInstance]>,
     pub(crate) sticker_generation: u64,
     pub(crate) visible_faces: [bool; 8],
@@ -739,6 +941,7 @@ impl shader::Primitive for HypercubePrimitive {
         pipeline.update_indices(queue, &self.cached_indices, self.indices_generation);
         pipeline.update_highlighting(queue, self.hovered_sticker);
         pipeline.update_debug_instances(queue, &self.debug_instances);
+        pipeline.update_gizmo(queue, &self.gizmo_vertices);
         pipeline.update_sticker_instances(queue, &self.sticker_instances, self.sticker_generation);
         pipeline.update_depth_batches(queue, &self.depth_order);
         pipeline.set_render_mode(self.ui_controls.render_mode);
@@ -763,6 +966,9 @@ impl shader::Primitive for HypercubePrimitive {
 
         // Render transparent debug AABBs
         pipeline.render_debug_aabb(encoder, target, self.debug_instances.len() as u32);
+
+        // Render the rotation-axis gizmo, if any, on top of everything else.
+        pipeline.render_gizmo(encoder, target, self.gizmo_vertices.len() as u32);
     }
 }
 
@@ -791,6 +997,10 @@ pub struct HypercubeShaderState {
     animating_focus: Option<AnimatingFocus>,
     animating_reset: Option<AnimatingReset>,
     animating_reveal: Option<AnimatingReveal>,
+    /// Set while a Shift+drag 4D rotation gesture is in progress; drives the
+    /// rotation-axis gizmo the same way `animating_focus` does for the
+    /// click-to-focus animation. See `ActiveShiftDrag`.
+    active_shift_drag: Option<ActiveShiftDrag>,
     /// Live sticker scale/face gap while a reveal/hide flourish is playing,
     /// consulted by `draw()`/`update_hover` in preference to
     /// `HypercubeShaderProgram`'s own fields. Self-corrects back to `None`
@@ -868,6 +1078,7 @@ pub struct HypercubeShaderProgram {
     fire_ground_truth_debug: bool,
     rotate_button: RotateButton,
     animation_duration_ms: u32,
+    gizmo_display: RotationGizmoDisplay,
     reset_generation: u64,
     random_moves_generation: u64,
     random_move_count: u32,
@@ -896,6 +1107,7 @@ impl HypercubeShaderProgram {
         fire_ground_truth_debug: bool,
         rotate_button: RotateButton,
         animation_duration_ms: u32,
+        gizmo_display: RotationGizmoDisplay,
         reset_generation: u64,
         random_moves_generation: u64,
         random_move_count: u32,
@@ -919,6 +1131,7 @@ impl HypercubeShaderProgram {
             fire_ground_truth_debug,
             rotate_button,
             animation_duration_ms,
+            gizmo_display,
             reset_generation,
             random_moves_generation,
             random_move_count,
@@ -949,6 +1162,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.hypercube = Hypercube::solved();
             state.animating_move = None;
             state.animating_focus = None;
+            state.active_shift_drag = None;
             state.rotate_press = None;
             state.pending_face_click = None;
             state.hovered_sticker = None;
@@ -1316,9 +1530,88 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             } else {
                 Vec::new()
             },
+            gizmo_vertices: self.build_gizmo_vertices(state),
             elapsed_seconds: state.elapsed_seconds,
             snapshot_request: state.pending_snapshot.take(),
         }
+    }
+}
+
+impl HypercubeShaderProgram {
+    /// Builds this frame's rotation-axis gizmo geometry (see
+    /// `gizmo_ring_vertices`), or an empty `Vec` when neither a focus
+    /// animation nor a Shift+drag is currently in progress - scope is
+    /// deliberately limited to those two interactions (see `AnimatingFocus`/
+    /// `ActiveShiftDrag`'s docs): puzzle moves and the Reset animation have
+    /// no single well-defined 4D rotation plane to derive a ring from.
+    fn build_gizmo_vertices(&self, state: &HypercubeShaderState) -> Vec<GizmoVertex> {
+        let mut vertices = Vec::new();
+
+        if let Some(animating) = &state.animating_focus {
+            let t = if animating.duration.is_zero() {
+                1.0
+            } else {
+                (animating.elapsed.as_secs_f32() / animating.duration.as_secs_f32()).clamp(0.0, 1.0)
+            };
+            let phase_angle = animating.total_angle * ease(t);
+            let invariant_plane = orthogonal_complement_plane(animating.plane.0, animating.plane.1);
+            gizmo_ring_vertices(
+                Vector4::zeros(),
+                invariant_plane,
+                phase_angle,
+                GIZMO_FOCUS_COLOR,
+                self.viewer_distance,
+                &mut vertices,
+            );
+        } else if let Some(drag) = state.active_shift_drag {
+            let w_axis = Vector4::new(0.0, 0.0, 0.0, 1.0);
+            let (right, up) = state.camera.right_and_up();
+            let right_4d = Vector4::new(right.x, right.y, right.z, 0.0);
+            let up_4d = Vector4::new(up.x, up.y, up.z, 0.0);
+
+            let show_horizontal = drag.horizontal_angle.abs() > GIZMO_MIN_DRAG_ANGLE;
+            let show_vertical = drag.vertical_angle.abs() > GIZMO_MIN_DRAG_ANGLE;
+
+            let dominant_is_horizontal = drag.horizontal_angle.abs() >= drag.vertical_angle.abs();
+
+            let want_horizontal = match self.gizmo_display {
+                RotationGizmoDisplay::BothAxes => show_horizontal,
+                RotationGizmoDisplay::DominantAxis => {
+                    (show_horizontal || show_vertical) && dominant_is_horizontal
+                }
+            };
+            let want_vertical = match self.gizmo_display {
+                RotationGizmoDisplay::BothAxes => show_vertical,
+                RotationGizmoDisplay::DominantAxis => {
+                    (show_horizontal || show_vertical) && !dominant_is_horizontal
+                }
+            };
+
+            if want_horizontal {
+                let invariant_plane = orthogonal_complement_plane(right_4d, w_axis);
+                gizmo_ring_vertices(
+                    Vector4::zeros(),
+                    invariant_plane,
+                    drag.horizontal_angle,
+                    GIZMO_HORIZONTAL_DRAG_COLOR,
+                    self.viewer_distance,
+                    &mut vertices,
+                );
+            }
+            if want_vertical {
+                let invariant_plane = orthogonal_complement_plane(up_4d, w_axis);
+                gizmo_ring_vertices(
+                    Vector4::zeros(),
+                    invariant_plane,
+                    drag.vertical_angle,
+                    GIZMO_VERTICAL_DRAG_COLOR,
+                    self.viewer_distance,
+                    &mut vertices,
+                );
+            }
+        }
+
+        vertices
     }
 }
 
@@ -1454,6 +1747,13 @@ impl HypercubeShaderProgram {
                                     right,
                                     up,
                                 );
+
+                                let (angle_x, angle_y) =
+                                    mouse_delta_to_plane_angles(delta_x, delta_y);
+                                let drag =
+                                    state.active_shift_drag.get_or_insert_with(Default::default);
+                                drag.horizontal_angle += angle_x;
+                                drag.vertical_angle += angle_y;
                             }
                         } else {
                             // 3D camera rotation
@@ -1489,6 +1789,7 @@ impl HypercubeShaderProgram {
                     // interaction: the animation this same press might
                     // trigger doesn't start until its matching release.
                     state.animating_focus = None;
+                    state.active_shift_drag = None;
                     state.rotate_press = Some((position, state.hovered_sticker));
                     state.mouse_pressed = true;
                     return event::Status::Captured;
@@ -1510,6 +1811,7 @@ impl HypercubeShaderProgram {
                 let was_dragging = state.mouse_pressed;
                 if was_dragging {
                     state.mouse_pressed = false;
+                    state.active_shift_drag = None;
                 }
 
                 if let Some((press_pos, sticker_at_press)) = state.rotate_press.take() {
@@ -1915,6 +2217,7 @@ impl HypercubeShaderProgram {
                 ..
             } => {
                 state.shift_pressed = false;
+                state.active_shift_drag = None;
                 return event::Status::Captured;
             }
             _ => {}
@@ -1966,6 +2269,7 @@ impl Default for HypercubeShaderState {
             animating_focus: None,
             animating_reset: None,
             animating_reveal: None,
+            active_shift_drag: None,
             reveal_scale_override: None,
             reveal_gap_override: None,
             reveal_gap_4d_override: None,
@@ -2396,6 +2700,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             1,
             0,
             0,
@@ -2472,6 +2777,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             0,
             1,
             3,
@@ -2522,6 +2828,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             0,
             1,
             0,
@@ -2566,6 +2873,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             state.reset_generation,
             state.random_moves_generation,
             0,
@@ -2616,6 +2924,7 @@ mod tests {
             false,
             rotate_button,
             250,
+            RotationGizmoDisplay::default(),
             state.reset_generation,
             state.random_moves_generation,
             0,
@@ -2675,6 +2984,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             state.reset_generation,
             state.random_moves_generation,
             0,
@@ -2820,6 +3130,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -2873,6 +3184,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -2925,6 +3237,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -2957,6 +3270,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -3012,6 +3326,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -3067,6 +3382,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             state.reset_generation,
             state.random_moves_generation,
             0,
@@ -3240,6 +3556,7 @@ mod tests {
                 false,
                 RotateButton::default(),
                 250,
+                RotationGizmoDisplay::default(),
                 reset,
                 random,
                 0,
@@ -3328,6 +3645,7 @@ mod tests {
             false,
             RotateButton::default(),
             250,
+            RotationGizmoDisplay::default(),
             0,
             0,
             0,
@@ -3399,6 +3717,7 @@ mod tests {
             false,
             rotate_button,
             250,
+            RotationGizmoDisplay::default(),
             0,
             0,
             0,

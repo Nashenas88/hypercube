@@ -66,11 +66,7 @@ pub(crate) fn process_4d_rotation(
     camera_right: Vector3<f32>,
     camera_up: Vector3<f32>,
 ) -> Matrix4<f32> {
-    // Screen Y grows downward, so "drag up" is a negative delta_y that must
-    // flip sign to read as a positive rotation; screen X already grows
-    // rightward in the same sense as `camera_right`, so it doesn't.
-    let angle_x = delta_x * MOUSE_SENSITIVITY * 0.01;
-    let angle_y = -delta_y * MOUSE_SENSITIVITY * 0.01;
+    let (angle_x, angle_y) = mouse_delta_to_plane_angles(delta_x, delta_y);
 
     let w_axis = Vector4::new(0.0, 0.0, 0.0, 1.0);
     let right_4d = Vector4::new(camera_right.x, camera_right.y, camera_right.z, 0.0);
@@ -80,6 +76,65 @@ pub(crate) fn process_4d_rotation(
     let rotation_v = create_4d_plane_rotation(up_4d, w_axis, angle_y);
 
     rotation_v * rotation_h * current_rotation
+}
+
+/// Converts a raw mouse-move delta into the pair of signed rotation angles
+/// `process_4d_rotation` applies to its horizontal (camera-right/W) and
+/// vertical (camera-up/W) planes. Factored out so drag-gesture tracking
+/// (e.g. the rotation gizmo's accumulated angle) can derive the exact same
+/// per-frame angle `process_4d_rotation` uses internally, without
+/// duplicating the sensitivity/sign conventions.
+///
+/// # Returns
+/// `(angle_x, angle_y)` - the horizontal- and vertical-component angles, in
+/// radians.
+pub(crate) fn mouse_delta_to_plane_angles(delta_x: f32, delta_y: f32) -> (f32, f32) {
+    // Screen Y grows downward, so "drag up" is a negative delta_y that must
+    // flip sign to read as a positive rotation; screen X already grows
+    // rightward in the same sense as `camera_right`, so it doesn't.
+    let angle_x = delta_x * MOUSE_SENSITIVITY * 0.01;
+    let angle_y = -delta_y * MOUSE_SENSITIVITY * 0.01;
+    (angle_x, angle_y)
+}
+
+/// Given an orthonormal pair `(u, v)` spanning a 4D rotation plane, returns
+/// an orthonormal pair spanning its orthogonal complement: the **invariant
+/// plane** that `create_4d_plane_rotation(u, v, angle)` leaves fixed. Used to
+/// derive the rotation-axis gizmo's ring plane from a rotation's own plane,
+/// since the invariant plane (unlike the rotation plane itself) doesn't move
+/// as the rotation animates.
+///
+/// Gram-Schmidt-orthogonalizes the standard basis against `u`, `v`, and
+/// whichever complement vector is found first; any two independent vectors
+/// not in `span(u, v)` produce an equivalent result, since the complement of
+/// a plane in 4D is itself a unique plane.
+pub(crate) fn orthogonal_complement_plane(
+    u: Vector4<f32>,
+    v: Vector4<f32>,
+) -> (Vector4<f32>, Vector4<f32>) {
+    const BASIS: [Vector4<f32>; 4] = [
+        Vector4::new(1.0, 0.0, 0.0, 0.0),
+        Vector4::new(0.0, 1.0, 0.0, 0.0),
+        Vector4::new(0.0, 0.0, 1.0, 0.0),
+        Vector4::new(0.0, 0.0, 0.0, 1.0),
+    ];
+
+    let mut complement: Vec<Vector4<f32>> = Vec::with_capacity(2);
+    for candidate in BASIS {
+        let mut w = candidate - u * u.dot(&candidate) - v * v.dot(&candidate);
+        for existing in &complement {
+            w -= existing * existing.dot(&w);
+        }
+        let norm = w.norm();
+        if norm > 1e-4 {
+            complement.push(w / norm);
+            if complement.len() == 2 {
+                break;
+            }
+        }
+    }
+
+    (complement[0], complement[1])
 }
 
 /// Transform a 4D position to 3D world space using perspective projection.
@@ -544,6 +599,63 @@ mod tests {
         // XW should be untouched; ZW should carry the rotation instead.
         assert!((actual[(0, 3)]).abs() < EPSILON);
         assert!((actual[(2, 3)]).abs() > EPSILON);
+    }
+
+    #[test]
+    fn mouse_delta_to_plane_angles_matches_process_4d_rotation_convention() {
+        let (delta_x, delta_y) = (12.0, -7.0);
+        let (angle_x, angle_y) = mouse_delta_to_plane_angles(delta_x, delta_y);
+        assert!((angle_x - delta_x * MOUSE_SENSITIVITY * 0.01).abs() < EPSILON);
+        assert!((angle_y - (-delta_y * MOUSE_SENSITIVITY * 0.01)).abs() < EPSILON);
+    }
+
+    #[test]
+    fn orthogonal_complement_plane_of_xw_is_yz() {
+        let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        let (u, v) = orthogonal_complement_plane(x, w);
+
+        // Orthonormal.
+        assert!((u.norm() - 1.0).abs() < EPSILON);
+        assert!((v.norm() - 1.0).abs() < EPSILON);
+        assert!(u.dot(&v).abs() < EPSILON);
+
+        // Orthogonal to the input plane.
+        assert!(u.dot(&x).abs() < EPSILON);
+        assert!(u.dot(&w).abs() < EPSILON);
+        assert!(v.dot(&x).abs() < EPSILON);
+        assert!(v.dot(&w).abs() < EPSILON);
+
+        // Spans exactly the YZ plane (up to basis choice within it): any
+        // vector orthogonal to both u and v, restricted to y/z, must be zero.
+        let y = Vector4::new(0.0, 1.0, 0.0, 0.0);
+        let z = Vector4::new(0.0, 0.0, 1.0, 0.0);
+        let y_component = y - u * u.dot(&y) - v * v.dot(&y);
+        let z_component = z - u * u.dot(&z) - v * v.dot(&z);
+        assert!(y_component.norm() < EPSILON);
+        assert!(z_component.norm() < EPSILON);
+    }
+
+    #[test]
+    fn orthogonal_complement_plane_round_trips_for_arbitrary_planes() {
+        let (u, v, _) = shortest_arc_plane(FACE_CENTERS[1], FACE_CENTERS[3]);
+        let (p, q) = orthogonal_complement_plane(u, v);
+
+        assert!((p.norm() - 1.0).abs() < EPSILON);
+        assert!((q.norm() - 1.0).abs() < EPSILON);
+        assert!(p.dot(&q).abs() < EPSILON);
+        assert!(p.dot(&u).abs() < EPSILON);
+        assert!(p.dot(&v).abs() < EPSILON);
+        assert!(q.dot(&u).abs() < EPSILON);
+        assert!(q.dot(&v).abs() < EPSILON);
+
+        // Applying the complement's own orthogonal_complement_plane again
+        // should recover a plane orthogonal to (p, q) - i.e. span(u, v).
+        let (back_u, back_v) = orthogonal_complement_plane(p, q);
+        let u_component = u - back_u * back_u.dot(&u) - back_v * back_v.dot(&u);
+        let v_component = v - back_u * back_u.dot(&v) - back_v * back_v.dot(&v);
+        assert!(u_component.norm() < EPSILON);
+        assert!(v_component.norm() < EPSILON);
     }
 
     #[test]

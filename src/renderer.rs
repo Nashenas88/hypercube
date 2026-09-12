@@ -367,6 +367,10 @@ pub(crate) struct Renderer {
     depth_pipeline: wgpu::RenderPipeline,
     /// Graphics pipeline for debug AABB rendering
     debug_pipeline: wgpu::RenderPipeline,
+    /// Graphics pipeline for the 4D-rotation-axis gizmo ring/marker, drawn
+    /// straight onto `target` immediately after `debug_pipeline` - see
+    /// `render_gizmo`.
+    gizmo_pipeline: wgpu::RenderPipeline,
     /// Bright-pass, blur H, blur V and composite pipelines, in that order:
     /// the post-processing chain that turns `scene_view` (plus, under
     /// `Theme::Elemental`, a blurred `bloom_view_a`) into the final frame in
@@ -445,6 +449,12 @@ pub(crate) struct Renderer {
     /// Reused across frames by `update_debug_instances` to avoid allocating
     /// a fresh `Vec` every frame for what's usually empty.
     debug_scratch: Vec<DebugInstance>,
+    /// GPU buffer for the rotation-axis gizmo's per-vertex position+color
+    /// data - a plain (non-instanced) vertex buffer, fixed at
+    /// `GIZMO_VERTEX_CAPACITY`.
+    gizmo_vertex_buffer: wgpu::Buffer,
+    /// Reused across frames by `update_gizmo`, mirroring `debug_scratch`.
+    gizmo_scratch: Vec<GizmoVertex>,
     /// Bind group for main shader (transform, camera, light, normals, instances)
     main_bind_group: wgpu::BindGroup,
     /// Bind group for normal shader (transform, camera, normals, instances)
@@ -453,6 +463,9 @@ pub(crate) struct Renderer {
     debug_bind_group: wgpu::BindGroup,
     /// Bind group for debug AABB rendering (camera, debug_instances)
     debug_aabb_bind_group: wgpu::BindGroup,
+    /// Bind group for the gizmo pipeline (camera only - geometry is already
+    /// fully resolved to 3D positions on the CPU).
+    gizmo_bind_group: wgpu::BindGroup,
     /// Depth texture for z-buffering
     depth_texture: wgpu::Texture,
     /// Depth texture view for rendering
@@ -617,6 +630,27 @@ pub(crate) struct DebugInstanceWithDistance {
     pub gpu_data: DebugInstance,
     /// Distance from camera (for back-to-front sorting)
     pub distance: f32,
+}
+
+/// Fixed capacity for `gizmo_vertex_buffer`, sized comfortably above the
+/// worst case `shader_widget::gizmo_ring_vertices` can emit (two rings, each
+/// a segmented ribbon plus four field-loop marker ribbons, each carrying
+/// three small arrows) so `update_gizmo` never needs per-frame
+/// buffer-growth logic.
+const GIZMO_VERTEX_CAPACITY: usize = 2048;
+
+/// Per-vertex data for the 4D-rotation-axis gizmo: CPU-projected 3D
+/// positions (see `shader_widget::gizmo_ring_vertices`) with per-vertex
+/// color. Unlike `DebugInstance`, no per-instance transform is needed - the
+/// geometry is already fully resolved to 3D positions on the CPU each
+/// frame - but color must vary *within* one draw call (ring vs. marker,
+/// horizontal vs. vertical axis), so it travels as a vertex attribute
+/// rather than a per-instance storage entry.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct GizmoVertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) color: [f32; 4],
 }
 
 impl DebugInstanceWithDistance {
@@ -1287,6 +1321,17 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Fixed-capacity vertex buffer for the rotation-axis gizmo, sized
+        // for the worst case up front so `update_gizmo` never needs to grow
+        // it - mirrors `debug_instance_buffer`'s dummy-init pattern above.
+        let gizmo_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Gizmo Vertex Buffer"),
+            size: (GIZMO_VERTEX_CAPACITY * std::mem::size_of::<GizmoVertex>())
+                as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let mut vertices = CUBE_VERTICES;
         vertices
             .iter_mut()
@@ -1603,6 +1648,24 @@ impl Renderer {
                 label: Some("Debug AABB Bind Group Layout"),
             });
 
+        // Gizmo bind group layout (camera only) - the rotation-axis gizmo's
+        // ring/arrow geometry is already fully resolved to 3D positions on
+        // the CPU, so the shader needs nothing but the camera's view_proj.
+        let gizmo_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("Gizmo Bind Group Layout"),
+            });
+
         // Post-process bind group layouts: one texture + sampler for
         // bright-pass and the two blur passes, and scene + bloom textures
         // sharing one sampler for the final composite.
@@ -1796,6 +1859,15 @@ impl Renderer {
             label: Some("Debug AABB Bind Group"),
         });
 
+        let gizmo_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &gizmo_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+            label: Some("Gizmo Bind Group"),
+        });
+
         let mut composer = Composer::default();
         composer
             .add_composable_module(ComposableModuleDescriptor {
@@ -1873,6 +1945,13 @@ impl Renderer {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Debug AABB Pipeline Layout"),
                 bind_group_layouts: &[&debug_aabb_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let gizmo_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Gizmo Pipeline Layout"),
+                bind_group_layouts: &[&gizmo_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -2667,6 +2746,77 @@ impl Renderer {
             multiview: None,
         });
 
+        // Create the rotation-axis gizmo's shader and pipeline. Geometry
+        // (ring ribbon + a field-loop marker ribbon) is already fully
+        // resolved to 3D positions on the CPU each frame (see
+        // `shader_widget::gizmo_ring_vertices`), so unlike `debug_pipeline`
+        // this needs no per-instance transform - just a plain vertex buffer
+        // carrying position and color together.
+        let gizmo_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Gizmo Shader"),
+            source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
+                include_str!("shaders/gizmo_shader.wgsl"),
+                "shaders/gizmo_shader.wgsl",
+            ))),
+        });
+
+        let gizmo_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Gizmo Pipeline"),
+            layout: Some(&gizmo_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &gizmo_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GizmoVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+                }],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &gizmo_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[],
+                    zero_initialize_workgroup_memory: false,
+                },
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                // Unlike `debug_pipeline`'s watertight AABB cubes, a thin
+                // ring/arrow ribbon must stay visible from either side as
+                // the camera orbits around it.
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false, // Translucent overlay, like debug AABBs
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
         let post_process_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Post Process Shader"),
             source: wgpu::ShaderSource::Naga(Cow::Owned(compose_shader(
@@ -2848,6 +2998,7 @@ impl Renderer {
             normal_pipeline,
             depth_pipeline,
             debug_pipeline,
+            gizmo_pipeline,
             bright_pass_pipeline,
             blur_h_pipeline,
             blur_v_pipeline,
@@ -2874,10 +3025,13 @@ impl Renderer {
             light_buffer,
             debug_instance_buffer,
             debug_scratch: Vec::new(),
+            gizmo_vertex_buffer,
+            gizmo_scratch: Vec::new(),
             main_bind_group,
             normal_bind_group,
             debug_bind_group,
             debug_aabb_bind_group,
+            gizmo_bind_group,
             depth_texture,
             depth_view,
             debug_inset_depth_texture,
@@ -3211,6 +3365,28 @@ impl Renderer {
             &self.debug_instance_buffer,
             0,
             bytemuck::cast_slice(&self.debug_scratch),
+        );
+    }
+
+    /// Updates the gizmo vertex buffer, mirroring `update_debug_instances`.
+    ///
+    /// # Arguments
+    /// * `queue` - GPU command queue for buffer updates
+    /// * `vertices` - This frame's gizmo ring/arrow geometry, already
+    ///   projected to 3D (see `shader_widget::gizmo_ring_vertices`); empty
+    ///   when no gizmo should be shown this frame.
+    pub(crate) fn update_gizmo(&mut self, queue: &Queue, vertices: &[GizmoVertex]) {
+        debug_assert!(
+            vertices.len() <= GIZMO_VERTEX_CAPACITY,
+            "gizmo vertex count {} exceeds fixed capacity {GIZMO_VERTEX_CAPACITY}",
+            vertices.len()
+        );
+        self.gizmo_scratch.clear();
+        self.gizmo_scratch.extend_from_slice(vertices);
+        queue.write_buffer(
+            &self.gizmo_vertex_buffer,
+            0,
+            bytemuck::cast_slice(&self.gizmo_scratch),
         );
     }
 
@@ -3834,6 +4010,63 @@ impl Renderer {
 
         // Draw debug instances (36 vertices per cube, debug_instance_count instances)
         render_pass.draw(0..36, 0..debug_instance_count);
+    }
+
+    /// Renders the 4D-rotation-axis gizmo (ring + field-loop marker), mirroring
+    /// `render_debug_aabb`: its own pass drawn straight onto `target`
+    /// (iced's real surface), on top of the fully composited frame, so it's
+    /// excluded from bloom/tonemap.
+    ///
+    /// # Arguments
+    /// * `encoder` - Command encoder for GPU commands
+    /// * `target` - Target texture view to render to
+    /// * `vertex_count` - Number of gizmo vertices to render (0 draws nothing)
+    pub(crate) fn render_gizmo(
+        &self,
+        encoder: &mut CommandEncoder,
+        target: &TextureView,
+        vertex_count: u32,
+    ) {
+        if vertex_count == 0 {
+            return;
+        }
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Gizmo Render Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        render_pass.set_viewport(
+            self.bounds.x,
+            self.bounds.y,
+            self.bounds.width,
+            self.bounds.height,
+            0.0,
+            1.0,
+        );
+
+        render_pass.set_pipeline(&self.gizmo_pipeline);
+        render_pass.set_bind_group(0, &self.gizmo_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.gizmo_vertex_buffer.slice(..));
+        render_pass.draw(0..vertex_count, 0..1);
     }
 }
 

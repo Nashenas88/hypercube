@@ -1,3 +1,5 @@
 # math.rs
 
 CPU-side 4D rotation matrices for the 6 rotation planes, generic `create_4d_plane_rotation`, 4D→3D perspective projection (`project_cube_point`). Also `decompose_so4`/`compose_so4`, an isoclinic (biquaternion) decomposition of an arbitrary `SO(4)` rotation matrix into a pair of unit quaternions - used to animate the 4D orientation back to identity via quaternion slerp, since a single plane rotation (`shortest_arc_plane`) can only align one vector, not undo a whole accumulated orientation.
+
+`orthogonal_complement_plane(u, v)` Gram-Schmidt-orthogonalizes the standard basis against an orthonormal rotation-plane pair to find its orthogonal complement - the **invariant plane** a rotation in `(u, v)` leaves fixed - used by `shader_widget.rs`'s rotation-axis gizmo to derive a static ring plane from a rotation that's actively sweeping. `mouse_delta_to_plane_angles` factors the sensitivity/sign conversion out of `process_4d_rotation` so the gizmo's drag-angle accumulation (`shader_widget::ActiveShiftDrag`) can't drift out of sync with the rotation `process_4d_rotation` itself applies.
