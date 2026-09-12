@@ -32,6 +32,11 @@
 //! `SolveError::Internal` instead. `solve` checks its own answer before
 //! returning it, so a bug surfaces as an error rather than a wrong solution.
 
+// The solver is derived from NdSolve.java in
+// http://superliminal.com/cube/cube.htm. Its license is in LICENSE-MC4D at
+// the root of the project. Also at
+// https://github.com/cutelyaware/magiccube4d/blob/master/LICENSE.md.
+
 mod coords;
 mod grid;
 mod native;

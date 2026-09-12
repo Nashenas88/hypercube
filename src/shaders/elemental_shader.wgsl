@@ -110,6 +110,9 @@ fn apply_highlight(color: vec3<f32>, coverage: f32, instance_index: u32, piece_s
     return color;
 }
 
+// Water shader derived from https://www.shadertoy.com/view/Ms2SD1 by TDM. It's licensed
+// under Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License.
+
 // Water: a bump-mapped sea surface applied per sticker facet rather than
 // vertex-displaced. Each of a face's 27 water stickers renders its own
 // independent-looking wave patch: the local UV domain is
@@ -869,6 +872,9 @@ fn dark_color(world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
     final_color = pow(final_color, vec3<f32>(0.4545));
     return final_color;
 }
+
+// Lightning code derived from https://www.shadertoy.com/view/dsXfDn
+// by MonsterMan for the lightning stikes.
 
 // Lightning: dark metallic cube surface carrying continuous 3D domain-warped
 // arcs plus separate random per-face flash strikes. Each of a face's 27
@@ -1783,6 +1789,10 @@ fn fs_light_depth(in: VertexOutput) -> @builtin(frag_depth) f32 {
 
     return sticker_local_to_frag_depth(anchor.world_center, to_world, march.hit_position);
 }
+
+// Ice shader derived from https://www.shadertoy.com/view/MscXzn by Sébastien Bérubé (Bers). It is
+// licensed under Creative Commons Non-commercial (NC) license.
+// Assuming 4.0 based on date of publication (2014-2016).
 
 // Ice: a raymarched glass cube with real refraction and reflection, ported
 // from a self-contained source scene - its own orbiting camera, its own
