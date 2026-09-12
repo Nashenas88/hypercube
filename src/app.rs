@@ -382,6 +382,9 @@ pub(crate) enum Message {
     Quit,
     OpenAbout,
     CloseAbout,
+    /// Opens a license/attribution URL from the About dialog in the
+    /// system's default browser.
+    OpenUrl(&'static str),
     /// Target of the Puzzle menu's inert spacer rows (`menu_layout::puzzle_items`).
     NoOp,
 }
@@ -680,6 +683,11 @@ impl HypercubeApp {
             }
             Message::CloseAbout => {
                 self.about_open = false;
+            }
+            Message::OpenUrl(url) => {
+                if let Err(err) = open::that(url) {
+                    log::warn!("Failed to open {url}: {err}");
+                }
             }
             Message::NoOp => {}
         }
@@ -1012,8 +1020,66 @@ impl HypercubeApp {
     }
 }
 
-/// The Help menu's "About" popup: version plus the mouse/keyboard control
-/// scheme.
+/// A clickable, link-styled button that opens `url` in the system's
+/// default browser via `Message::OpenUrl`.
+/// Text color for a `link_button`, changing on hover so a link reads as
+/// clickable both from its underline and from a color shift.
+///
+/// `extended_palette().primary.base.color` (the raw accent color) isn't
+/// vetted for contrast against any particular surface, so it can wash out
+/// against the About popup's `container::rounded_box` background
+/// (`background.weak.color`). `palette::readable` nudges it toward
+/// legibility against that exact background instead, and `palette::deviate`
+/// gives the hover state a visibly different, still-readable shade.
+fn link_button_style(
+    theme: &iced::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    use iced::theme::palette;
+
+    let extended = theme.extended_palette();
+    let readable_link =
+        palette::readable(extended.background.weak.color, extended.primary.base.color);
+    let color = match status {
+        iced::widget::button::Status::Hovered => palette::deviate(readable_link, 0.1),
+        _ => readable_link,
+    };
+
+    iced::widget::button::Style {
+        text_color: color,
+        ..iced::widget::button::Style::default()
+    }
+}
+
+fn link_button<'a>(label: &'static str, url: &'static str) -> Element<'a, Message> {
+    let underlined_label = iced::widget::text::Rich::<(), Message>::with_spans([
+        iced::widget::text::Span::new(label).underline(true),
+    ])
+    .size(14);
+
+    Button::new(underlined_label)
+        .padding(0)
+        .style(link_button_style)
+        .on_press(Message::OpenUrl(url))
+        .into()
+}
+
+/// One license/attribution entry: a line of descriptive text followed by
+/// its source and/or license link(s).
+fn license_entry<'a>(
+    description: &'static str,
+    links: impl IntoIterator<Item = Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Column::new()
+        .spacing(2)
+        .push(iced::widget::text(description))
+        .push(Row::with_children(links).spacing(12))
+        .into()
+}
+
+/// The Help menu's "About" popup: version, the mouse/keyboard control
+/// scheme, and license/attribution details for the project and the
+/// external code and assets it incorporates.
 fn about_modal<'a>() -> Element<'a, Message> {
     let content = Column::new()
         .spacing(10)
@@ -1039,14 +1105,64 @@ fn about_modal<'a>() -> Element<'a, Message> {
         .push(iced::widget::text(
             "Ctrl+S save puzzle, Ctrl+O load puzzle, Ctrl+Q quit.",
         ))
-        .push(iced::widget::text(
+        .push(iced::widget::rule::horizontal(1))
+        .push(license_entry(
+            "This project is dual-licensed under MIT or Apache 2.0.",
+            [
+                link_button("MIT", "https://opensource.org/license/mit"),
+                link_button("Apache 2.0", "https://www.apache.org/licenses/LICENSE-2.0"),
+            ],
+        ))
+        .push(license_entry(
             "Solver: a port of NdSolve by Don Hatch, from Magic Cube 4D by \
-             Melinda Green & Don Hatch - superliminal.com/cube/cube.htm",
+             Melinda Green & Don Hatch.",
+            [
+                link_button("Project page", "http://superliminal.com/cube/cube.htm"),
+                link_button(
+                    "License",
+                    "https://github.com/cutelyaware/magiccube4d/blob/master/LICENSE.md",
+                ),
+            ],
+        ))
+        .push(license_entry(
+            "Water shader by TDM, licensed under CC BY-NC-SA 3.0.",
+            [
+                link_button("Source", "https://www.shadertoy.com/view/Ms2SD1"),
+                link_button(
+                    "License",
+                    "https://creativecommons.org/licenses/by-nc-sa/3.0/legalcode.en",
+                ),
+            ],
+        ))
+        .push(license_entry(
+            "Ice shader by Sébastien Bérubé (Bers), licensed under CC BY-NC 4.0.",
+            [
+                link_button("Source", "https://www.shadertoy.com/view/MscXzn"),
+                link_button(
+                    "License",
+                    "https://creativecommons.org/licenses/by-nc/4.0/legalcode",
+                ),
+            ],
+        ))
+        .push(license_entry(
+            "Lightning shader by MonsterMan (no license stated).",
+            [link_button(
+                "Source",
+                "https://www.shadertoy.com/view/dsXfDn",
+            )],
+        ))
+        .push(license_entry(
+            "Skybox by Screaming Brain Studios, licensed under CC0.",
+            [link_button(
+                "Source",
+                "https://opengameart.org/content/cloudy-skyboxes-0",
+            )],
         ))
         .push(Button::new("Close").on_press(Message::CloseAbout));
 
-    let popup = iced::widget::container(content)
-        .width(420)
+    let popup = iced::widget::container(iced::widget::scrollable(content))
+        .width(480)
+        .max_height(560)
         .style(iced::widget::container::rounded_box);
 
     iced::widget::opaque(
