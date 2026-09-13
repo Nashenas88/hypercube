@@ -1422,7 +1422,6 @@ impl shader::Program<Message> for HypercubeShaderProgram {
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
         if self.reset_generation != state.reset_generation {
-            state.hypercube = Hypercube::solved();
             state.animating_move = None;
             state.animating_focus = None;
             state.active_shift_drag = None;
@@ -2988,12 +2987,13 @@ mod tests {
         }
     }
 
-    /// A bumped `reset_generation` must resolve the puzzle back to solved,
-    /// cancel any in-progress move animation, and request a redraw - the
-    /// mechanism a "Reset" button relies on to reach state owned by the
-    /// shader widget's `Program::State`.
+    /// A bumped `reset_generation` must leave the puzzle's piece arrangement
+    /// untouched, cancel any in-progress move animation, and request a
+    /// redraw - the mechanism a "Reset" button relies on to reach state
+    /// owned by the shader widget's `Program::State`. Reset only resets the
+    /// 4D orientation, not the puzzle.
     #[test]
-    fn reset_generation_mismatch_resets_hypercube_and_cancels_animation() {
+    fn reset_generation_mismatch_cancels_animation_without_resetting_hypercube() {
         let mut state = HypercubeShaderState::default();
         assert_eq!(state.reset_generation, 0);
 
@@ -3013,6 +3013,7 @@ mod tests {
             .hypercube
             .apply_move(facet.axis, facet.side_sign, facet.local_coords, angle);
         assert!(!state.hypercube.is_solved());
+        let expected_pieces = state.hypercube.pieces.clone();
         state.animating_move = Some(AnimatingMove {
             side_axis: facet.axis,
             side_sign: facet.side_sign,
@@ -3057,7 +3058,11 @@ mod tests {
         );
 
         assert!(action.is_some(), "reset must request a redraw");
-        assert!(state.hypercube.is_solved());
+        assert!(
+            !state.hypercube.is_solved(),
+            "reset must not touch the puzzle's piece arrangement, only its 4D orientation"
+        );
+        assert_eq!(state.hypercube.pieces, expected_pieces);
         assert!(state.animating_move.is_none());
         assert_eq!(state.reset_generation, 1);
         assert_eq!(
@@ -3068,7 +3073,7 @@ mod tests {
         );
         assert_eq!(
             bytemuck::cast_slice::<_, u8>(state.cached_sticker_instances.as_ref()),
-            bytemuck::cast_slice::<_, u8>(&generate_sticker_instances(&Hypercube::solved())),
+            bytemuck::cast_slice::<_, u8>(&generate_sticker_instances(&state.hypercube)),
         );
 
         // The 4D orientation must not snap instantly - it's handed off to
