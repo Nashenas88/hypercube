@@ -96,15 +96,6 @@ pub(crate) fn puzzle_items(revealed: bool, reveal_animating: bool, solving: bool
             message: Message::Reset,
             selected: false,
         },
-        MenuItem {
-            label: solve_button_label(solving).to_string(),
-            message: if solving {
-                Message::StopSolving
-            } else {
-                Message::Solve
-            },
-            selected: false,
-        },
         spacer_item(),
         MenuItem {
             label: "1 Random Move".to_string(),
@@ -124,6 +115,16 @@ pub(crate) fn puzzle_items(revealed: bool, reveal_animating: bool, solving: bool
         MenuItem {
             label: "Scramble".to_string(),
             message: Message::RandomMoves(SCRAMBLE_MOVE_COUNT),
+            selected: false,
+        },
+        spacer_item(),
+        MenuItem {
+            label: solve_button_label(solving).to_string(),
+            message: if solving {
+                Message::StopSolving
+            } else {
+                Message::Solve
+            },
             selected: false,
         },
         spacer_item(),
@@ -166,11 +167,11 @@ mod tests {
     #[test]
     fn solve_item_pairs_its_label_with_its_message() {
         let idle = puzzle_items(false, false, false);
-        assert_eq!(idle[1].label, "Solve");
-        assert!(matches!(idle[1].message, Message::Solve));
+        assert_eq!(idle[7].label, "Solve");
+        assert!(matches!(idle[7].message, Message::Solve));
 
         let solving = puzzle_items(false, false, true);
-        assert_eq!(solving[1].label, "Stop Solving");
-        assert!(matches!(solving[1].message, Message::StopSolving));
+        assert_eq!(solving[7].label, "Stop Solving");
+        assert!(matches!(solving[7].message, Message::StopSolving));
     }
 }
