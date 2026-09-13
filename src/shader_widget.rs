@@ -200,23 +200,23 @@ const GIZMO_BAND_COUNT: usize = 4;
 /// progresses (see `gizmo_torus_vertices`'s doc comment).
 const GIZMO_MARKER_COUNT: usize = 4;
 /// Radius of a field-loop marker's centerline circle.
-const GIZMO_MARKER_RADIUS: f32 = 0.075;
+const GIZMO_MARKER_RADIUS: f32 = 0.375;
 /// Number of angular samples around each field-loop marker's centerline.
 const GIZMO_MARKER_SEGMENTS: usize = 12;
 /// Number of angular samples around a marker tube's cross-section.
 const GIZMO_MARKER_TUBE_SEGMENTS: usize = 6;
 /// Minor radius of a marker's tube cross-section.
-const GIZMO_MARKER_TUBE_MINOR_RADIUS: f32 = 0.0075;
+const GIZMO_MARKER_TUBE_MINOR_RADIUS: f32 = 0.0375;
 /// Number of small arrow marks evenly spaced around each field-loop
 /// marker's own circumference.
 const GIZMO_MARKER_ARROW_COUNT: usize = 3;
 /// Length of a marker arrow's cone, from its base to its tip.
-const GIZMO_ARROW_LENGTH: f32 = 0.0375;
+const GIZMO_ARROW_LENGTH: f32 = 0.1875;
 /// How far behind the arrow's anchor point its base sits, giving the cone
 /// visible depth rather than a flat fan.
-const GIZMO_ARROW_BACK_OFFSET: f32 = 0.01875;
+const GIZMO_ARROW_BACK_OFFSET: f32 = 0.09375;
 /// Radius of an arrow cone's circular base.
-const GIZMO_ARROW_BASE_RADIUS: f32 = 0.015625;
+const GIZMO_ARROW_BASE_RADIUS: f32 = 0.078125;
 /// Small angular offset used to numerically estimate the main ring's
 /// tangent direction (in already-projected 3D space) at a marker's position.
 const GIZMO_TANGENT_EPSILON: f32 = 0.01;
@@ -231,25 +231,35 @@ const GIZMO_RING_PHASE_OFFSET: f32 = std::f32::consts::FRAC_PI_4;
 /// ring is treated as not yet meaningfully rotating and is hidden.
 const GIZMO_MIN_DRAG_ANGLE: f32 = 1e-3;
 
-/// Alternating-hue band palette for the click-to-focus gizmo ring
-/// (`palette[0]` doubles as the flat color of its field-loop markers).
+/// Alternating-hue band palette for the click-to-focus gizmo ring. Fully
+/// opaque so the main ring itself reads as solid rather than see-through.
 const GIZMO_FOCUS_PALETTE: [[f32; 4]; GIZMO_BAND_COUNT] = [
-    [0.3, 0.85, 1.0, 0.55],
-    [0.1, 0.45, 0.9, 0.55],
-    [0.3, 0.85, 1.0, 0.55],
-    [0.1, 0.45, 0.9, 0.55],
+    [0.3, 0.85, 1.0, 1.0],
+    [0.1, 0.45, 0.9, 1.0],
+    [0.3, 0.85, 1.0, 1.0],
+    [0.1, 0.45, 0.9, 1.0],
 ];
-/// Alternating-hue band palette for the Shift+drag gizmo ring (`palette[0]`
-/// doubles as the flat color of its field-loop markers).
+/// Alternating-hue band palette for the Shift+drag gizmo ring. Fully opaque
+/// so the main ring itself reads as solid rather than see-through.
 const GIZMO_DRAG_PALETTE: [[f32; 4]; GIZMO_BAND_COUNT] = [
-    [1.0, 0.55, 0.15, 0.55],
-    [0.6, 0.4, 1.0, 0.55],
-    [1.0, 0.55, 0.15, 0.55],
-    [0.6, 0.4, 1.0, 0.55],
+    [1.0, 0.55, 0.15, 1.0],
+    [0.6, 0.4, 1.0, 1.0],
+    [1.0, 0.55, 0.15, 1.0],
+    [0.6, 0.4, 1.0, 1.0],
 ];
+/// Flat color for the click-to-focus ring's field-loop markers, deliberately
+/// distinct from both `GIZMO_FOCUS_PALETTE` hues (blue/cyan) so a marker's
+/// own ring is easy to tell apart from the main ring threading through it.
+const GIZMO_FOCUS_MARKER_COLOR: [f32; 4] = [1.0, 0.85, 0.15, 1.0];
+/// Flat color for the Shift+drag ring's field-loop markers, deliberately
+/// distinct from both `GIZMO_DRAG_PALETTE` hues (orange/purple) so a
+/// marker's own ring is easy to tell apart from the main ring threading
+/// through it.
+const GIZMO_DRAG_MARKER_COLOR: [f32; 4] = [0.2, 1.0, 0.6, 1.0];
 /// Shared bright accent color for marker arrows, distinct from either ring
-/// palette so it reads clearly against the translucent tube.
-const GIZMO_ARROW_COLOR: [f32; 4] = [0.95, 0.95, 1.0, 0.9];
+/// palette or marker color so it reads clearly against the marker tube.
+/// Fully opaque, like the rest of the gizmo, now that it writes real depth.
+const GIZMO_ARROW_COLOR: [f32; 4] = [0.95, 0.95, 1.0, 1.0];
 
 /// Component-wise linear interpolation between two RGBA colors, used to
 /// make the main ring's band coloring a continuous function of rotation
@@ -260,11 +270,40 @@ fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 }
 
 /// Builds one `GizmoVertex`, converting a `Point3` to the plain `[f32; 3]`
-/// the GPU buffer wants.
+/// the GPU buffer wants. `normal` starts zeroed and is filled in afterward
+/// by `recompute_flat_normals`, once every triangle's three corners are
+/// known.
 fn gizmo_vertex(p: Point3<f32>, color: [f32; 4]) -> GizmoVertex {
     GizmoVertex {
         position: [p.x, p.y, p.z],
+        normal: [0.0; 3],
         color,
+    }
+}
+
+/// Fills in each triangle's flat face normal (the cross product of two of
+/// its edges) across every consecutive triplet of `vertices`, which -
+/// `gizmo_torus_vertices` only ever emitting `TriangleList` geometry with no
+/// index buffer - are always exactly one triangle's three corners. Flat
+/// shading (rather than a smooth per-vertex normal averaged across
+/// neighboring triangles) keeps this a simple, local computation with no
+/// need to know a vertex's neighbors, and reads fine at the ring/tube's own
+/// small angular step size.
+fn recompute_flat_normals(vertices: &mut [GizmoVertex]) {
+    for triangle in vertices.as_chunks_mut::<3>().0 {
+        let p0 = Vector3::from(triangle[0].position);
+        let p1 = Vector3::from(triangle[1].position);
+        let p2 = Vector3::from(triangle[2].position);
+        let raw_normal = (p1 - p0).cross(&(p2 - p0));
+        let normal = if raw_normal.norm() > 1e-8 {
+            raw_normal.normalize()
+        } else {
+            Vector3::z()
+        };
+        let normal: [f32; 3] = normal.into();
+        for vertex in triangle {
+            vertex.normal = normal;
+        }
     }
 }
 
@@ -334,7 +373,10 @@ fn gizmo_push_quad(
 /// perpendicular to the main ring's own tangent, like the loops of a
 /// magnetic field around a current-carrying wire - sit at fixed, equidistant
 /// positions along the ring (they do not travel around it) and carry a flat,
-/// non-banded `marker_color`. Each carries `GIZMO_MARKER_ARROW_COUNT` small
+/// non-banded `marker_color` deliberately distinct from the main ring's own
+/// band colors (see `GIZMO_FOCUS_MARKER_COLOR`/`GIZMO_DRAG_MARKER_COLOR`), so
+/// it's clear at a glance which tube is which even where they cross. Each
+/// carries `GIZMO_MARKER_ARROW_COUNT` small
 /// solid 3D arrow cones that creep around *that marker's own* circumference
 /// only as `phase_angle` advances, always pointing tangentially in the
 /// actual direction of rotation (reversing if it reverses).
@@ -351,6 +393,8 @@ fn gizmo_torus_vertices(
     out: &mut Vec<GizmoVertex>,
 ) {
     use std::f32::consts::TAU;
+
+    let start = out.len();
 
     let identity = Matrix4::identity();
     let project = |angle: f32, radius: f32| -> Point3<f32> {
@@ -518,6 +562,8 @@ fn gizmo_torus_vertices(
             }
         }
     }
+
+    recompute_flat_normals(&mut out[start..]);
 }
 
 /// Builds the GPU instance list for the current frame. Piece state is
@@ -1122,14 +1168,15 @@ impl shader::Primitive for HypercubePrimitive {
         target: &wgpu::TextureView,
         _clip_bounds: &Rectangle<u32>,
     ) {
+        // The rotation-axis gizmo, if any, is drawn inside `pipeline.render`
+        // itself now (right after the opaque hypercube pass, before the
+        // translucent Fire/Ice/Light/Dirt batches), so it gets real shading
+        // and depth instead of compositing on top as a flat overlay.
         pipeline.render(encoder, &self.visible_faces);
         pipeline.composite(encoder, target);
 
         // Render transparent debug AABBs
         pipeline.render_debug_aabb(encoder, target, self.debug_instances.len() as u32);
-
-        // Render the rotation-axis gizmo, if any, on top of everything else.
-        pipeline.render_gizmo(encoder, target, self.gizmo_vertices.len() as u32);
     }
 }
 
@@ -1728,7 +1775,7 @@ impl HypercubeShaderProgram {
                 phase_angle,
                 ring_radius,
                 GIZMO_FOCUS_PALETTE,
-                GIZMO_FOCUS_PALETTE[0],
+                GIZMO_FOCUS_MARKER_COLOR,
                 GIZMO_ARROW_COLOR,
                 self.viewer_distance,
                 &mut vertices,
@@ -1747,7 +1794,7 @@ impl HypercubeShaderProgram {
                     phase_angle,
                     ring_radius,
                     GIZMO_DRAG_PALETTE,
-                    GIZMO_DRAG_PALETTE[0],
+                    GIZMO_DRAG_MARKER_COLOR,
                     GIZMO_ARROW_COLOR,
                     self.viewer_distance,
                     &mut vertices,
@@ -4062,6 +4109,36 @@ mod tests {
         assert!((gizmo_ring_radius(0.0, 1.0) - 1.0).abs() < 1e-6);
         assert!((gizmo_ring_radius(0.45, 2.0) - 2.45).abs() < 1e-6);
         assert!((gizmo_ring_radius(1.5, 2.0) - 3.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn recompute_flat_normals_matches_cross_product_and_is_shared_across_a_triangles_corners() {
+        let mut vertices = vec![
+            gizmo_vertex(Point3::new(0.0, 0.0, 0.0), [0.0; 4]),
+            gizmo_vertex(Point3::new(1.0, 0.0, 0.0), [0.0; 4]),
+            gizmo_vertex(Point3::new(0.0, 1.0, 0.0), [0.0; 4]),
+        ];
+
+        recompute_flat_normals(&mut vertices);
+
+        for vertex in &vertices {
+            assert!((Vector3::from(vertex.normal) - Vector3::z()).norm() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn recompute_flat_normals_falls_back_to_z_for_a_degenerate_triangle() {
+        let mut vertices = vec![
+            gizmo_vertex(Point3::new(0.0, 0.0, 0.0), [0.0; 4]),
+            gizmo_vertex(Point3::new(1.0, 0.0, 0.0), [0.0; 4]),
+            gizmo_vertex(Point3::new(2.0, 0.0, 0.0), [0.0; 4]),
+        ];
+
+        recompute_flat_normals(&mut vertices);
+
+        for vertex in &vertices {
+            assert!((Vector3::from(vertex.normal) - Vector3::z()).norm() < 1e-6);
+        }
     }
 }
 
