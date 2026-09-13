@@ -182,14 +182,13 @@ pub(crate) const SECONDARY_FACE_GAP_4D: f32 = 2.0;
 
 /// Number of angular samples around the rotation-axis gizmo's main torus.
 const GIZMO_RING_SEGMENTS: usize = 48;
-/// Radius of the gizmo ring's centerline, in the puzzle's own 4D/3D unit
-/// scale (the hypercube itself spans roughly [-1, 1]).
-const GIZMO_RING_RADIUS: f32 = 1.6;
 /// Minor radius of the main ring's tube cross-section - giving the ring
 /// real 3D thickness is what keeps it from ever collapsing to a zero-width
 /// line when its invariant plane happens to include the camera's own
 /// viewing axis (see this module's rotation-axis-gizmo doc comment).
-const GIZMO_RING_TUBE_MINOR_RADIUS: f32 = 0.05;
+/// Calibrated for the ring's default radius of `1.0` (see
+/// `gizmo_ring_radius`); scales with it only by eye, not automatically.
+const GIZMO_RING_TUBE_MINOR_RADIUS: f32 = 0.03;
 /// Number of angular samples around the main ring's tube cross-section.
 const GIZMO_RING_TUBE_SEGMENTS: usize = 8;
 /// Number of alternating-hue color bands running around the main ring.
@@ -201,26 +200,33 @@ const GIZMO_BAND_COUNT: usize = 4;
 /// progresses (see `gizmo_torus_vertices`'s doc comment).
 const GIZMO_MARKER_COUNT: usize = 4;
 /// Radius of a field-loop marker's centerline circle.
-const GIZMO_MARKER_RADIUS: f32 = 0.12;
+const GIZMO_MARKER_RADIUS: f32 = 0.075;
 /// Number of angular samples around each field-loop marker's centerline.
 const GIZMO_MARKER_SEGMENTS: usize = 12;
 /// Number of angular samples around a marker tube's cross-section.
 const GIZMO_MARKER_TUBE_SEGMENTS: usize = 6;
 /// Minor radius of a marker's tube cross-section.
-const GIZMO_MARKER_TUBE_MINOR_RADIUS: f32 = 0.012;
+const GIZMO_MARKER_TUBE_MINOR_RADIUS: f32 = 0.0075;
 /// Number of small arrow marks evenly spaced around each field-loop
 /// marker's own circumference.
 const GIZMO_MARKER_ARROW_COUNT: usize = 3;
 /// Length of a marker arrow's cone, from its base to its tip.
-const GIZMO_ARROW_LENGTH: f32 = 0.06;
+const GIZMO_ARROW_LENGTH: f32 = 0.0375;
 /// How far behind the arrow's anchor point its base sits, giving the cone
 /// visible depth rather than a flat fan.
-const GIZMO_ARROW_BACK_OFFSET: f32 = 0.03;
+const GIZMO_ARROW_BACK_OFFSET: f32 = 0.01875;
 /// Radius of an arrow cone's circular base.
-const GIZMO_ARROW_BASE_RADIUS: f32 = 0.025;
+const GIZMO_ARROW_BASE_RADIUS: f32 = 0.015625;
 /// Small angular offset used to numerically estimate the main ring's
 /// tangent direction (in already-projected 3D space) at a marker's position.
 const GIZMO_TANGENT_EPSILON: f32 = 0.01;
+/// Angular offset applied to every major-angle sample of the main ring and
+/// its markers, so neither lands on `0, π/2, π, 3π/2` - which
+/// `orthogonal_complement_plane`'s standard-basis Gram-Schmidt tends to
+/// align with other faces' own center stickers for an axis-aligned
+/// rotation plane (any click-to-focus animation starting from the identity
+/// orientation), hiding the ring/markers behind that opaque geometry.
+const GIZMO_RING_PHASE_OFFSET: f32 = std::f32::consts::FRAC_PI_4;
 /// Below this accumulated drag angle (radians), a Shift+drag's combined
 /// ring is treated as not yet meaningfully rotating and is hidden.
 const GIZMO_MIN_DRAG_ANGLE: f32 = 1e-3;
@@ -244,6 +250,14 @@ const GIZMO_DRAG_PALETTE: [[f32; 4]; GIZMO_BAND_COUNT] = [
 /// Shared bright accent color for marker arrows, distinct from either ring
 /// palette so it reads clearly against the translucent tube.
 const GIZMO_ARROW_COLOR: [f32; 4] = [0.95, 0.95, 1.0, 0.9];
+
+/// Component-wise linear interpolation between two RGBA colors, used to
+/// make the main ring's band coloring a continuous function of rotation
+/// progress (see `gizmo_torus_vertices`'s `band_color`) instead of a hard
+/// step that pops between palette entries as `phase_angle` advances.
+fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
+}
 
 /// Builds one `GizmoVertex`, converting a `Point3` to the plain `[f32; 3]`
 /// the GPU buffer wants.
@@ -329,6 +343,7 @@ fn gizmo_torus_vertices(
     center: Vector4<f32>,
     (u, v): GizmoPlane,
     phase_angle: f32,
+    ring_radius: f32,
     palette: [[f32; 4]; GIZMO_BAND_COUNT],
     marker_color: [f32; 4],
     arrow_color: [f32; 4],
@@ -350,8 +365,9 @@ fn gizmo_torus_vertices(
     // tube and by each marker's outer (fixed) positioning, which is exactly
     // this same frame evaluated at that marker's own fixed angle.
     let ring_frame = |a: f32| -> Option<(Point3<f32>, Vector3<f32>, Vector3<f32>)> {
-        let center_3d = project(a, GIZMO_RING_RADIUS);
-        let ahead_3d = project(a + GIZMO_TANGENT_EPSILON, GIZMO_RING_RADIUS);
+        let a = a + GIZMO_RING_PHASE_OFFSET;
+        let center_3d = project(a, ring_radius);
+        let ahead_3d = project(a + GIZMO_TANGENT_EPSILON, ring_radius);
         let tangent = ahead_3d - center_3d;
         let radial = center_3d - ring_center_3d;
         let binormal = tangent.cross(&radial);
@@ -370,9 +386,10 @@ fn gizmo_torus_vertices(
         };
     let band_color = |beta: f32| -> [f32; 4] {
         let band_width = TAU / GIZMO_BAND_COUNT as f32;
-        let offset = (beta - phase_angle).rem_euclid(TAU);
-        let band_index = (offset / band_width) as usize % GIZMO_BAND_COUNT;
-        palette[band_index]
+        let raw = (beta - phase_angle).rem_euclid(TAU) / band_width;
+        let band_index = raw.floor() as usize % GIZMO_BAND_COUNT;
+        let next_index = (band_index + 1) % GIZMO_BAND_COUNT;
+        lerp_color(palette[band_index], palette[next_index], raw.fract())
     };
 
     for i in 0..GIZMO_RING_SEGMENTS {
@@ -1671,7 +1688,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             } else {
                 Vec::new()
             },
-            gizmo_vertices: self.build_gizmo_vertices(state),
+            gizmo_vertices: self.build_gizmo_vertices(state, face_gap, face_gap_4d),
             elapsed_seconds: state.elapsed_seconds,
             snapshot_request: state.pending_snapshot.take(),
         }
@@ -1685,8 +1702,17 @@ impl HypercubeShaderProgram {
     /// deliberately limited to those two interactions (see `AnimatingFocus`/
     /// `ActiveShiftDrag`'s docs): puzzle moves and the Reset animation have
     /// no single well-defined 4D rotation plane to derive a ring from.
-    fn build_gizmo_vertices(&self, state: &HypercubeShaderState) -> Vec<GizmoVertex> {
+    /// `face_gap`/`face_gap_4d` are the same (reveal-override-resolved)
+    /// values `draw()` already computed for this frame's stickers, used to
+    /// size the ring via `gizmo_ring_radius`.
+    fn build_gizmo_vertices(
+        &self,
+        state: &HypercubeShaderState,
+        face_gap: f32,
+        face_gap_4d: f32,
+    ) -> Vec<GizmoVertex> {
         let mut vertices = Vec::new();
+        let ring_radius = gizmo_ring_radius(face_gap, face_gap_4d);
 
         if let Some(animating) = &state.animating_focus {
             let t = if animating.duration.is_zero() {
@@ -1694,12 +1720,13 @@ impl HypercubeShaderProgram {
             } else {
                 (animating.elapsed.as_secs_f32() / animating.duration.as_secs_f32()).clamp(0.0, 1.0)
             };
-            let phase_angle = animating.total_angle * ease(t);
-            let invariant_plane = orthogonal_complement_plane(animating.plane.0, animating.plane.1);
+            let (invariant_plane, phase_angle) =
+                focus_plane_and_phase(animating.plane, animating.total_angle, t);
             gizmo_torus_vertices(
                 Vector4::zeros(),
                 invariant_plane,
                 phase_angle,
+                ring_radius,
                 GIZMO_FOCUS_PALETTE,
                 GIZMO_FOCUS_PALETTE[0],
                 GIZMO_ARROW_COLOR,
@@ -1718,6 +1745,7 @@ impl HypercubeShaderProgram {
                     Vector4::zeros(),
                     invariant_plane,
                     phase_angle,
+                    ring_radius,
                     GIZMO_DRAG_PALETTE,
                     GIZMO_DRAG_PALETTE[0],
                     GIZMO_ARROW_COLOR,
@@ -1731,6 +1759,61 @@ impl HypercubeShaderProgram {
     }
 }
 
+/// The gizmo ring's radius: half the on-screen distance between two
+/// opposite face centers (e.g. green/blue) at the *current* gap settings.
+/// Working through `math::project_face_point`'s exact formula for one
+/// axis-aligned side face under an identity rotation (the same convention
+/// `gizmo_torus_vertices` projects its own ring with): the 4D
+/// depth-preserving push scales that face's own coordinate to exactly
+/// `-face_gap_4d` (from `-1` at `face_gap_4d == 1.0`, i.e. no push), the
+/// perspective scale stays exactly `1` throughout (`w` never leaves `0`),
+/// and the 3D push then adds `-face_gap` along that same unit-length
+/// direction - so the face's anchor sits at `-(face_gap + face_gap_4d)` and
+/// its opposite (the exact negation) at `+(face_gap + face_gap_4d)`, twice
+/// this radius apart.
+fn gizmo_ring_radius(face_gap: f32, face_gap_4d: f32) -> f32 {
+    face_gap + face_gap_4d
+}
+
+/// Recovers the one bit of rotation handedness `orthogonal_complement_plane`
+/// discards (it's proven sign-invariant in its first argument), so
+/// `gizmo_torus_vertices`'s `phase_angle` - and therefore its spinning
+/// bands and marker arrows, both defined purely in terms of the returned
+/// invariant plane `(p, q)` - tracks the actual direction of the `(a, b)`
+/// rotation (a positive `angle_magnitude` rotates `a` toward `b` via
+/// `create_4d_plane_rotation(a, b, angle_magnitude)`) instead of always
+/// reading positive. `(a, b, p, q)` is an orthonormal 4-frame, so its
+/// determinant is always exactly +-1; flipping `a`'s sign flips the
+/// determinant but leaves `(p, q)` unchanged, which is exactly the missing
+/// signal.
+fn oriented_phase_angle(
+    a: Vector4<f32>,
+    b: Vector4<f32>,
+    angle_magnitude: f32,
+    (p, q): GizmoPlane,
+) -> f32 {
+    let sign = if Matrix4::from_columns(&[a, b, p, q]).determinant() < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    sign * angle_magnitude
+}
+
+/// Computes the click-to-focus gizmo's invariant plane and signed phase
+/// angle from an in-progress `AnimatingFocus`'s own rotation plane and
+/// current eased progress. Mirrors `combined_drag_plane_and_phase` for the
+/// focus case: `shortest_arc_plane`'s `total_angle` (an `acos`, always
+/// `>= 0`) can't by itself carry which way the puzzle is actually turning,
+/// so `oriented_phase_angle` recovers it from the full `(plane.0, plane.1,
+/// invariant_plane)` orthonormal 4-frame's orientation.
+fn focus_plane_and_phase(plane: GizmoPlane, total_angle: f32, t: f32) -> (GizmoPlane, f32) {
+    let invariant_plane = orthogonal_complement_plane(plane.0, plane.1);
+    let phase_angle =
+        oriented_phase_angle(plane.0, plane.1, total_angle * ease(t), invariant_plane);
+    (invariant_plane, phase_angle)
+}
+
 /// Combines a Shift+drag's two independent component rotations
 /// (`process_4d_rotation`'s horizontal camera-right/W and vertical
 /// camera-up/W planes) into the single ring "whose angle is determined by
@@ -1740,13 +1823,9 @@ impl HypercubeShaderProgram {
 /// generators add linearly since `right_4d ⊥ up_4d`). Returns `None` once
 /// that combined angle is too small to show meaningfully (`GIZMO_MIN_DRAG_ANGLE`).
 ///
-/// `orthogonal_complement_plane` is sign-invariant in its first argument, so
-/// only `phase_angle`'s sign (not the returned plane's) carries the drag's
-/// direction - taken from whichever component has accumulated the larger
-/// magnitude so far. A drag along a single axis (the other component
-/// exactly zero) degenerates to exactly that axis's own plane and angle,
-/// since the zero component contributes nothing to `combined_4d` and
-/// `dominant_sign` reduces to the nonzero component's own sign.
+/// A drag along a single axis (the other component exactly zero)
+/// degenerates to exactly that axis's own plane and angle, since the zero
+/// component contributes nothing to `combined_4d`.
 fn combined_drag_plane_and_phase(
     drag: ActiveShiftDrag,
     right_4d: Vector4<f32>,
@@ -1754,31 +1833,15 @@ fn combined_drag_plane_and_phase(
 ) -> Option<(GizmoPlane, f32)> {
     let w_axis = Vector4::new(0.0, 0.0, 0.0, 1.0);
 
-    let dominant_sign = if drag.horizontal_angle.abs() >= drag.vertical_angle.abs() {
-        if drag.horizontal_angle < 0.0 {
-            -1.0
-        } else {
-            1.0
-        }
-    } else if drag.vertical_angle < 0.0 {
-        -1.0
-    } else {
-        1.0
-    };
-    let phase_angle =
-        dominant_sign * (drag.horizontal_angle.powi(2) + drag.vertical_angle.powi(2)).sqrt();
-
-    if phase_angle.abs() <= GIZMO_MIN_DRAG_ANGLE {
+    let angle_magnitude = (drag.horizontal_angle.powi(2) + drag.vertical_angle.powi(2)).sqrt();
+    if angle_magnitude <= GIZMO_MIN_DRAG_ANGLE {
         return None;
     }
 
-    let combined_4d = (dominant_sign
-        * (drag.horizontal_angle * right_4d + drag.vertical_angle * up_4d))
-        .normalize();
-    Some((
-        orthogonal_complement_plane(combined_4d, w_axis),
-        phase_angle,
-    ))
+    let combined_4d = (drag.horizontal_angle * right_4d + drag.vertical_angle * up_4d).normalize();
+    let invariant_plane = orthogonal_complement_plane(combined_4d, w_axis);
+    let phase_angle = oriented_phase_angle(combined_4d, w_axis, angle_magnitude, invariant_plane);
+    Some((invariant_plane, phase_angle))
 }
 
 impl HypercubeShaderProgram {
@@ -3938,6 +4001,67 @@ mod tests {
             vertical_angle: 0.0,
         };
         assert!(combined_drag_plane_and_phase(drag, right_4d, up_4d).is_none());
+    }
+
+    #[test]
+    fn oriented_phase_angle_flips_sign_when_first_argument_negates() {
+        let u = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        let complement = orthogonal_complement_plane(u, w);
+
+        let positive = oriented_phase_angle(u, w, 0.7, complement);
+        let negative = oriented_phase_angle(-u, w, 0.7, complement);
+
+        assert!((positive + negative).abs() < 1e-6);
+        assert!(positive.abs() > 1e-6);
+    }
+
+    /// Encodes the reported bug directly: from the default (identity)
+    /// orientation, centering one face of an opposite pair (e.g. green)
+    /// must creep its focus gizmo's arrows in the exact reverse direction
+    /// from centering the other (blue), since `create_4d_plane_rotation(-u,
+    /// v, angle) == create_4d_plane_rotation(u, v, -angle)` and the two
+    /// faces' normals are exact negations of each other.
+    #[test]
+    fn focus_animation_for_opposite_faces_has_opposite_phase_sign() {
+        let target = FACE_CENTERS[0];
+        for &(a, b) in &[(1usize, 6usize), (2, 5), (3, 4)] {
+            let (u_a, v_a, angle_a) = shortest_arc_plane(FACE_CENTERS[a], target);
+            let (u_b, v_b, angle_b) = shortest_arc_plane(FACE_CENTERS[b], target);
+
+            let (_, phase_a) = focus_plane_and_phase((u_a, v_a), angle_a, 1.0);
+            let (_, phase_b) = focus_plane_and_phase((u_b, v_b), angle_b, 1.0);
+
+            assert!(
+                (phase_a + phase_b).abs() < 1e-5,
+                "faces {a}/{b}: expected opposite phase angles, got {phase_a} and {phase_b}"
+            );
+            assert!(
+                phase_a.abs() > 1e-5,
+                "faces {a}/{b}: phase angle collapsed to zero"
+            );
+        }
+    }
+
+    #[test]
+    fn lerp_color_is_identity_at_endpoints_and_averages_at_midpoint() {
+        let a = [0.0, 0.2, 0.4, 1.0];
+        let b = [1.0, 0.8, 0.0, 0.5];
+
+        assert_eq!(lerp_color(a, b, 0.0), a);
+        assert_eq!(lerp_color(a, b, 1.0), b);
+
+        let mid = lerp_color(a, b, 0.5);
+        for i in 0..4 {
+            assert!((mid[i] - (a[i] + b[i]) / 2.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn gizmo_ring_radius_matches_face_gap_plus_face_gap_4d() {
+        assert!((gizmo_ring_radius(0.0, 1.0) - 1.0).abs() < 1e-6);
+        assert!((gizmo_ring_radius(0.45, 2.0) - 2.45).abs() < 1e-6);
+        assert!((gizmo_ring_radius(1.5, 2.0) - 3.5).abs() < 1e-6);
     }
 }
 
