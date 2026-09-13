@@ -272,7 +272,8 @@ fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 /// Builds one `GizmoVertex`, converting a `Point3` to the plain `[f32; 3]`
 /// the GPU buffer wants. `normal` starts zeroed and is filled in afterward
 /// by `recompute_flat_normals`, once every triangle's three corners are
-/// known.
+/// known - used only for the arrow cones' faceted geometry, where a flat
+/// per-triangle normal is the desired look.
 fn gizmo_vertex(p: Point3<f32>, color: [f32; 4]) -> GizmoVertex {
     GizmoVertex {
         position: [p.x, p.y, p.z],
@@ -281,14 +282,30 @@ fn gizmo_vertex(p: Point3<f32>, color: [f32; 4]) -> GizmoVertex {
     }
 }
 
+/// Builds one `GizmoVertex` with an already-known, real per-vertex normal -
+/// used for the main ring's and markers' tube surfaces, which are smooth
+/// (not faceted) and so get a true smooth-shaded normal computed
+/// analytically at generation time (see `gizmo_torus_vertices`'s
+/// `ring_tube_normal`/marker equivalent) rather than the flat per-triangle
+/// normal `recompute_flat_normals` derives for the arrow cones.
+fn gizmo_vertex_with_normal(p: Point3<f32>, normal: Vector3<f32>, color: [f32; 4]) -> GizmoVertex {
+    GizmoVertex {
+        position: [p.x, p.y, p.z],
+        normal: normal.into(),
+        color,
+    }
+}
+
 /// Fills in each triangle's flat face normal (the cross product of two of
 /// its edges) across every consecutive triplet of `vertices`, which -
 /// `gizmo_torus_vertices` only ever emitting `TriangleList` geometry with no
-/// index buffer - are always exactly one triangle's three corners. Flat
-/// shading (rather than a smooth per-vertex normal averaged across
-/// neighboring triangles) keeps this a simple, local computation with no
-/// need to know a vertex's neighbors, and reads fine at the ring/tube's own
-/// small angular step size.
+/// index buffer - are always exactly one triangle's three corners. Used only
+/// for the arrow cones' faceted geometry: the ring and marker tubes instead
+/// get a real smooth per-vertex normal computed analytically as they're
+/// built (see `gizmo_torus_vertices`'s `ring_tube_normal` and its marker
+/// equivalent), since they're true curved tube surfaces where flat shading
+/// would read as faceted rather than round; a low-poly cone, by contrast,
+/// is meant to look faceted.
 fn recompute_flat_normals(vertices: &mut [GizmoVertex]) {
     for triangle in vertices.as_chunks_mut::<3>().0 {
         let p0 = Vector3::from(triangle[0].position);
@@ -309,27 +326,33 @@ fn recompute_flat_normals(vertices: &mut [GizmoVertex]) {
 
 /// Appends a two-triangle quad spanning corners `(p00, p01, p10, p11)`
 /// (indexed by two independent parameters, e.g. a major/minor angle pair),
-/// with each corner's own color - shared by the main ring's and markers'
-/// tube geometry.
+/// each corner carrying its own already-known smooth normal and color -
+/// shared by the main ring's and markers' tube geometry, both true tube
+/// surfaces where a real per-vertex normal (rather than a flat per-triangle
+/// one) gives a smooth-shaded, non-faceted look.
 #[allow(clippy::too_many_arguments)]
 fn gizmo_push_quad(
     out: &mut Vec<GizmoVertex>,
     p00: Point3<f32>,
+    n00: Vector3<f32>,
     c00: [f32; 4],
     p10: Point3<f32>,
+    n10: Vector3<f32>,
     c10: [f32; 4],
     p01: Point3<f32>,
+    n01: Vector3<f32>,
     c01: [f32; 4],
     p11: Point3<f32>,
+    n11: Vector3<f32>,
     c11: [f32; 4],
 ) {
-    out.push(gizmo_vertex(p00, c00));
-    out.push(gizmo_vertex(p10, c10));
-    out.push(gizmo_vertex(p01, c01));
+    out.push(gizmo_vertex_with_normal(p00, n00, c00));
+    out.push(gizmo_vertex_with_normal(p10, n10, c10));
+    out.push(gizmo_vertex_with_normal(p01, n01, c01));
 
-    out.push(gizmo_vertex(p01, c01));
-    out.push(gizmo_vertex(p10, c10));
-    out.push(gizmo_vertex(p11, c11));
+    out.push(gizmo_vertex_with_normal(p01, n01, c01));
+    out.push(gizmo_vertex_with_normal(p10, n10, c10));
+    out.push(gizmo_vertex_with_normal(p11, n11, c11));
 }
 
 /// Appends the rotation-axis gizmo's main-ring-torus + field-loop-marker
@@ -394,8 +417,6 @@ fn gizmo_torus_vertices(
 ) {
     use std::f32::consts::TAU;
 
-    let start = out.len();
-
     let identity = Matrix4::identity();
     let project = |angle: f32, radius: f32| -> Point3<f32> {
         let point_4d = center + (u * angle.cos() + v * angle.sin()) * radius;
@@ -422,12 +443,36 @@ fn gizmo_torus_vertices(
         }
         Some((center_3d, radial.normalize(), binormal.normalize()))
     };
+    // The unit radial direction from the tube's centerline to the surface
+    // point at minor angle `beta` (`radial`/`binormal` are already an
+    // orthonormal pair, so this needs no further normalizing) - used to
+    // place the point itself.
+    let ring_tube_offset = |(_, radial, binormal): (Point3<f32>, Vector3<f32>, Vector3<f32>),
+                            beta: f32|
+     -> Vector3<f32> { radial * beta.cos() + binormal * beta.sin() };
     let ring_tube_point =
-        |(center_3d, radial, binormal): (Point3<f32>, Vector3<f32>, Vector3<f32>),
-         beta: f32|
-         -> Point3<f32> {
-            center_3d + (radial * beta.cos() + binormal * beta.sin()) * GIZMO_RING_TUBE_MINOR_RADIUS
+        |frame: (Point3<f32>, Vector3<f32>, Vector3<f32>), beta: f32| -> Point3<f32> {
+            frame.0 + ring_tube_offset(frame, beta) * GIZMO_RING_TUBE_MINOR_RADIUS
         };
+    // The tube surface's true shading normal at that same point - the
+    // *negation* of `ring_tube_offset`, not `ring_tube_offset` itself.
+    // `gizmo_push_quad`'s two triangles are wound `(p00, p10, p01)`/`(p01,
+    // p10, p11)`, i.e. mesh-winding order (major-angle edge first,
+    // minor-angle edge second); working out
+    // `cross(∂p/∂a, ∂p/∂beta)` for that winding against this tube's own
+    // `(tangent, radial, binormal)` frame (`binormal = tangent × radial`)
+    // gives exactly `-(radial*cos(beta) + binormal*sin(beta))` - the
+    // opposite sign from the offset used to place the point. Passed to
+    // `gizmo_push_quad` for a real smooth-shaded tube (rather than the flat
+    // per-triangle normal `recompute_flat_normals` derives for the faceted
+    // arrow cones), this is what keeps the normal's sign consistent with
+    // the mesh winding the fragment shader's `front_facing` flip is
+    // calibrated against - getting it backwards left the commonly-visible
+    // side of the tube shaded as if facing away from the light (ambient
+    // only, reading as much too dark).
+    let ring_tube_normal = |frame: (Point3<f32>, Vector3<f32>, Vector3<f32>),
+                            beta: f32|
+     -> Vector3<f32> { -ring_tube_offset(frame, beta) };
     let band_color = |beta: f32| -> [f32; 4] {
         let band_width = TAU / GIZMO_BAND_COUNT as f32;
         let raw = (beta - phase_angle).rem_euclid(TAU) / band_width;
@@ -452,12 +497,16 @@ fn gizmo_torus_vertices(
             gizmo_push_quad(
                 out,
                 ring_tube_point(frame0, b0),
+                ring_tube_normal(frame0, b0),
                 c0,
                 ring_tube_point(frame1, b0),
+                ring_tube_normal(frame1, b0),
                 c0,
                 ring_tube_point(frame0, b1),
+                ring_tube_normal(frame0, b1),
                 c1,
                 ring_tube_point(frame1, b1),
+                ring_tube_normal(frame1, b1),
                 c1,
             );
         }
@@ -498,28 +547,33 @@ fn gizmo_torus_vertices(
                 let g0 = (k as f32 / GIZMO_MARKER_TUBE_SEGMENTS as f32) * TAU;
                 let g1 = ((k + 1) as f32 / GIZMO_MARKER_TUBE_SEGMENTS as f32) * TAU;
 
-                let p00 = q0
-                    + (radial2_0 * g0.cos() + binormal2_0 * g0.sin())
-                        * GIZMO_MARKER_TUBE_MINOR_RADIUS;
-                let p01 = q0
-                    + (radial2_0 * g1.cos() + binormal2_0 * g1.sin())
-                        * GIZMO_MARKER_TUBE_MINOR_RADIUS;
-                let p10 = q1
-                    + (radial2_1 * g0.cos() + binormal2_1 * g0.sin())
-                        * GIZMO_MARKER_TUBE_MINOR_RADIUS;
-                let p11 = q1
-                    + (radial2_1 * g1.cos() + binormal2_1 * g1.sin())
-                        * GIZMO_MARKER_TUBE_MINOR_RADIUS;
+                // Same unit radial offset used to place the point, evaluated
+                // in this marker's own secondary frame.
+                let offset00 = radial2_0 * g0.cos() + binormal2_0 * g0.sin();
+                let offset01 = radial2_0 * g1.cos() + binormal2_0 * g1.sin();
+                let offset10 = radial2_1 * g0.cos() + binormal2_1 * g0.sin();
+                let offset11 = radial2_1 * g1.cos() + binormal2_1 * g1.sin();
+                let p00 = q0 + offset00 * GIZMO_MARKER_TUBE_MINOR_RADIUS;
+                let p01 = q0 + offset01 * GIZMO_MARKER_TUBE_MINOR_RADIUS;
+                let p10 = q1 + offset10 * GIZMO_MARKER_TUBE_MINOR_RADIUS;
+                let p11 = q1 + offset11 * GIZMO_MARKER_TUBE_MINOR_RADIUS;
 
+                // Same negated-offset shading normal as `ring_tube_normal`
+                // (see its doc comment for the winding derivation) - the
+                // offset used for position is the wrong sign for shading.
                 gizmo_push_quad(
                     out,
                     p00,
+                    -offset00,
                     marker_color,
                     p10,
+                    -offset10,
                     marker_color,
                     p01,
+                    -offset01,
                     marker_color,
                     p11,
+                    -offset11,
                     marker_color,
                 );
             }
@@ -536,6 +590,7 @@ fn gizmo_torus_vertices(
         let creep = phase_angle.rem_euclid(arrow_spacing);
         let direction = if phase_angle < 0.0 { -1.0 } else { 1.0 };
         const ARROW_BASE_POINTS: usize = 4;
+        let arrows_start = out.len();
         for k in 0..GIZMO_MARKER_ARROW_COUNT {
             let a2 = k as f32 * arrow_spacing + creep;
             let (q, tangent2, radial2, binormal2) = marker_secondary_frame(a2);
@@ -561,9 +616,12 @@ fn gizmo_torus_vertices(
                 out.push(gizmo_vertex(bases[b + 1], arrow_color));
             }
         }
+        // Only the arrow cones want flat, faceted normals - the ring and
+        // marker tube quads above already carried real smooth normals from
+        // `gizmo_push_quad` itself, computed analytically as they were
+        // built.
+        recompute_flat_normals(&mut out[arrows_start..]);
     }
-
-    recompute_flat_normals(&mut out[start..]);
 }
 
 /// Builds the GPU instance list for the current frame. Piece state is
