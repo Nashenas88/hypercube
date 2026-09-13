@@ -89,7 +89,11 @@ struct AnimatingFocus {
 /// describing `rotation_4d` when Reset was pressed toward the identity
 /// quaternion pair, recomposing `rotation_4d` each tick. Unlike
 /// `AnimatingFocus`, which rotates in a single plane, this can undo an
-/// arbitrary accumulated 4D orientation.
+/// arbitrary accumulated 4D orientation - generally a "double rotation"
+/// with two independent invariant planes. The rotation-axis gizmo still
+/// shows one ring for it (see `reset_plane_and_phase`), reusing the same
+/// combination pattern as the Shift+drag gizmo; see that function's doc
+/// comment for when this is exact versus approximate.
 struct AnimatingReset {
     start_p: UnitQuaternion<f32>,
     start_q: UnitQuaternion<f32>,
@@ -228,7 +232,8 @@ const GIZMO_TANGENT_EPSILON: f32 = 0.01;
 /// orientation), hiding the ring/markers behind that opaque geometry.
 const GIZMO_RING_PHASE_OFFSET: f32 = std::f32::consts::FRAC_PI_4;
 /// Below this accumulated drag angle (radians), a Shift+drag's combined
-/// ring is treated as not yet meaningfully rotating and is hidden.
+/// ring is treated as not yet meaningfully rotating and is hidden. Also
+/// reused by `reset_plane_and_phase` for the same purpose.
 const GIZMO_MIN_DRAG_ANGLE: f32 = 1e-3;
 
 /// Alternating-hue band palette for the click-to-focus gizmo ring. Fully
@@ -256,6 +261,21 @@ const GIZMO_FOCUS_MARKER_COLOR: [f32; 4] = [1.0, 0.85, 0.15, 1.0];
 /// marker's own ring is easy to tell apart from the main ring threading
 /// through it.
 const GIZMO_DRAG_MARKER_COLOR: [f32; 4] = [0.2, 1.0, 0.6, 1.0];
+/// Alternating-hue band palette for the Reset gizmo ring. Fully opaque so
+/// the main ring itself reads as solid rather than see-through. Distinct
+/// from both `GIZMO_FOCUS_PALETTE` (blue/cyan) and `GIZMO_DRAG_PALETTE`
+/// (orange/purple) so it's clear which interaction is driving the ring.
+const GIZMO_RESET_PALETTE: [[f32; 4]; GIZMO_BAND_COUNT] = [
+    [0.85, 0.25, 0.55, 1.0],
+    [0.45, 0.85, 0.35, 1.0],
+    [0.85, 0.25, 0.55, 1.0],
+    [0.45, 0.85, 0.35, 1.0],
+];
+/// Flat color for the Reset ring's field-loop markers, deliberately
+/// distinct from both `GIZMO_RESET_PALETTE` hues (magenta/green) so a
+/// marker's own ring is easy to tell apart from the main ring threading
+/// through it.
+const GIZMO_RESET_MARKER_COLOR: [f32; 4] = [1.0, 1.0, 0.4, 1.0];
 /// Shared bright accent color for marker arrows, distinct from either ring
 /// palette or marker color so it reads clearly against the marker tube.
 /// Fully opaque, like the rest of the gizmo, now that it writes real depth.
@@ -1801,11 +1821,18 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 
 impl HypercubeShaderProgram {
     /// Builds this frame's rotation-axis gizmo geometry (see
-    /// `gizmo_torus_vertices`), or an empty `Vec` when neither a focus
-    /// animation nor a Shift+drag is currently in progress - scope is
-    /// deliberately limited to those two interactions (see `AnimatingFocus`/
-    /// `ActiveShiftDrag`'s docs): puzzle moves and the Reset animation have
-    /// no single well-defined 4D rotation plane to derive a ring from.
+    /// `gizmo_torus_vertices`), or an empty `Vec` when no focus animation,
+    /// Shift+drag, or Reset animation is currently in progress (see
+    /// `AnimatingFocus`/`ActiveShiftDrag`/`AnimatingReset`'s docs). Focus and
+    /// drag each have a single well-defined rotation plane; Reset's
+    /// accumulated orientation is generally a 4D "double rotation" with two
+    /// independent invariant planes, so `reset_plane_and_phase` reuses the
+    /// same combination pattern as `combined_drag_plane_and_phase` to
+    /// collapse it to one ring - exact in the common case, an approximation
+    /// for a fully generic double rotation (see that function's doc comment
+    /// for the precise exactness boundary). Puzzle moves (`AnimatingMove`)
+    /// are still excluded: a slab turn has no meaningful single 4D rotation
+    /// plane at all to derive a ring from.
     /// `face_gap`/`face_gap_4d` are the same (reveal-override-resolved)
     /// values `draw()` already computed for this frame's stickers, used to
     /// size the ring via `gizmo_ring_radius`.
@@ -1852,6 +1879,34 @@ impl HypercubeShaderProgram {
                     ring_radius,
                     GIZMO_DRAG_PALETTE,
                     GIZMO_DRAG_MARKER_COLOR,
+                    GIZMO_ARROW_COLOR,
+                    self.viewer_distance,
+                    &mut vertices,
+                );
+            }
+        } else if let Some(reset) = &state.animating_reset {
+            let t = if reset.duration.is_zero() {
+                1.0
+            } else {
+                (reset.elapsed.as_secs_f32() / reset.duration.as_secs_f32()).clamp(0.0, 1.0)
+            };
+
+            // Threshold is checked once against the animation's starting
+            // angle (inside reset_plane_and_phase, called with the fixed
+            // start_p/start_q), not re-checked against the live shrinking
+            // angle each frame - so the ring doesn't pop away mid-animation
+            // as it settles toward zero motion.
+            if let Some((invariant_plane, base_phase_angle)) =
+                reset_plane_and_phase(reset.start_p, reset.start_q)
+            {
+                let phase_angle = reset_phase_at(base_phase_angle, t);
+                gizmo_torus_vertices(
+                    Vector4::zeros(),
+                    invariant_plane,
+                    phase_angle,
+                    ring_radius,
+                    GIZMO_RESET_PALETTE,
+                    GIZMO_RESET_MARKER_COLOR,
                     GIZMO_ARROW_COLOR,
                     self.viewer_distance,
                     &mut vertices,
@@ -1946,6 +2001,62 @@ fn combined_drag_plane_and_phase(
     let invariant_plane = orthogonal_complement_plane(combined_4d, w_axis);
     let phase_angle = oriented_phase_angle(combined_4d, w_axis, angle_magnitude, invariant_plane);
     Some((invariant_plane, phase_angle))
+}
+
+/// Combines a Reset animation's isoclinic pair (`AnimatingReset::start_p`/
+/// `start_q`, from `math::decompose_so4`) into a single ring, via the same
+/// combination pattern as `combined_drag_plane_and_phase`: each
+/// quaternion's `scaled_axis()` (axis * angle, zero at identity) stands in
+/// for one of that function's two independent signed angles, combined
+/// linearly and paired with the fixed `w_axis` the same way. Returns `None`
+/// once the combined angle is too small to show meaningfully (reuses
+/// `GIZMO_MIN_DRAG_ANGLE`).
+///
+/// This is **exact** when the accumulated rotation is a simple rotation
+/// whose active plane pairs some 3D axis with `w_axis` - the same
+/// structural form every Shift+drag component (and this module's combined
+/// drag ring) already assumes - and remains exact even for a genuine
+/// double rotation *as long as its other invariant plane doesn't involve
+/// `w` at all* (e.g. an accumulated `xw`-plus-`yz`-style rotation): the
+/// `w`-free component cancels out of `q_gen - p_gen` identically, leaving
+/// exactly the `w`-paired component's own angle. For a fully generic
+/// double rotation whose invariant planes both mix `w` with other axes,
+/// this is only an approximation, the same way `combined_drag_plane_and_phase`
+/// is only a first-order approximation for a drag with two large
+/// simultaneous components - there is no single plane that's exactly
+/// invariant for a generic double rotation, so one ring can only ever be
+/// approximately representative in that case.
+fn reset_plane_and_phase(
+    start_p: UnitQuaternion<f32>,
+    start_q: UnitQuaternion<f32>,
+) -> Option<(GizmoPlane, f32)> {
+    let w_axis = Vector4::new(0.0, 0.0, 0.0, 1.0);
+
+    let p_gen = start_p.scaled_axis();
+    let q_gen = start_q.scaled_axis();
+    let combined_gen = q_gen - p_gen;
+    let angle_magnitude = combined_gen.norm() / 2.0;
+    if angle_magnitude <= GIZMO_MIN_DRAG_ANGLE {
+        return None;
+    }
+
+    let axis = combined_gen.normalize();
+    let combined_4d = Vector4::new(axis.x, axis.y, axis.z, 0.0);
+    let invariant_plane = orthogonal_complement_plane(combined_4d, w_axis);
+    let phase_angle = oriented_phase_angle(combined_4d, w_axis, angle_magnitude, invariant_plane);
+    Some((invariant_plane, phase_angle))
+}
+
+/// Scales a Reset gizmo's base plane/phase (from `reset_plane_and_phase`,
+/// computed once from the animation's start quaternions) down to the
+/// current eased progress `t`. Exact, not an approximation: slerping a
+/// quaternion toward identity (`quat_slerp_exact`) moves along the
+/// geodesic at constant angular velocity, so the interpolated quaternion's
+/// axis never moves and its angle decays exactly linearly in `t` - so the
+/// invariant plane derived from the fixed start quaternions stays valid
+/// for the whole animation, and only the phase angle needs to shrink here.
+fn reset_phase_at(base_phase_angle: f32, t: f32) -> f32 {
+    base_phase_angle * (1.0 - ease(t))
 }
 
 impl HypercubeShaderProgram {
@@ -4151,6 +4262,156 @@ mod tests {
                 "faces {a}/{b}: phase angle collapsed to zero"
             );
         }
+    }
+
+    #[test]
+    fn reset_plane_and_phase_matches_pure_single_plane_rotation() {
+        let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        let angle = 0.5_f32;
+        let (start_p, start_q) = decompose_so4(&create_4d_plane_rotation(x, w, angle));
+
+        let (plane, phase_angle) =
+            reset_plane_and_phase(start_p, start_q).expect("angle exceeds threshold");
+        let expected_plane = orthogonal_complement_plane(x, w);
+
+        assert!((phase_angle - angle).abs() < 1e-4);
+        assert!((plane.0 - expected_plane.0).norm() < 1e-4);
+        assert!((plane.1 - expected_plane.1).norm() < 1e-4);
+    }
+
+    #[test]
+    fn reset_plane_and_phase_ignores_w_free_component_of_double_rotation() {
+        let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let y = Vector4::new(0.0, 1.0, 0.0, 0.0);
+        let z = Vector4::new(0.0, 0.0, 1.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        let xw_angle = 1.2_f32;
+
+        for &yz_angle in &[0.0_f32, 0.7, -0.4] {
+            let m =
+                create_4d_plane_rotation(x, w, xw_angle) * create_4d_plane_rotation(y, z, yz_angle);
+            let (start_p, start_q) = decompose_so4(&m);
+            let (_, phase_angle) =
+                reset_plane_and_phase(start_p, start_q).expect("angle exceeds threshold");
+            assert!(
+                (phase_angle - xw_angle).abs() < 1e-4,
+                "yz_angle={yz_angle}: expected {xw_angle}, got {phase_angle}"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_plane_and_phase_below_threshold_is_hidden() {
+        let identity = UnitQuaternion::identity();
+        assert!(reset_plane_and_phase(identity, identity).is_none());
+    }
+
+    #[test]
+    fn reset_phase_scales_linearly_with_eased_progress() {
+        let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let y = Vector4::new(0.0, 1.0, 0.0, 0.0);
+        let z = Vector4::new(0.0, 0.0, 1.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        let m = create_4d_plane_rotation(x, w, 1.2) * create_4d_plane_rotation(y, z, -0.4);
+        let (start_p, start_q) = decompose_so4(&m);
+        let (_, base_phase_angle) =
+            reset_plane_and_phase(start_p, start_q).expect("angle exceeds threshold");
+
+        let identity = UnitQuaternion::identity();
+        for &t in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            let eased = ease(t);
+            let live_p = quat_slerp_exact(start_p, identity, eased);
+            let live_q = quat_slerp_exact(start_q, identity, eased);
+            let expected = reset_plane_and_phase(live_p, live_q)
+                .map(|(_, phase)| phase)
+                .unwrap_or(0.0);
+            let actual = reset_phase_at(base_phase_angle, t);
+            assert!(
+                (actual - expected).abs() < 1e-3,
+                "t={t}: expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_gizmo_vertices_produces_ring_during_reset_animation() {
+        let mut state = HypercubeShaderState::default();
+        let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        let (start_p, start_q) = decompose_so4(&create_4d_plane_rotation(x, w, 1.0));
+        state.animating_reset = Some(AnimatingReset {
+            start_p,
+            start_q,
+            elapsed: Duration::ZERO,
+            duration: Duration::from_millis(250),
+        });
+
+        let program = HypercubeShaderProgram::new(
+            0.5,
+            2.0,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            RotateButton::default(),
+            250,
+            1,
+            0,
+            0,
+            0,
+            false,
+            0,
+            0,
+            None,
+            0,
+            0,
+            SolveCommand::Stop,
+        );
+
+        let vertices = program.build_gizmo_vertices(&state, 0.0, 1.0);
+        assert!(!vertices.is_empty());
+    }
+
+    #[test]
+    fn build_gizmo_vertices_hides_ring_for_near_identity_reset() {
+        let mut state = HypercubeShaderState::default();
+        let (start_p, start_q) = decompose_so4(&Matrix4::identity());
+        state.animating_reset = Some(AnimatingReset {
+            start_p,
+            start_q,
+            elapsed: Duration::ZERO,
+            duration: Duration::from_millis(250),
+        });
+
+        let program = HypercubeShaderProgram::new(
+            0.5,
+            2.0,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            RotateButton::default(),
+            250,
+            1,
+            0,
+            0,
+            0,
+            false,
+            0,
+            0,
+            None,
+            0,
+            0,
+            SolveCommand::Stop,
+        );
+
+        let vertices = program.build_gizmo_vertices(&state, 0.0, 1.0);
+        assert!(vertices.is_empty());
     }
 
     #[test]
