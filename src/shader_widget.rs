@@ -2183,6 +2183,15 @@ impl HypercubeShaderProgram {
                             // `rotation_4d`, rather than fighting it
                             // frame-by-frame.
                             if state.animating_reset.is_none() {
+                                // A live drag takes over `rotation_4d` from
+                                // any in-progress "center this face"
+                                // animation the instant it starts writing to
+                                // it, rather than fighting it frame-by-frame
+                                // (a plain, non-Shift camera-orbit drag never
+                                // reaches this branch, so it never touches
+                                // `animating_focus` and the animation keeps
+                                // playing on its own).
+                                state.animating_focus = None;
                                 let (right, up) = state.camera.right_and_up();
                                 state.rotation_4d = process_4d_rotation(
                                     &state.rotation_4d,
@@ -2226,13 +2235,9 @@ impl HypercubeShaderProgram {
                     && *button == self.rotate_button.to_mouse_button()
                     && state.animating_reveal.is_none()
                 {
-                    // A fresh press always takes precedence over an
-                    // in-progress auto-centering animation, so a deliberate
-                    // drag never has to fight it frame-by-frame. This only
-                    // ever cancels an animation from an *earlier*
-                    // interaction: the animation this same press might
-                    // trigger doesn't start until its matching release.
-                    state.animating_focus = None;
+                    // Reset the drag accumulator for this fresh gesture;
+                    // whether it turns into a Shift-drag that takes over
+                    // `rotation_4d` isn't known until `CursorMoved`.
                     state.active_shift_drag = None;
                     state.rotate_press = Some((position, state.hovered_sticker));
                     state.mouse_pressed = true;
@@ -2348,11 +2353,7 @@ impl HypercubeShaderProgram {
                 last_face == face_id && now.duration_since(last_time) <= DOUBLE_CLICK_WINDOW
             });
 
-        if is_double_click
-            && state.animating_move.is_none()
-            && state.animating_focus.is_none()
-            && state.animating_reset.is_none()
-        {
+        if is_double_click && state.animating_move.is_none() && state.animating_reset.is_none() {
             self.start_focus_animation(state, face_id);
             state.pending_face_click = None;
         } else {
@@ -4192,6 +4193,157 @@ mod tests {
             state.hypercube.pieces, pieces_before,
             "facet turn must not apply during the reveal flourish"
         );
+    }
+
+    /// A plain (non-Shift) camera-orbit drag only ever touches
+    /// `camera_controller` - it must not cancel an in-progress "center this
+    /// face" animation, which keeps playing on its own via
+    /// `advance_focus_animation`.
+    #[test]
+    fn non_shift_drag_preserves_focus_animation_and_still_orbits_camera() {
+        let mut state = HypercubeShaderState {
+            animating_focus: Some(AnimatingFocus {
+                start_rotation: Matrix4::identity(),
+                plane: (
+                    Vector4::new(1.0, 0.0, 0.0, 0.0),
+                    Vector4::new(0.0, 1.0, 0.0, 0.0),
+                ),
+                total_angle: 90.0,
+                elapsed: Duration::ZERO,
+                duration: Duration::from_millis(250),
+            }),
+            shift_pressed: false,
+            last_mouse_pos: Some(Point::new(10.0, 10.0)),
+            ..Default::default()
+        };
+        let yaw_before = state.camera_controller.yaw;
+        let pitch_before = state.camera_controller.pitch;
+
+        let rotate_button = RotateButton::default();
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            rotate_button,
+            250,
+            0,
+            0,
+            0,
+            0,
+            true,
+            0,
+            0,
+            None,
+            0,
+            0,
+            SolveCommand::Stop,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+
+        program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(rotate_button.to_mouse_button())),
+            bounds,
+            mouse::Cursor::Available(Point::new(10.0, 10.0)),
+        );
+        assert!(state.mouse_pressed);
+        assert!(
+            state.animating_focus.is_some(),
+            "a plain camera-orbit press must not cancel the focus animation"
+        );
+
+        program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::CursorMoved {
+                position: iced::Point::new(30.0, 20.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(30.0, 20.0)),
+        );
+
+        assert!(
+            state.animating_focus.is_some(),
+            "the focus animation must keep playing through a non-Shift drag"
+        );
+        assert_ne!(state.camera_controller.yaw, yaw_before);
+        assert_ne!(state.camera_controller.pitch, pitch_before);
+    }
+
+    /// A Shift+drag writes `rotation_4d` directly, so it must take over from,
+    /// and cancel, any in-progress "center this face" animation the instant
+    /// it starts moving, avoiding the frame-by-frame fight the two would
+    /// otherwise have over `rotation_4d`.
+    #[test]
+    fn shift_drag_cancels_focus_animation() {
+        let mut state = HypercubeShaderState {
+            animating_focus: Some(AnimatingFocus {
+                start_rotation: Matrix4::identity(),
+                plane: (
+                    Vector4::new(1.0, 0.0, 0.0, 0.0),
+                    Vector4::new(0.0, 1.0, 0.0, 0.0),
+                ),
+                total_angle: 90.0,
+                elapsed: Duration::ZERO,
+                duration: Duration::from_millis(250),
+            }),
+            shift_pressed: true,
+            last_mouse_pos: Some(Point::new(10.0, 10.0)),
+            ..Default::default()
+        };
+
+        let rotate_button = RotateButton::default();
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            rotate_button,
+            250,
+            0,
+            0,
+            0,
+            0,
+            true,
+            0,
+            0,
+            None,
+            0,
+            0,
+            SolveCommand::Stop,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+
+        program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(rotate_button.to_mouse_button())),
+            bounds,
+            mouse::Cursor::Available(Point::new(10.0, 10.0)),
+        );
+        assert!(state.animating_focus.is_some());
+
+        program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::CursorMoved {
+                position: iced::Point::new(30.0, 20.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(30.0, 20.0)),
+        );
+
+        assert!(
+            state.animating_focus.is_none(),
+            "a live Shift-drag must cancel the focus animation"
+        );
+        assert!(state.active_shift_drag.is_some());
     }
 
     #[test]
