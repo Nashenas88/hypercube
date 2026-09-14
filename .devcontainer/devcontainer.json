@@ -16,7 +16,7 @@
   "remoteUser": "dev",
   "containerUser": "dev",
   "mounts": [
-    "source=hypercube-claude-config,target=/home/dev/.claude,type=volume",
+    "source=${localEnv:HOME}/.claude,target=/home/dev/.claude,type=bind,consistency=cached",
     "source=hypercube-cargo-cache,target=/usr/local/cargo,type=volume",
     "source=hypercube-target-${localWorkspaceFolderBasename},target=/workspaces/${localWorkspaceFolderBasename}/target,type=volume",
     "source=${localWorkspaceFolder}/.devcontainer/.jj-main,target=/home/dev/jj-main,type=bind",
