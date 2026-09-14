@@ -234,6 +234,7 @@ pub(crate) struct HypercubeApp {
     /// to eyeball whether `fire_draw_order` got the occlusion right against
     /// the GPU's own depth buffer.
     fire_ground_truth_debug: bool,
+    show_gizmo_ring: bool,
     debug_mode: bool,
     /// Smoothed frames-per-second, updated on every `Message::FpsTick` while
     /// `debug_mode` is on (see `subscription`); displayed as a viewport
@@ -335,6 +336,9 @@ pub(crate) enum Message {
     /// depth-tested, cycling through whichever faces hold a Fire sticker
     /// (see `shader_widget::ground_truth_debug_face`).
     FireGroundTruthDebug(bool),
+    /// Toggles rendering the rotation-axis gizmo ring during focus
+    /// animations, Shift+drag, and Reset (see `shader_widget::build_gizmo_vertices`).
+    ShowGizmoRing(bool),
     DebugMode(bool),
     /// Per-frame tick driving the debug-mode FPS overlay (see
     /// `HypercubeApp::subscription`).
@@ -399,6 +403,7 @@ impl HypercubeApp {
             render_mode: RenderMode::Standard,
             aabb_mode: AABBMode::None,
             fire_ground_truth_debug: false,
+            show_gizmo_ring: false,
             debug_mode: false,
             fps: 0.0,
             last_fps_frame: None,
@@ -508,6 +513,9 @@ impl HypercubeApp {
             }
             Message::FireGroundTruthDebug(enabled) => {
                 self.fire_ground_truth_debug = enabled;
+            }
+            Message::ShowGizmoRing(enabled) => {
+                self.show_gizmo_ring = enabled;
             }
             Message::DebugMode(enabled) => {
                 self.debug_mode = enabled;
@@ -742,6 +750,11 @@ impl HypercubeApp {
                     .on_toggle(Message::DebugMode),
             )
             .push(
+                Checkbox::new(self.show_gizmo_ring)
+                    .label("Show Gizmo Ring")
+                    .on_toggle(Message::ShowGizmoRing),
+            )
+            .push(
                 Column::new()
                     .spacing(5)
                     .push(iced::widget::text("Rotate Button"))
@@ -933,6 +946,7 @@ impl HypercubeApp {
             self.settings.theme,
             self.aabb_mode,
             self.fire_ground_truth_debug,
+            self.show_gizmo_ring,
             self.settings.rotate_button,
             self.settings.animation_duration_ms,
             self.reset_generation,

@@ -1362,6 +1362,7 @@ pub struct HypercubeShaderProgram {
     theme: Theme,
     aabb_mode: AABBMode,
     fire_ground_truth_debug: bool,
+    show_gizmo_ring: bool,
     rotate_button: RotateButton,
     animation_duration_ms: u32,
     reset_generation: u64,
@@ -1390,6 +1391,7 @@ impl HypercubeShaderProgram {
         theme: Theme,
         aabb_mode: AABBMode,
         fire_ground_truth_debug: bool,
+        show_gizmo_ring: bool,
         rotate_button: RotateButton,
         animation_duration_ms: u32,
         reset_generation: u64,
@@ -1413,6 +1415,7 @@ impl HypercubeShaderProgram {
             theme,
             aabb_mode,
             fire_ground_truth_debug,
+            show_gizmo_ring,
             rotate_button,
             animation_duration_ms,
             reset_generation,
@@ -1821,8 +1824,9 @@ impl shader::Program<Message> for HypercubeShaderProgram {
 
 impl HypercubeShaderProgram {
     /// Builds this frame's rotation-axis gizmo geometry (see
-    /// `gizmo_torus_vertices`), or an empty `Vec` when no focus animation,
-    /// Shift+drag, or Reset animation is currently in progress (see
+    /// `gizmo_torus_vertices`), or an empty `Vec` when `show_gizmo_ring` is
+    /// off, or when no focus animation, Shift+drag, or Reset animation is
+    /// currently in progress (see
     /// `AnimatingFocus`/`ActiveShiftDrag`/`AnimatingReset`'s docs). Focus and
     /// drag each have a single well-defined rotation plane; Reset's
     /// accumulated orientation is generally a 4D "double rotation" with two
@@ -1843,6 +1847,9 @@ impl HypercubeShaderProgram {
         face_gap_4d: f32,
     ) -> Vec<GizmoVertex> {
         let mut vertices = Vec::new();
+        if !self.show_gizmo_ring {
+            return vertices;
+        }
         let ring_radius = gizmo_ring_radius(face_gap, face_gap_4d);
 
         if let Some(animating) = &state.animating_focus {
@@ -3145,6 +3152,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             1,
@@ -3225,6 +3233,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             0,
@@ -3275,6 +3284,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             0,
@@ -3319,6 +3329,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             state.reset_generation,
@@ -3369,6 +3380,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             rotate_button,
             250,
             state.reset_generation,
@@ -3428,6 +3440,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             state.reset_generation,
@@ -3573,6 +3586,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             0,
@@ -3626,6 +3640,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             0,
@@ -3678,6 +3693,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             0,
@@ -3710,6 +3726,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             0,
@@ -3765,6 +3782,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             0,
@@ -3820,6 +3838,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             state.reset_generation,
@@ -3993,6 +4012,7 @@ mod tests {
                 Theme::Classic,
                 AABBMode::None,
                 false,
+                true,
                 RotateButton::default(),
                 250,
                 reset,
@@ -4081,6 +4101,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             0,
@@ -4152,6 +4173,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             rotate_button,
             250,
             0,
@@ -4229,6 +4251,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             rotate_button,
             250,
             0,
@@ -4306,6 +4329,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             rotate_button,
             250,
             0,
@@ -4508,6 +4532,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             1,
@@ -4525,6 +4550,48 @@ mod tests {
 
         let vertices = program.build_gizmo_vertices(&state, 0.0, 1.0);
         assert!(!vertices.is_empty());
+    }
+
+    #[test]
+    fn build_gizmo_vertices_hides_ring_when_toggle_is_off() {
+        let mut state = HypercubeShaderState::default();
+        let x = Vector4::new(1.0, 0.0, 0.0, 0.0);
+        let w = Vector4::new(0.0, 0.0, 0.0, 1.0);
+        let (start_p, start_q) = decompose_so4(&create_4d_plane_rotation(x, w, 1.0));
+        state.animating_reset = Some(AnimatingReset {
+            start_p,
+            start_q,
+            elapsed: Duration::ZERO,
+            duration: Duration::from_millis(250),
+        });
+
+        let program = HypercubeShaderProgram::new(
+            0.5,
+            2.0,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            false,
+            RotateButton::default(),
+            250,
+            1,
+            0,
+            0,
+            0,
+            false,
+            0,
+            0,
+            None,
+            0,
+            0,
+            SolveCommand::Stop,
+        );
+
+        let vertices = program.build_gizmo_vertices(&state, 0.0, 1.0);
+        assert!(vertices.is_empty());
     }
 
     #[test]
@@ -4547,6 +4614,7 @@ mod tests {
             Theme::Classic,
             AABBMode::None,
             false,
+            true,
             RotateButton::default(),
             250,
             1,
