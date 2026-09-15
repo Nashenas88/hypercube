@@ -234,8 +234,6 @@ pub(crate) struct HypercubeApp {
     /// to eyeball whether `fire_draw_order` got the occlusion right against
     /// the GPU's own depth buffer.
     fire_ground_truth_debug: bool,
-    show_gizmo_ring: bool,
-    debug_mode: bool,
     /// Smoothed frames-per-second, updated on every `Message::FpsTick` while
     /// `debug_mode` is on (see `subscription`); displayed as a viewport
     /// overlay.
@@ -403,8 +401,6 @@ impl HypercubeApp {
             render_mode: RenderMode::Standard,
             aabb_mode: AABBMode::None,
             fire_ground_truth_debug: false,
-            show_gizmo_ring: false,
-            debug_mode: false,
             fps: 0.0,
             last_fps_frame: None,
             settings: settings::load(),
@@ -515,10 +511,12 @@ impl HypercubeApp {
                 self.fire_ground_truth_debug = enabled;
             }
             Message::ShowGizmoRing(enabled) => {
-                self.show_gizmo_ring = enabled;
+                self.settings.show_gizmo_ring = enabled;
+                settings::save(&self.settings);
             }
             Message::DebugMode(enabled) => {
-                self.debug_mode = enabled;
+                self.settings.debug_mode = enabled;
+                settings::save(&self.settings);
                 if enabled {
                     self.fps = 0.0;
                     self.last_fps_frame = None;
@@ -730,7 +728,7 @@ impl HypercubeApp {
         if self.reveal_animating {
             subscriptions.push(window::frames().map(Message::RevealAnimationTick));
         }
-        if self.debug_mode {
+        if self.settings.debug_mode {
             subscriptions.push(window::frames().map(Message::FpsTick));
         }
         if self.solve_notice.is_some() {
@@ -745,12 +743,12 @@ impl HypercubeApp {
         let mut controls = Column::new()
             .spacing(20)
             .push(
-                Checkbox::new(self.debug_mode)
+                Checkbox::new(self.settings.debug_mode)
                     .label("Debug Mode")
                     .on_toggle(Message::DebugMode),
             )
             .push(
-                Checkbox::new(self.show_gizmo_ring)
+                Checkbox::new(self.settings.show_gizmo_ring)
                     .label("Show Gizmo Ring")
                     .on_toggle(Message::ShowGizmoRing),
             )
@@ -777,7 +775,7 @@ impl HypercubeApp {
                     ),
             );
 
-        if self.debug_mode {
+        if self.settings.debug_mode {
             controls = controls
                 .push(
                     Column::new()
@@ -946,7 +944,7 @@ impl HypercubeApp {
             self.settings.theme,
             self.aabb_mode,
             self.fire_ground_truth_debug,
-            self.show_gizmo_ring,
+            self.settings.show_gizmo_ring,
             self.settings.rotate_button,
             self.settings.animation_duration_ms,
             self.reset_generation,
@@ -976,7 +974,7 @@ impl HypercubeApp {
             .push(viewport);
 
         let menu_bar = menu_overlay::bar(
-            self.debug_mode,
+            self.settings.debug_mode,
             self.render_mode,
             self.aabb_mode,
             self.revealed,
@@ -1014,7 +1012,7 @@ impl HypercubeApp {
             Space::new().into()
         };
 
-        let fps_layer: Element<'_, Message> = if self.debug_mode {
+        let fps_layer: Element<'_, Message> = if self.settings.debug_mode {
             iced::widget::container(
                 iced::widget::container(iced::widget::text(format!("{:.0} FPS", self.fps)))
                     .padding(6)

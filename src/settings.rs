@@ -55,6 +55,15 @@ pub(crate) struct AppSettings {
     pub(crate) animation_duration_ms: u32,
     #[serde(default)]
     pub(crate) theme: Theme,
+    #[serde(default)]
+    pub(crate) debug_mode: bool,
+    #[serde(default)]
+    pub(crate) show_gizmo_ring: bool,
+    /// Whether to open the first-run tutorial automatically on launch. Also
+    /// re-armable from the Settings modal after the tutorial's been
+    /// dismissed.
+    #[serde(default)]
+    pub(crate) show_tutorial_on_launch: bool,
 }
 
 impl Default for AppSettings {
@@ -63,6 +72,9 @@ impl Default for AppSettings {
             rotate_button: RotateButton::default(),
             animation_duration_ms: DEFAULT_ANIMATION_DURATION_MS,
             theme: Theme::default(),
+            debug_mode: false,
+            show_gizmo_ring: false,
+            show_tutorial_on_launch: false,
         }
     }
 }
@@ -118,5 +130,28 @@ pub(crate) fn save(settings: &AppSettings) {
 
     if let Err(err) = std::fs::write(&path, contents) {
         log::warn!("Failed to write settings to {path:?}: {err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `settings.toml` written before `debug_mode`/`show_gizmo_ring`/
+    /// `show_tutorial_on_launch` existed must still deserialize, with all
+    /// three falling back to `false`.
+    #[test]
+    fn old_format_settings_deserialize_with_new_fields_false() {
+        let settings: AppSettings = toml::from_str(
+            r#"
+            rotate_button = "Left"
+            animation_duration_ms = 250
+            "#,
+        )
+        .unwrap();
+
+        assert!(!settings.debug_mode);
+        assert!(!settings.show_gizmo_ring);
+        assert!(!settings.show_tutorial_on_launch);
     }
 }
