@@ -100,6 +100,12 @@ fn tooltip_delay(is_adjusting: bool) -> Duration {
     }
 }
 
+/// Whether the first-run tutorial should open on launch, given the
+/// persisted `show_tutorial_on_launch` flag.
+fn initial_tutorial_step(show_tutorial_on_launch: bool) -> Option<usize> {
+    show_tutorial_on_launch.then_some(0)
+}
+
 /// Label for the reveal/hide toggle button. `revealed` flips the instant the
 /// button is pressed (so the shader program picks up the new target that
 /// same frame), so the label alone can't read `revealed` directly while
@@ -276,6 +282,12 @@ pub(crate) struct HypercubeApp {
     reveal_loop_remaining: u32,
     about_open: bool,
     settings_open: bool,
+    /// The first-run tutorial's current step, or `None` when closed. Starts
+    /// at `Some(0)` on launch when `settings.show_tutorial_on_launch` is
+    /// set; dismissing the tutorial any way (Skip, Done, or finishing the
+    /// last step) clears that setting so it doesn't reopen on the next
+    /// launch - re-arming it is only done from the Settings modal.
+    tutorial_step: Option<usize>,
     save_generation: u64,
     load_generation: u64,
     pending_load: Option<Hypercube>,
@@ -390,12 +402,28 @@ pub(crate) enum Message {
     OpenUrl(&'static str),
     OpenSettings,
     CloseSettings,
+    /// Settings modal checkbox: re-arms the first-run tutorial to open
+    /// automatically on the next launch.
+    ShowTutorialOnLaunch(bool),
+    /// Settings modal button: opens the tutorial immediately, regardless of
+    /// `show_tutorial_on_launch`.
+    ReplayTutorial,
+    TutorialNext,
+    TutorialBack,
+    /// Closes the tutorial and clears `show_tutorial_on_launch`, so it
+    /// doesn't reopen on the next launch.
+    TutorialSkip,
+    /// Same effect as `TutorialSkip`, sent by the last step's "Done" button
+    /// instead of "Skip".
+    TutorialFinish,
     /// Target of the Puzzle menu's inert spacer rows (`menu_layout::puzzle_items`).
     NoOp,
 }
 
 impl HypercubeApp {
     fn new_inner() -> Self {
+        let settings = settings::load();
+        let tutorial_step = initial_tutorial_step(settings.show_tutorial_on_launch);
         Self {
             sticker_scale: PRIMARY_STICKER_SCALE,
             face_gap: PRIMARY_FACE_GAP,
@@ -406,7 +434,7 @@ impl HypercubeApp {
             fire_ground_truth_debug: false,
             fps: 0.0,
             last_fps_frame: None,
-            settings: settings::load(),
+            settings,
             reset_generation: 0,
             random_moves_generation: 0,
             pending_random_move_count: 0,
@@ -424,6 +452,7 @@ impl HypercubeApp {
             reveal_loop_remaining: REVEAL_LOOP_REPEATS,
             about_open: false,
             settings_open: false,
+            tutorial_step,
             save_generation: 0,
             load_generation: 0,
             pending_load: None,
@@ -705,6 +734,33 @@ impl HypercubeApp {
             Message::CloseSettings => {
                 self.settings_open = false;
             }
+            Message::ShowTutorialOnLaunch(enabled) => {
+                self.settings.show_tutorial_on_launch = enabled;
+                settings::save(&self.settings);
+            }
+            Message::ReplayTutorial => {
+                self.tutorial_step = Some(0);
+                self.settings_open = false;
+            }
+            Message::TutorialNext => {
+                if let Some(step) = self.tutorial_step
+                    && step + 1 < TUTORIAL_STEPS.len()
+                {
+                    self.tutorial_step = Some(step + 1);
+                }
+            }
+            Message::TutorialBack => {
+                if let Some(step) = self.tutorial_step
+                    && step > 0
+                {
+                    self.tutorial_step = Some(step - 1);
+                }
+            }
+            Message::TutorialSkip | Message::TutorialFinish => {
+                self.tutorial_step = None;
+                self.settings.show_tutorial_on_launch = false;
+                settings::save(&self.settings);
+            }
             Message::NoOp => {}
         }
 
@@ -969,9 +1025,9 @@ impl HypercubeApp {
 
         let content: Element<'_, Message> = Column::new().push(menu_bar).push(main_row).into();
 
-        // Always a 5-layer stack regardless of `about_open`/`settings_open`/
-        // `debug_mode`/solve state, not a conditional stack - keeps
-        // `content`'s widget-tree position stable.
+        // Always a 6-layer stack regardless of `about_open`/`settings_open`/
+        // `tutorial_step`/`debug_mode`/solve state, not a conditional stack -
+        // keeps `content`'s widget-tree position stable.
         let solve_layer: Element<'_, Message> = match solve_overlay_text(
             self.solving,
             self.solve_progress,
@@ -1003,6 +1059,12 @@ impl HypercubeApp {
             Space::new().into()
         };
 
+        let tutorial_layer: Element<'_, Message> = if let Some(step) = self.tutorial_step {
+            tutorial_modal(step)
+        } else {
+            Space::new().into()
+        };
+
         let fps_layer: Element<'_, Message> = if self.settings.debug_mode {
             iced::widget::container(
                 iced::widget::container(iced::widget::text(format!("{:.0} FPS", self.fps)))
@@ -1019,7 +1081,15 @@ impl HypercubeApp {
             Space::new().into()
         };
 
-        iced::widget::stack([content, solve_layer, about_layer, settings_layer, fps_layer]).into()
+        iced::widget::stack([
+            content,
+            solve_layer,
+            about_layer,
+            settings_layer,
+            tutorial_layer,
+            fps_layer,
+        ])
+        .into()
     }
 }
 
@@ -1202,6 +1272,13 @@ fn settings_modal<'a>(settings: &AppSettings) -> Element<'a, Message> {
                     .width(250),
                 ),
         )
+        .push(iced::widget::rule::horizontal(1))
+        .push(
+            Checkbox::new(settings.show_tutorial_on_launch)
+                .label("Show tutorial on launch")
+                .on_toggle(Message::ShowTutorialOnLaunch),
+        )
+        .push(Button::new("Replay Tutorial").on_press(Message::ReplayTutorial))
         .push(Button::new("Close").on_press(Message::CloseSettings));
 
     let popup = iced::widget::container(content)
@@ -1211,6 +1288,85 @@ fn settings_modal<'a>(settings: &AppSettings) -> Element<'a, Message> {
     iced::widget::opaque(
         iced::widget::mouse_area(iced::widget::center(iced::widget::opaque(popup)))
             .on_press(Message::CloseSettings),
+    )
+}
+
+/// (title, body lines) for each first-run tutorial step, deliberately
+/// limited to the controls themselves - not puzzle-solving technique.
+const TUTORIAL_STEPS: &[(&str, &[&str])] = &[
+    (
+        "Welcome",
+        &[
+            "This is a quick tour of the controls.",
+            "It won't teach you how to solve the puzzle - just how to look around it.",
+        ],
+    ),
+    (
+        "Orbiting the camera",
+        &[
+            "Drag with the rotate button to orbit the camera in 3D.",
+            "Hold Shift while dragging to rotate through the 4th dimension instead.",
+            "(The rotate button is configurable in Settings.)",
+        ],
+    ),
+    (
+        "Turning a face",
+        &[
+            "Click a facet with the other mouse button to turn that side.",
+            "Hold Shift while clicking to turn it the other way.",
+        ],
+    ),
+    (
+        "Focusing a face",
+        &["Double-click any face to smoothly center it in view."],
+    ),
+    (
+        "Reveal and the Puzzle menu",
+        &[
+            "The Reveal button (left panel or Puzzle menu) pulls the pieces apart \
+             so you can see inside the hypercube.",
+            "Puzzle also has Reset, Random Moves/Scramble, Solve, and Save/Load.",
+        ],
+    ),
+];
+
+fn tutorial_modal<'a>(step: usize) -> Element<'a, Message> {
+    let (title, lines) = TUTORIAL_STEPS[step];
+    let last_step = step + 1 == TUTORIAL_STEPS.len();
+
+    let mut content = Column::new()
+        .spacing(10)
+        .padding(20)
+        .push(iced::widget::text(title).size(24))
+        .push(iced::widget::text(format!(
+            "Step {} of {}",
+            step + 1,
+            TUTORIAL_STEPS.len()
+        )));
+
+    for line in lines {
+        content = content.push(iced::widget::text(*line));
+    }
+
+    let buttons = Row::new()
+        .spacing(10)
+        .push(Button::new("Back").on_press_maybe((step > 0).then_some(Message::TutorialBack)))
+        .push(Button::new("Skip").on_press(Message::TutorialSkip))
+        .push(if last_step {
+            Button::new("Done").on_press(Message::TutorialFinish)
+        } else {
+            Button::new("Next").on_press(Message::TutorialNext)
+        });
+
+    let content = content.push(buttons);
+
+    let popup = iced::widget::container(content)
+        .width(360)
+        .style(iced::widget::container::rounded_box);
+
+    iced::widget::opaque(
+        iced::widget::mouse_area(iced::widget::center(iced::widget::opaque(popup)))
+            .on_press(Message::TutorialSkip),
     )
 }
 
@@ -1248,6 +1404,16 @@ mod tests {
     #[test]
     fn tooltip_delay_is_nonzero_while_idle() {
         assert_eq!(tooltip_delay(false), Duration::from_millis(400));
+    }
+
+    #[test]
+    fn initial_tutorial_step_starts_at_the_first_step_when_armed() {
+        assert_eq!(initial_tutorial_step(true), Some(0));
+    }
+
+    #[test]
+    fn initial_tutorial_step_is_closed_when_not_armed() {
+        assert_eq!(initial_tutorial_step(false), None);
     }
 
     #[test]
