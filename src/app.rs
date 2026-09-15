@@ -288,6 +288,19 @@ pub(crate) struct HypercubeApp {
     /// last step) clears that setting so it doesn't reopen on the next
     /// launch - re-arming it is only done from the Settings modal.
     tutorial_step: Option<usize>,
+    /// Cumulative first-run-tutorial interaction tracking, set from
+    /// `Message::TutorialOrbited`/`TutorialTurnedFace`/`TutorialFocusedFace`
+    /// (published by `shader_widget.rs` the first time each happens) and
+    /// consulted by `tutorial_step_unlocked` to gate that step's
+    /// "Next"/"Done" button until the user has actually tried the thing
+    /// being introduced. Once true, stays true for the rest of the session.
+    tutorial_orbited: bool,
+    tutorial_turned_face: bool,
+    tutorial_focused_face: bool,
+    tutorial_rotated_4d: bool,
+    /// Set (never cleared) the first time `revealed` becomes true, so
+    /// re-hiding the puzzle doesn't re-lock the tutorial's Reveal step.
+    tutorial_revealed: bool,
     save_generation: u64,
     load_generation: u64,
     pending_load: Option<Hypercube>,
@@ -416,6 +429,22 @@ pub(crate) enum Message {
     /// Same effect as `TutorialSkip`, sent by the last step's "Done" button
     /// instead of "Skip".
     TutorialFinish,
+    /// Published by `shader_widget.rs` the first time the user orbits the
+    /// camera in 3D or rotates through the 4th dimension (Shift+drag),
+    /// unlocking the tutorial's "Orbiting the camera" step.
+    TutorialOrbited,
+    /// Published by `shader_widget.rs` the first time the user turns a face
+    /// by clicking a facet, unlocking the tutorial's "Turning a face" step.
+    TutorialTurnedFace,
+    /// Published by `shader_widget.rs` the first time the user focuses a
+    /// face via double-click, unlocking the tutorial's "Focusing a face"
+    /// step.
+    TutorialFocusedFace,
+    /// Published by `shader_widget.rs` the first time the user rotates
+    /// through the 4th dimension (Shift+drag), unlocking the tutorial's
+    /// "Rotating in 4D" step. Distinct from `TutorialOrbited`, which is 3D
+    /// orbit only.
+    TutorialRotated4d,
     /// Target of the Puzzle menu's inert spacer rows (`menu_layout::puzzle_items`).
     NoOp,
 }
@@ -453,6 +482,11 @@ impl HypercubeApp {
             about_open: false,
             settings_open: false,
             tutorial_step,
+            tutorial_orbited: false,
+            tutorial_turned_face: false,
+            tutorial_focused_face: false,
+            tutorial_rotated_4d: false,
+            tutorial_revealed: false,
             save_generation: 0,
             load_generation: 0,
             pending_load: None,
@@ -641,6 +675,9 @@ impl HypercubeApp {
                 self.reveal_generation = self.reveal_generation.wrapping_add(1);
                 self.reveal_animating = true;
                 self.reveal_animation_started = Some(Instant::now());
+                if self.revealed {
+                    self.tutorial_revealed = true;
+                }
             }
             Message::RevealAnimationTick(now) => {
                 let elapsed = self
@@ -744,7 +781,7 @@ impl HypercubeApp {
             }
             Message::TutorialNext => {
                 if let Some(step) = self.tutorial_step
-                    && step + 1 < TUTORIAL_STEPS.len()
+                    && step + 1 < TUTORIAL_STEP_COUNT
                 {
                     self.tutorial_step = Some(step + 1);
                 }
@@ -761,6 +798,10 @@ impl HypercubeApp {
                 self.settings.show_tutorial_on_launch = false;
                 settings::save(&self.settings);
             }
+            Message::TutorialOrbited => self.tutorial_orbited = true,
+            Message::TutorialTurnedFace => self.tutorial_turned_face = true,
+            Message::TutorialFocusedFace => self.tutorial_focused_face = true,
+            Message::TutorialRotated4d => self.tutorial_rotated_4d = true,
             Message::NoOp => {}
         }
 
@@ -1060,7 +1101,15 @@ impl HypercubeApp {
         };
 
         let tutorial_layer: Element<'_, Message> = if let Some(step) = self.tutorial_step {
-            tutorial_modal(step)
+            let unlocked = tutorial_step_unlocked(
+                step,
+                self.tutorial_orbited,
+                self.tutorial_turned_face,
+                self.tutorial_revealed,
+                self.tutorial_focused_face,
+                self.tutorial_rotated_4d,
+            );
+            tutorial_modal(step, unlocked, self.settings.rotate_button)
         } else {
             Space::new().into()
         };
@@ -1291,48 +1340,114 @@ fn settings_modal<'a>(settings: &AppSettings) -> Element<'a, Message> {
     )
 }
 
-/// (title, body lines) for each first-run tutorial step, deliberately
-/// limited to the controls themselves - not puzzle-solving technique.
-const TUTORIAL_STEPS: &[(&str, &[&str])] = &[
-    (
-        "Welcome",
-        &[
-            "This is a quick tour of the controls.",
-            "It won't teach you how to solve the puzzle - just how to look around it.",
-        ],
-    ),
-    (
-        "Orbiting the camera",
-        &[
-            "Drag with the rotate button to orbit the camera in 3D.",
-            "Hold Shift while dragging to rotate through the 4th dimension instead.",
-            "(The rotate button is configurable in Settings.)",
-        ],
-    ),
-    (
-        "Turning a face",
-        &[
-            "Click a facet with the other mouse button to turn that side.",
-            "Hold Shift while clicking to turn it the other way.",
-        ],
-    ),
-    (
-        "Focusing a face",
-        &["Double-click any face to smoothly center it in view."],
-    ),
-    (
-        "Reveal and the Puzzle menu",
-        &[
-            "The Reveal button (left panel or Puzzle menu) pulls the pieces apart \
-             so you can see inside the hypercube.",
-            "Puzzle also has Reset, Random Moves/Scramble, Solve, and Save/Load.",
-        ],
-    ),
-];
+/// Number of first-run tutorial steps (see `tutorial_step_content`).
+const TUTORIAL_STEP_COUNT: usize = 6;
 
-fn tutorial_modal<'a>(step: usize) -> Element<'a, Message> {
-    let (title, lines) = TUTORIAL_STEPS[step];
-    let last_step = step + 1 == TUTORIAL_STEPS.len();
+/// (title, body lines) for first-run tutorial step `step`, deliberately
+/// limited to the controls themselves - not puzzle-solving technique. Every
+/// step but the last asks the user to try the thing it describes;
+/// `tutorial_step_unlocked` gates that step's "Next"/"Done" button on
+/// actually doing it. Steps that mention a mouse button name it via
+/// `rotate_button` (and its complement, whichever button isn't bound to
+/// camera rotation - see `RotateButton::click_button`), so the instructions
+/// always match what's actually configured in Settings.
+fn tutorial_step_content(step: usize, rotate_button: RotateButton) -> (&'static str, Vec<String>) {
+    let turn_button = match rotate_button {
+        RotateButton::Left => RotateButton::Right,
+        RotateButton::Right => RotateButton::Left,
+    };
+
+    match step {
+        0 => (
+            "Orbiting the camera",
+            vec![
+                format!("Drag with the {rotate_button} mouse button to orbit the camera in 3D."),
+                "(Configurable in Settings.)".to_string(),
+                "Try it now.".to_string(),
+            ],
+        ),
+        1 => (
+            "Turning a face",
+            vec![
+                format!("Click a facet with the {turn_button} mouse button to turn that side."),
+                "Hold Shift while clicking to turn it the other way.".to_string(),
+                "Try it now.".to_string(),
+            ],
+        ),
+        2 => (
+            "Revealing the puzzle",
+            vec![
+                "The Reveal button (left panel or Puzzle menu) pulls the pieces apart \
+                 so you can see inside the hypercube."
+                    .to_string(),
+                "Try it now.".to_string(),
+            ],
+        ),
+        3 => (
+            "Focusing a face",
+            vec![
+                "Double-click any face to smoothly center it in view.".to_string(),
+                "Try it now.".to_string(),
+            ],
+        ),
+        4 => (
+            "Rotating in 4D",
+            vec![
+                format!(
+                    "Hold Shift while dragging with the {rotate_button} mouse button to rotate \
+                     through the 4th dimension."
+                ),
+                "Try it now.".to_string(),
+            ],
+        ),
+        _ => (
+            "Scramble and Solve",
+            vec![
+                "The Puzzle menu also has Random Moves/Scramble to mix the puzzle up, and \
+                 Solve to play the solution back automatically."
+                    .to_string(),
+            ],
+        ),
+    }
+}
+
+/// Whether a tutorial step's "Next"/"Done" button should be enabled: steps
+/// 0-4 each require their matching interaction to have happened at least
+/// once this session (`tutorial_orbited`/`tutorial_turned_face`/
+/// `tutorial_revealed`/`tutorial_focused_face`/`tutorial_rotated_4d`), all
+/// cumulative and never reset while navigating Back/Next; the last step is
+/// plain description with nothing to try, so it's always unlocked.
+fn tutorial_step_unlocked(
+    step: usize,
+    tutorial_orbited: bool,
+    tutorial_turned_face: bool,
+    tutorial_revealed: bool,
+    tutorial_focused_face: bool,
+    tutorial_rotated_4d: bool,
+) -> bool {
+    match step {
+        0 => tutorial_orbited,
+        1 => tutorial_turned_face,
+        2 => tutorial_revealed,
+        3 => tutorial_focused_face,
+        4 => tutorial_rotated_4d,
+        _ => true,
+    }
+}
+
+/// Unlike `about_modal()`/`settings_modal()`, this is *not* wrapped in an
+/// `opaque`/`mouse_area` backdrop: the tutorial expects the user to interact
+/// with the cube and menu underneath it (orbit, turn, focus, Reveal) while
+/// it's open, so it must never intercept those clicks - shaped like
+/// `fps_layer`/`solve_layer` (a plain `Length::Fill` container, aligned to
+/// one corner/edge) instead, with only the popup's own buttons interactive.
+fn tutorial_modal<'a>(
+    step: usize,
+    unlocked: bool,
+    rotate_button: RotateButton,
+) -> Element<'a, Message> {
+    let (title, lines) = tutorial_step_content(step, rotate_button);
+    let last_step = step + 1 == TUTORIAL_STEP_COUNT;
 
     let mut content = Column::new()
         .spacing(10)
@@ -1341,22 +1456,28 @@ fn tutorial_modal<'a>(step: usize) -> Element<'a, Message> {
         .push(iced::widget::text(format!(
             "Step {} of {}",
             step + 1,
-            TUTORIAL_STEPS.len()
+            TUTORIAL_STEP_COUNT
         )));
 
     for line in lines {
-        content = content.push(iced::widget::text(*line));
+        content = content.push(iced::widget::text(line));
     }
 
+    let next_or_done = if last_step {
+        Button::new("Done").on_press_maybe(unlocked.then_some(Message::TutorialFinish))
+    } else {
+        Button::new("Next").on_press_maybe(unlocked.then_some(Message::TutorialNext))
+    };
+
+    // Skip stands apart from Back/Next/Done (a filling `Space` pushes it to
+    // the opposite edge) so dismissing the tutorial reads as a distinct
+    // choice from stepping through it.
     let buttons = Row::new()
         .spacing(10)
-        .push(Button::new("Back").on_press_maybe((step > 0).then_some(Message::TutorialBack)))
         .push(Button::new("Skip").on_press(Message::TutorialSkip))
-        .push(if last_step {
-            Button::new("Done").on_press(Message::TutorialFinish)
-        } else {
-            Button::new("Next").on_press(Message::TutorialNext)
-        });
+        .push(Space::new().width(Length::Fill))
+        .push(Button::new("Back").on_press_maybe((step > 0).then_some(Message::TutorialBack)))
+        .push(next_or_done);
 
     let content = content.push(buttons);
 
@@ -1364,10 +1485,13 @@ fn tutorial_modal<'a>(step: usize) -> Element<'a, Message> {
         .width(360)
         .style(iced::widget::container::rounded_box);
 
-    iced::widget::opaque(
-        iced::widget::mouse_area(iced::widget::center(iced::widget::opaque(popup)))
-            .on_press(Message::TutorialSkip),
-    )
+    iced::widget::container(popup)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Bottom)
+        .padding(10)
+        .into()
 }
 
 #[cfg(test)]
@@ -1414,6 +1538,48 @@ mod tests {
     #[test]
     fn initial_tutorial_step_is_closed_when_not_armed() {
         assert_eq!(initial_tutorial_step(false), None);
+    }
+
+    #[test]
+    fn tutorial_gated_steps_stay_locked_until_their_interaction_happens() {
+        assert!(!tutorial_step_unlocked(
+            0, false, false, false, false, false
+        ));
+        assert!(tutorial_step_unlocked(0, true, false, false, false, false));
+
+        assert!(!tutorial_step_unlocked(
+            1, false, false, false, false, false
+        ));
+        assert!(tutorial_step_unlocked(1, false, true, false, false, false));
+
+        assert!(!tutorial_step_unlocked(
+            2, false, false, false, false, false
+        ));
+        assert!(tutorial_step_unlocked(2, false, false, true, false, false));
+
+        assert!(!tutorial_step_unlocked(
+            3, false, false, false, false, false
+        ));
+        assert!(tutorial_step_unlocked(3, false, false, false, true, false));
+
+        assert!(!tutorial_step_unlocked(
+            4, false, false, false, false, false
+        ));
+        assert!(tutorial_step_unlocked(4, false, false, false, false, true));
+    }
+
+    #[test]
+    fn tutorial_final_step_is_always_unlocked() {
+        assert!(tutorial_step_unlocked(5, false, false, false, false, false));
+    }
+
+    #[test]
+    fn tutorial_step_content_names_the_configured_rotate_button() {
+        let (_, lines) = tutorial_step_content(0, RotateButton::Right);
+        assert!(lines.iter().any(|line| line.contains("Right mouse button")));
+
+        let (_, lines) = tutorial_step_content(1, RotateButton::Right);
+        assert!(lines.iter().any(|line| line.contains("Left mouse button")));
     }
 
     #[test]

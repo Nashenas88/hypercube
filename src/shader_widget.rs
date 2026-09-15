@@ -1333,6 +1333,19 @@ pub struct HypercubeShaderState {
     /// the next solve move so playback keeps pace with wall-clock time
     /// instead of losing part of a frame on every move.
     move_overshoot: Duration,
+    /// Whether each first-run-tutorial interaction (3D camera orbit, 4D
+    /// Shift+drag rotation, face turn, face focus) has already been
+    /// published to `HypercubeApp` this session, so a multi-frame drag
+    /// doesn't republish the same message on every tick once it's been
+    /// reported once.
+    tutorial_orbited_reported: bool,
+    tutorial_rotated_4d_reported: bool,
+    tutorial_turned_face_reported: bool,
+    tutorial_focused_face_reported: bool,
+    /// A tutorial-interaction message waiting to be published - `update`
+    /// can publish only one message per call and a completed reveal's/
+    /// solve's goes first, so this holds one until the next call if needed.
+    tutorial_event: Option<Message>,
 }
 
 impl HypercubeShaderState {
@@ -1740,10 +1753,15 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             state.set_cached_sticker_instances(instances);
         }
 
-        // A completed reveal's message goes first; a pending solve message
-        // waits in the outbox for the next call (publishing makes iced
-        // request another redraw, so there always is one).
-        if let Some(message) = reveal_completed_message.or_else(|| state.solve_outbox.take()) {
+        // A completed reveal's message goes first, then a pending solve
+        // message, then a tutorial-interaction report; each waits in its own
+        // outbox for the next call if more than one is pending at once
+        // (publishing makes iced request another redraw, so there always is
+        // one).
+        if let Some(message) = reveal_completed_message
+            .or_else(|| state.solve_outbox.take())
+            .or_else(|| state.tutorial_event.take())
+        {
             return Some(Action::publish(message));
         }
 
@@ -2214,12 +2232,14 @@ impl HypercubeShaderProgram {
                                     state.active_shift_drag.get_or_insert_with(Default::default);
                                 drag.horizontal_angle += angle_x;
                                 drag.vertical_angle += angle_y;
+                                Self::report_tutorial_4d_rotate(state);
                             }
                         } else {
                             // 3D camera rotation
                             state
                                 .camera_controller
                                 .process_mouse_motion(delta_x, delta_y);
+                            Self::report_tutorial_orbit(state);
                         }
                     }
                 }
@@ -2387,6 +2407,32 @@ impl HypercubeShaderProgram {
             duration: Duration::from_millis(self.animation_duration_ms as u64),
         });
         state.last_redraw_instant = None;
+
+        if !state.tutorial_focused_face_reported {
+            state.tutorial_focused_face_reported = true;
+            state.tutorial_event = Some(Message::TutorialFocusedFace);
+        }
+    }
+
+    /// Reports the first-run tutorial's 3D camera-orbit interaction the
+    /// first time it happens this session - see `tutorial_orbited_reported`.
+    /// Shift+drag 4D rotation is a separate, later tutorial step; see
+    /// `report_tutorial_4d_rotate`.
+    fn report_tutorial_orbit(state: &mut HypercubeShaderState) {
+        if !state.tutorial_orbited_reported {
+            state.tutorial_orbited_reported = true;
+            state.tutorial_event = Some(Message::TutorialOrbited);
+        }
+    }
+
+    /// Reports the first-run tutorial's Shift+drag 4D-rotation interaction
+    /// the first time it happens this session - see
+    /// `tutorial_rotated_4d_reported`.
+    fn report_tutorial_4d_rotate(state: &mut HypercubeShaderState) {
+        if !state.tutorial_rotated_4d_reported {
+            state.tutorial_rotated_4d_reported = true;
+            state.tutorial_event = Some(Message::TutorialRotated4d);
+        }
     }
 
     /// Applies the move triggered by clicking the given facet, if any -
@@ -2428,6 +2474,11 @@ impl HypercubeShaderProgram {
         });
         state.last_redraw_instant = None;
         state.hovered_sticker = None;
+
+        if !state.tutorial_turned_face_reported {
+            state.tutorial_turned_face_reported = true;
+            state.tutorial_event = Some(Message::TutorialTurnedFace);
+        }
     }
 
     /// Advances the in-progress move animation (if any) by the time elapsed
@@ -2742,6 +2793,11 @@ impl Default for HypercubeShaderState {
             solve_playback: None,
             solve_outbox: None,
             move_overshoot: Duration::ZERO,
+            tutorial_orbited_reported: false,
+            tutorial_rotated_4d_reported: false,
+            tutorial_turned_face_reported: false,
+            tutorial_focused_face_reported: false,
+            tutorial_event: None,
         }
     }
 }
@@ -3407,6 +3463,242 @@ mod tests {
 
         assert!(state.animating_move.is_some(), "click must start a move");
         assert_eq!(state.sticker_generation, sticker_generation_before + 1);
+    }
+
+    /// The first-run tutorial's "Turning a face" step unlocks once the user
+    /// actually turns one - `handle_facet_click` must publish
+    /// `TutorialTurnedFace` the first time a click starts a move.
+    #[test]
+    fn clicking_actionable_facet_publishes_tutorial_turned_face() {
+        let mut state = HypercubeShaderState::default();
+        let sticker_index = FACET_TABLE
+            .iter()
+            .position(|f| f.is_actionable)
+            .expect("at least one actionable facet exists");
+        state.hovered_sticker = Some(sticker_index);
+
+        let rotate_button = RotateButton::default();
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            true,
+            rotate_button,
+            250,
+            0,
+            0,
+            0,
+            0,
+            false,
+            0,
+            0,
+            None,
+            0,
+            0,
+            SolveCommand::Stop,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
+
+        let message = published(program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(rotate_button.click_button())),
+            bounds,
+            cursor,
+        ));
+
+        assert!(matches!(message, Some(Message::TutorialTurnedFace)));
+    }
+
+    /// Double-clicking a face to focus it must publish `TutorialFocusedFace`
+    /// the first time, unlocking the tutorial's "Focusing a face" step.
+    #[test]
+    fn double_click_focus_publishes_tutorial_focused_face() {
+        let mut state = HypercubeShaderState::default();
+        let sticker_index = FACET_TABLE
+            .iter()
+            .position(|f| f.is_actionable)
+            .expect("at least one actionable facet exists");
+
+        let rotate_button = RotateButton::default();
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            true,
+            rotate_button,
+            250,
+            0,
+            0,
+            0,
+            0,
+            false,
+            0,
+            0,
+            None,
+            0,
+            0,
+            SolveCommand::Stop,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
+
+        state.hovered_sticker = Some(sticker_index);
+        program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(rotate_button.to_mouse_button())),
+            bounds,
+            cursor,
+        );
+        program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonReleased(
+                rotate_button.to_mouse_button(),
+            )),
+            bounds,
+            cursor,
+        );
+        assert!(state.animating_focus.is_none(), "one click must not focus");
+
+        state.hovered_sticker = Some(sticker_index);
+        program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(rotate_button.to_mouse_button())),
+            bounds,
+            cursor,
+        );
+        let message = published(program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonReleased(
+                rotate_button.to_mouse_button(),
+            )),
+            bounds,
+            cursor,
+        ));
+
+        assert!(state.animating_focus.is_some(), "second click must focus");
+        assert!(matches!(message, Some(Message::TutorialFocusedFace)));
+    }
+
+    /// The first-run tutorial's "Orbiting the camera" step unlocks once the
+    /// user drags the camera - `TutorialOrbited` must publish on the first
+    /// qualifying drag tick and never again this session.
+    #[test]
+    fn camera_drag_publishes_tutorial_orbited_once() {
+        let mut state = HypercubeShaderState {
+            last_mouse_pos: Some(Point::new(10.0, 10.0)),
+            mouse_pressed: true,
+            ..Default::default()
+        };
+        let rotate_button = RotateButton::default();
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            true,
+            rotate_button,
+            250,
+            0,
+            0,
+            0,
+            0,
+            false,
+            0,
+            0,
+            None,
+            0,
+            0,
+            SolveCommand::Stop,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+
+        let message = published(program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::CursorMoved {
+                position: iced::Point::new(30.0, 20.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(30.0, 20.0)),
+        ));
+        assert!(matches!(message, Some(Message::TutorialOrbited)));
+
+        let second_message = published(program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::CursorMoved {
+                position: iced::Point::new(40.0, 25.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(40.0, 25.0)),
+        ));
+        assert!(
+            !matches!(second_message, Some(Message::TutorialOrbited)),
+            "must only publish once per session"
+        );
+    }
+
+    /// The first-run tutorial's "Rotating in 4D" step is distinct from
+    /// plain 3D orbit - a Shift+drag must publish `TutorialRotated4d`
+    /// (never `TutorialOrbited`).
+    #[test]
+    fn shift_drag_publishes_tutorial_rotated_4d() {
+        let mut state = HypercubeShaderState {
+            last_mouse_pos: Some(Point::new(10.0, 10.0)),
+            mouse_pressed: true,
+            shift_pressed: true,
+            ..Default::default()
+        };
+        let rotate_button = RotateButton::default();
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            true,
+            rotate_button,
+            250,
+            0,
+            0,
+            0,
+            0,
+            false,
+            0,
+            0,
+            None,
+            0,
+            0,
+            SolveCommand::Stop,
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+
+        let message = published(program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::CursorMoved {
+                position: iced::Point::new(30.0, 20.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(30.0, 20.0)),
+        ));
+        assert!(matches!(message, Some(Message::TutorialRotated4d)));
+        assert!(!state.tutorial_orbited_reported);
     }
 
     /// A "center this face" animation tick rotates `rotation_4d` every frame
