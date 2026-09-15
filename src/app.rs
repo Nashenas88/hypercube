@@ -275,6 +275,7 @@ pub(crate) struct HypercubeApp {
     #[cfg(feature = "gpu-capture-hooks")]
     reveal_loop_remaining: u32,
     about_open: bool,
+    settings_open: bool,
     save_generation: u64,
     load_generation: u64,
     pending_load: Option<Hypercube>,
@@ -387,6 +388,8 @@ pub(crate) enum Message {
     /// Opens a license/attribution URL from the About dialog in the
     /// system's default browser.
     OpenUrl(&'static str),
+    OpenSettings,
+    CloseSettings,
     /// Target of the Puzzle menu's inert spacer rows (`menu_layout::puzzle_items`).
     NoOp,
 }
@@ -420,6 +423,7 @@ impl HypercubeApp {
             #[cfg(feature = "gpu-capture-hooks")]
             reveal_loop_remaining: REVEAL_LOOP_REPEATS,
             about_open: false,
+            settings_open: false,
             save_generation: 0,
             load_generation: 0,
             pending_load: None,
@@ -695,6 +699,12 @@ impl HypercubeApp {
                     log::warn!("Failed to open {url}: {err}");
                 }
             }
+            Message::OpenSettings => {
+                self.settings_open = true;
+            }
+            Message::CloseSettings => {
+                self.settings_open = false;
+            }
             Message::NoOp => {}
         }
 
@@ -740,40 +750,15 @@ impl HypercubeApp {
     /// Create the view for the application
     pub(crate) fn view(&self) -> Element<'_, Message> {
         // Left pane with controls
-        let mut controls = Column::new()
-            .spacing(20)
-            .push(
-                Checkbox::new(self.settings.debug_mode)
-                    .label("Debug Mode")
-                    .on_toggle(Message::DebugMode),
-            )
-            .push(
-                Checkbox::new(self.settings.show_gizmo_ring)
-                    .label("Show Gizmo Ring")
-                    .on_toggle(Message::ShowGizmoRing),
-            )
-            .push(
-                Column::new()
-                    .spacing(5)
-                    .push(iced::widget::text("Rotate Button"))
-                    .push(
-                        PickList::new(
-                            &RotateButton::ALL[..],
-                            Some(self.settings.rotate_button),
-                            Message::RotateButton,
-                        )
+        let mut controls = Column::new().spacing(20).push(
+            Column::new()
+                .spacing(5)
+                .push(iced::widget::text("Theme"))
+                .push(
+                    PickList::new(&Theme::ALL[..], Some(self.settings.theme), Message::Theme)
                         .width(250),
-                    ),
-            )
-            .push(
-                Column::new()
-                    .spacing(5)
-                    .push(iced::widget::text("Theme"))
-                    .push(
-                        PickList::new(&Theme::ALL[..], Some(self.settings.theme), Message::Theme)
-                            .width(250),
-                    ),
-            );
+                ),
+        );
 
         if self.settings.debug_mode {
             controls = controls
@@ -984,9 +969,9 @@ impl HypercubeApp {
 
         let content: Element<'_, Message> = Column::new().push(menu_bar).push(main_row).into();
 
-        // Always a 4-layer stack regardless of `about_open`/`debug_mode`/
-        // solve state, not a conditional stack - keeps `content`'s
-        // widget-tree position stable.
+        // Always a 5-layer stack regardless of `about_open`/`settings_open`/
+        // `debug_mode`/solve state, not a conditional stack - keeps
+        // `content`'s widget-tree position stable.
         let solve_layer: Element<'_, Message> = match solve_overlay_text(
             self.solving,
             self.solve_progress,
@@ -1012,6 +997,12 @@ impl HypercubeApp {
             Space::new().into()
         };
 
+        let settings_layer: Element<'_, Message> = if self.settings_open {
+            settings_modal(&self.settings)
+        } else {
+            Space::new().into()
+        };
+
         let fps_layer: Element<'_, Message> = if self.settings.debug_mode {
             iced::widget::container(
                 iced::widget::container(iced::widget::text(format!("{:.0} FPS", self.fps)))
@@ -1028,7 +1019,7 @@ impl HypercubeApp {
             Space::new().into()
         };
 
-        iced::widget::stack([content, solve_layer, about_layer, fps_layer]).into()
+        iced::widget::stack([content, solve_layer, about_layer, settings_layer, fps_layer]).into()
     }
 }
 
@@ -1180,6 +1171,46 @@ fn about_modal<'a>() -> Element<'a, Message> {
     iced::widget::opaque(
         iced::widget::mouse_area(iced::widget::center(iced::widget::opaque(popup)))
             .on_press(Message::CloseAbout),
+    )
+}
+
+fn settings_modal<'a>(settings: &AppSettings) -> Element<'a, Message> {
+    let content = Column::new()
+        .spacing(10)
+        .padding(20)
+        .push(iced::widget::text("Settings").size(24))
+        .push(
+            Checkbox::new(settings.debug_mode)
+                .label("Debug Mode")
+                .on_toggle(Message::DebugMode),
+        )
+        .push(
+            Checkbox::new(settings.show_gizmo_ring)
+                .label("Show Gizmo Ring")
+                .on_toggle(Message::ShowGizmoRing),
+        )
+        .push(
+            Column::new()
+                .spacing(5)
+                .push(iced::widget::text("Rotate Button"))
+                .push(
+                    PickList::new(
+                        &RotateButton::ALL[..],
+                        Some(settings.rotate_button),
+                        Message::RotateButton,
+                    )
+                    .width(250),
+                ),
+        )
+        .push(Button::new("Close").on_press(Message::CloseSettings));
+
+    let popup = iced::widget::container(content)
+        .width(320)
+        .style(iced::widget::container::rounded_box);
+
+    iced::widget::opaque(
+        iced::widget::mouse_area(iced::widget::center(iced::widget::opaque(popup)))
+            .on_press(Message::CloseSettings),
     )
 }
 

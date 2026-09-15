@@ -73,6 +73,12 @@ pub(crate) fn file_items() -> Vec<MenuItem> {
             selected: false,
         },
         MenuItem {
+            label: "Settings".to_string(),
+            message: Message::OpenSettings,
+            selected: false,
+        },
+        spacer_item(),
+        MenuItem {
             label: "Quit".to_string(),
             message: Message::Quit,
             selected: false,
@@ -80,7 +86,7 @@ pub(crate) fn file_items() -> Vec<MenuItem> {
     ]
 }
 
-/// A blank row used to visually separate groups of Puzzle menu items.
+/// A blank row used to visually separate groups of Puzzle/File menu items.
 fn spacer_item() -> MenuItem {
     MenuItem {
         label: String::new(),
@@ -163,6 +169,16 @@ pub(crate) fn help_items() -> Vec<MenuItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_items_settings_entry_opens_the_settings_modal() {
+        let items = file_items();
+        let settings_item = items
+            .iter()
+            .find(|item| item.label == "Settings")
+            .expect("File menu should have a Settings entry");
+        assert!(matches!(settings_item.message, Message::OpenSettings));
+    }
 
     #[test]
     fn solve_item_pairs_its_label_with_its_message() {
