@@ -1,5 +1,5 @@
-#import math4d::{CameraUniform, compute_vertex_geometry, instances}
-#import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
+#import math4d::{CameraUniform, compute_vertex_geometry, instances, transform}
+#import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots, tutorial_flash_pulse}
 
 struct KindColors {
     colors: array<vec4<f32>, 8>,
@@ -67,7 +67,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     } else if (in.piece_slot == highlighting.hovered_piece_slot) {
         final_color = mix(final_color, highlighting.piece_highlight_color.rgb, highlighting.piece_highlight_color.a);
     }
-    
+
+    let flash = tutorial_flash_pulse(instances[in.instance_index].facet_count, transform.elapsed_seconds);
+    if (flash > 0.0) {
+        final_color = mix(final_color, highlighting.highlight_color.rgb, flash * highlighting.highlight_color.a);
+    }
+
     return vec4<f32>(final_color, in.color.a);
 }
 

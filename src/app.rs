@@ -289,13 +289,19 @@ pub(crate) struct HypercubeApp {
     /// launch - re-arming it is only done from the Settings modal.
     tutorial_step: Option<usize>,
     /// Cumulative first-run-tutorial interaction tracking, set from
-    /// `Message::TutorialOrbited`/`TutorialTurnedFace`/`TutorialFocusedFace`
-    /// (published by `shader_widget.rs` the first time each happens) and
+    /// `Message::TutorialOrbited`/`TutorialTurnedFace`/`TutorialTurnedOtherPiece`/
+    /// `TutorialFocusedFace` (published by `shader_widget.rs` the first time
+    /// each happens) and
     /// consulted by `tutorial_step_unlocked` to gate that step's
     /// "Next"/"Done" button until the user has actually tried the thing
     /// being introduced. Once true, stays true for the rest of the session.
     tutorial_orbited: bool,
     tutorial_turned_face: bool,
+    /// Set the first time the user turns a facet whose piece has 3 or 4
+    /// stickers (edge/corner-type), unlocking the tutorial's "Turning other
+    /// pieces" step - distinct from `tutorial_turned_face`, which is set by
+    /// turning *any* actionable facet.
+    tutorial_turned_other_piece: bool,
     tutorial_focused_face: bool,
     tutorial_rotated_4d: bool,
     /// Set (never cleared) the first time `revealed` becomes true, so
@@ -436,6 +442,10 @@ pub(crate) enum Message {
     /// Published by `shader_widget.rs` the first time the user turns a face
     /// by clicking a facet, unlocking the tutorial's "Turning a face" step.
     TutorialTurnedFace,
+    /// Published by `shader_widget.rs` the first time the user turns a facet
+    /// whose piece has 3 or 4 stickers (edge/corner-type), unlocking the
+    /// tutorial's "Turning other pieces" step.
+    TutorialTurnedOtherPiece,
     /// Published by `shader_widget.rs` the first time the user focuses a
     /// face via double-click, unlocking the tutorial's "Focusing a face"
     /// step.
@@ -484,6 +494,7 @@ impl HypercubeApp {
             tutorial_step,
             tutorial_orbited: false,
             tutorial_turned_face: false,
+            tutorial_turned_other_piece: false,
             tutorial_focused_face: false,
             tutorial_rotated_4d: false,
             tutorial_revealed: false,
@@ -800,6 +811,7 @@ impl HypercubeApp {
             }
             Message::TutorialOrbited => self.tutorial_orbited = true,
             Message::TutorialTurnedFace => self.tutorial_turned_face = true,
+            Message::TutorialTurnedOtherPiece => self.tutorial_turned_other_piece = true,
             Message::TutorialFocusedFace => self.tutorial_focused_face = true,
             Message::TutorialRotated4d => self.tutorial_rotated_4d = true,
             Message::NoOp => {}
@@ -1015,6 +1027,20 @@ impl HypercubeApp {
 
         controls = controls.push(reveal_group);
 
+        // Which piece type(s) the first-run tutorial wants the user to
+        // notice/turn right now, if any - `shader_widget.rs`/`ray_casting.rs`
+        // consume these generically, without knowing which tutorial step
+        // they came from. Step 1 ("Turning a face") both flashes and
+        // restricts input to facet_count-2 pieces; step 3 ("Turning other
+        // pieces") only flashes facet_count 3/4 pieces, leaving input
+        // unrestricted.
+        let (tutorial_restrict_facet_count, tutorial_flash_facet_counts) = match self.tutorial_step
+        {
+            Some(1) => (Some(2), [2, 0]),
+            Some(3) => (None, [3, 4]),
+            _ => (None, [0, 0]),
+        };
+
         // Right pane with 3D viewport
         let viewport = Shader::new(HypercubeShaderProgram::new(
             // Invert value since the slider can't work in reverse.
@@ -1040,6 +1066,8 @@ impl HypercubeApp {
             self.save_snapshot_generation,
             self.solve_command_generation,
             self.solve_command,
+            tutorial_restrict_facet_count,
+            tutorial_flash_facet_counts,
         ))
         .width(Length::Fill)
         .height(Length::Fill);
@@ -1106,6 +1134,7 @@ impl HypercubeApp {
                 self.tutorial_orbited,
                 self.tutorial_turned_face,
                 self.tutorial_revealed,
+                self.tutorial_turned_other_piece,
                 self.tutorial_focused_face,
                 self.tutorial_rotated_4d,
             );
@@ -1341,7 +1370,7 @@ fn settings_modal<'a>(settings: &AppSettings) -> Element<'a, Message> {
 }
 
 /// Number of first-run tutorial steps (see `tutorial_step_content`).
-const TUTORIAL_STEP_COUNT: usize = 6;
+const TUTORIAL_STEP_COUNT: usize = 7;
 
 /// (title, body lines) for first-run tutorial step `step`, deliberately
 /// limited to the controls themselves - not puzzle-solving technique. Every
@@ -1378,19 +1407,28 @@ fn tutorial_step_content(step: usize, rotate_button: RotateButton) -> (&'static 
             "Revealing the puzzle",
             vec![
                 "The Reveal button (left panel or Puzzle menu) pulls the pieces apart \
-                 so you can see inside the hypercube."
+                 so you can see what's inside."
                     .to_string(),
                 "Try it now.".to_string(),
             ],
         ),
         3 => (
+            "Turning other pieces",
+            vec![
+                "Some pieces have more than one sticker showing. Try turning one of the \
+                 flashing pieces."
+                    .to_string(),
+                "Try it now.".to_string(),
+            ],
+        ),
+        4 => (
             "Focusing a face",
             vec![
                 "Double-click any face to smoothly center it in view.".to_string(),
                 "Try it now.".to_string(),
             ],
         ),
-        4 => (
+        5 => (
             "Rotating in 4D",
             vec![
                 format!(
@@ -1412,16 +1450,18 @@ fn tutorial_step_content(step: usize, rotate_button: RotateButton) -> (&'static 
 }
 
 /// Whether a tutorial step's "Next"/"Done" button should be enabled: steps
-/// 0-4 each require their matching interaction to have happened at least
+/// 0-5 each require their matching interaction to have happened at least
 /// once this session (`tutorial_orbited`/`tutorial_turned_face`/
-/// `tutorial_revealed`/`tutorial_focused_face`/`tutorial_rotated_4d`), all
-/// cumulative and never reset while navigating Back/Next; the last step is
-/// plain description with nothing to try, so it's always unlocked.
+/// `tutorial_revealed`/`tutorial_turned_other_piece`/`tutorial_focused_face`/
+/// `tutorial_rotated_4d`), all cumulative and never reset while navigating
+/// Back/Next; the last step is plain description with nothing to try, so
+/// it's always unlocked.
 fn tutorial_step_unlocked(
     step: usize,
     tutorial_orbited: bool,
     tutorial_turned_face: bool,
     tutorial_revealed: bool,
+    tutorial_turned_other_piece: bool,
     tutorial_focused_face: bool,
     tutorial_rotated_4d: bool,
 ) -> bool {
@@ -1429,8 +1469,9 @@ fn tutorial_step_unlocked(
         0 => tutorial_orbited,
         1 => tutorial_turned_face,
         2 => tutorial_revealed,
-        3 => tutorial_focused_face,
-        4 => tutorial_rotated_4d,
+        3 => tutorial_turned_other_piece,
+        4 => tutorial_focused_face,
+        5 => tutorial_rotated_4d,
         _ => true,
     }
 }
@@ -1543,34 +1584,53 @@ mod tests {
     #[test]
     fn tutorial_gated_steps_stay_locked_until_their_interaction_happens() {
         assert!(!tutorial_step_unlocked(
-            0, false, false, false, false, false
+            0, false, false, false, false, false, false
         ));
-        assert!(tutorial_step_unlocked(0, true, false, false, false, false));
+        assert!(tutorial_step_unlocked(
+            0, true, false, false, false, false, false
+        ));
 
         assert!(!tutorial_step_unlocked(
-            1, false, false, false, false, false
+            1, false, false, false, false, false, false
         ));
-        assert!(tutorial_step_unlocked(1, false, true, false, false, false));
+        assert!(tutorial_step_unlocked(
+            1, false, true, false, false, false, false
+        ));
 
         assert!(!tutorial_step_unlocked(
-            2, false, false, false, false, false
+            2, false, false, false, false, false, false
         ));
-        assert!(tutorial_step_unlocked(2, false, false, true, false, false));
+        assert!(tutorial_step_unlocked(
+            2, false, false, true, false, false, false
+        ));
 
         assert!(!tutorial_step_unlocked(
-            3, false, false, false, false, false
+            3, false, false, false, false, false, false
         ));
-        assert!(tutorial_step_unlocked(3, false, false, false, true, false));
+        assert!(tutorial_step_unlocked(
+            3, false, false, false, true, false, false
+        ));
 
         assert!(!tutorial_step_unlocked(
-            4, false, false, false, false, false
+            4, false, false, false, false, false, false
         ));
-        assert!(tutorial_step_unlocked(4, false, false, false, false, true));
+        assert!(tutorial_step_unlocked(
+            4, false, false, false, false, true, false
+        ));
+
+        assert!(!tutorial_step_unlocked(
+            5, false, false, false, false, false, false
+        ));
+        assert!(tutorial_step_unlocked(
+            5, false, false, false, false, false, true
+        ));
     }
 
     #[test]
     fn tutorial_final_step_is_always_unlocked() {
-        assert!(tutorial_step_unlocked(5, false, false, false, false, false));
+        assert!(tutorial_step_unlocked(
+            6, false, false, false, false, false, false
+        ));
     }
 
     #[test]
@@ -1580,6 +1640,18 @@ mod tests {
 
         let (_, lines) = tutorial_step_content(1, RotateButton::Right);
         assert!(lines.iter().any(|line| line.contains("Left mouse button")));
+    }
+
+    #[test]
+    fn tutorial_reveal_step_does_not_spoil_what_the_puzzle_is() {
+        let (title, lines) = tutorial_step_content(2, RotateButton::Right);
+        assert_eq!(title, "Revealing the puzzle");
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.to_lowercase().contains("hypercube")),
+            "reveal step text should stay a surprise: {lines:?}"
+        );
     }
 
     #[test]

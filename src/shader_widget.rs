@@ -1197,6 +1197,10 @@ pub(crate) struct HypercubePrimitive {
     /// Set by a `save_snapshot_generation` mismatch; `prepare()` captures
     /// this frame's pixels and writes both to disk alongside it when present.
     pub(crate) snapshot_request: Option<ViewSnapshot>,
+    /// Facet counts (2..=4; `0` = unused) the first-run tutorial wants
+    /// pulse-highlighted this frame; see `HypercubeShaderProgram`'s field of
+    /// the same name.
+    pub(crate) tutorial_flash_facet_counts: [u8; 2],
 }
 
 impl shader::Primitive for HypercubePrimitive {
@@ -1226,6 +1230,7 @@ impl shader::Primitive for HypercubePrimitive {
         pipeline.update_light(queue, &self.camera);
         pipeline.update_indices(queue, &self.cached_indices, self.indices_generation);
         pipeline.update_highlighting(queue, self.hovered_sticker);
+        pipeline.update_tutorial_flash(queue, self.tutorial_flash_facet_counts);
         pipeline.update_debug_instances(queue, &self.debug_instances);
         pipeline.update_gizmo(queue, &self.gizmo_vertices);
         pipeline.update_sticker_instances(queue, &self.sticker_instances, self.sticker_generation);
@@ -1342,6 +1347,7 @@ pub struct HypercubeShaderState {
     tutorial_orbited_reported: bool,
     tutorial_rotated_4d_reported: bool,
     tutorial_turned_face_reported: bool,
+    tutorial_turned_other_piece_reported: bool,
     tutorial_focused_face_reported: bool,
     /// A tutorial-interaction message waiting to be published - `update`
     /// can publish only one message per call and a completed reveal's/
@@ -1391,6 +1397,14 @@ pub struct HypercubeShaderProgram {
     save_snapshot_generation: u64,
     solve_command_generation: u64,
     solve_command: SolveCommand,
+    /// While the first-run tutorial is on the step that teaches turning a
+    /// specific piece type, restricts hovering/clicking to facets whose
+    /// `FacetGeometry::facet_count()` matches; `None` outside that step.
+    tutorial_restrict_facet_count: Option<u8>,
+    /// Facet counts (2..=4; `0` = unused) to pulse-highlight for the
+    /// first-run tutorial's current step; `[0, 0]` when no step wants a
+    /// flash.
+    tutorial_flash_facet_counts: [u8; 2],
 }
 
 impl HypercubeShaderProgram {
@@ -1419,6 +1433,8 @@ impl HypercubeShaderProgram {
         save_snapshot_generation: u64,
         solve_command_generation: u64,
         solve_command: SolveCommand,
+        tutorial_restrict_facet_count: Option<u8>,
+        tutorial_flash_facet_counts: [u8; 2],
     ) -> Self {
         Self {
             sticker_scale,
@@ -1443,6 +1459,8 @@ impl HypercubeShaderProgram {
             save_snapshot_generation,
             solve_command_generation,
             solve_command,
+            tutorial_restrict_facet_count,
+            tutorial_flash_facet_counts,
         }
     }
 }
@@ -1837,6 +1855,7 @@ impl shader::Program<Message> for HypercubeShaderProgram {
             gizmo_vertices: self.build_gizmo_vertices(state, face_gap, face_gap_4d),
             elapsed_seconds: state.elapsed_seconds,
             snapshot_request: state.pending_snapshot.take(),
+            tutorial_flash_facet_counts: self.tutorial_flash_facet_counts,
         }
     }
 }
@@ -2343,6 +2362,7 @@ impl HypercubeShaderProgram {
             face_gap_4d,
             self.viewer_distance,
             self.aabb_mode,
+            self.tutorial_restrict_facet_count,
         );
         state.hovered_sticker = hovered_sticker;
         state.debug_instances = debug_instances;
@@ -2479,6 +2499,9 @@ impl HypercubeShaderProgram {
         if !state.tutorial_turned_face_reported {
             state.tutorial_turned_face_reported = true;
             state.tutorial_event = Some(Message::TutorialTurnedFace);
+        } else if !state.tutorial_turned_other_piece_reported && facet.facet_count() >= 3 {
+            state.tutorial_turned_other_piece_reported = true;
+            state.tutorial_event = Some(Message::TutorialTurnedOtherPiece);
         }
     }
 
@@ -2797,6 +2820,7 @@ impl Default for HypercubeShaderState {
             tutorial_orbited_reported: false,
             tutorial_rotated_4d_reported: false,
             tutorial_turned_face_reported: false,
+            tutorial_turned_other_piece_reported: false,
             tutorial_focused_face_reported: false,
             tutorial_event: None,
         }
@@ -3223,6 +3247,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -3304,6 +3330,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -3355,6 +3383,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -3400,6 +3430,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -3451,6 +3483,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
@@ -3502,6 +3536,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
@@ -3550,6 +3586,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
@@ -3625,6 +3663,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -3687,6 +3727,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -3747,6 +3789,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -3893,6 +3937,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
 
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
@@ -3947,6 +3993,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         program.update(
@@ -4000,6 +4048,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         stale_program.update(
             &mut state,
@@ -4033,6 +4083,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         caught_up_program.update(
             &mut state,
@@ -4089,6 +4141,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let action = program.update(
@@ -4145,6 +4199,8 @@ mod tests {
             state.save_snapshot_generation,
             generation,
             command,
+            None,
+            [0, 0],
         )
     }
 
@@ -4319,6 +4375,8 @@ mod tests {
                 0,
                 1,
                 SolveCommand::Start,
+                None,
+                [0, 0],
             );
             program.update(
                 &mut state,
@@ -4408,6 +4466,8 @@ mod tests {
             0,
             1,
             SolveCommand::Start,
+            None,
+            [0, 0],
         );
         let now = Instant::now();
         let first = published(program.update(
@@ -4480,6 +4540,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
@@ -4558,6 +4620,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -4636,6 +4700,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
         let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
 
@@ -4839,6 +4905,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
 
         let vertices = program.build_gizmo_vertices(&state, 0.0, 1.0);
@@ -4881,6 +4949,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
 
         let vertices = program.build_gizmo_vertices(&state, 0.0, 1.0);
@@ -4921,6 +4991,8 @@ mod tests {
             0,
             0,
             SolveCommand::Stop,
+            None,
+            [0, 0],
         );
 
         let vertices = program.build_gizmo_vertices(&state, 0.0, 1.0);

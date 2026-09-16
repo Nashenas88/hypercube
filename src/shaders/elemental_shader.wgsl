@@ -1,5 +1,5 @@
 #import math4d::{camera, compute_sticker_anchor, compute_vertex_geometry, instances, inverse3, transform}
-#import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots}
+#import sticker_common::{HighlightingUniform, LightUniform, light, highlighting, piece_slots, tutorial_flash_pulse}
 #import elemental_common::{hash11, hash21, hash31, value_noise2, value_noise3}
 
 // Ice's own bind group: iChannel0 (gray noise, for the triplanar bump map)
@@ -106,6 +106,10 @@ fn apply_highlight(color: vec3<f32>, coverage: f32, instance_index: u32, piece_s
     }
     if (piece_slot == highlighting.hovered_piece_slot) {
         return mix(color, highlighting.piece_highlight_color.rgb * coverage, highlighting.piece_highlight_color.a);
+    }
+    let flash = tutorial_flash_pulse(instances[instance_index].facet_count, transform.elapsed_seconds);
+    if (flash > 0.0) {
+        return mix(color, highlighting.highlight_color.rgb * coverage, flash * highlighting.highlight_color.a);
     }
     return color;
 }

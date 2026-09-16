@@ -16,7 +16,10 @@ struct LightUniform {
 struct HighlightingUniform {
     hovered_sticker_index: u32,
     hovered_piece_slot: u32,
-    _padding: vec2<u32>,
+    // Facet counts (2..=4; 0 = unused) the first-run tutorial wants
+    // pulse-highlighted this frame.
+    tutorial_flash_facet_count_a: u32,
+    tutorial_flash_facet_count_b: u32,
     highlight_color: vec4<f32>,       // rgb = color, a = intensity
     piece_highlight_color: vec4<f32>, // rgb = color, a = intensity
 };
@@ -32,6 +35,18 @@ var<uniform> highlighting: HighlightingUniform;
 
 @group(0) @binding(5)
 var<uniform> light: LightUniform;
+
+// Pulsing intensity (0 = off) for a facet whose piece has `facet_count`
+// stickers, driving the first-run tutorial's flash-the-target-pieces
+// highlight; `facet_count == 0` (the invisible center) never flashes.
+fn tutorial_flash_pulse(facet_count: u32, elapsed_seconds: f32) -> f32 {
+    if (facet_count != 0u &&
+        (facet_count == highlighting.tutorial_flash_facet_count_a ||
+         facet_count == highlighting.tutorial_flash_facet_count_b)) {
+        return 0.5 + 0.5 * sin(elapsed_seconds * 4.0);
+    }
+    return 0.0;
+}
 
 // Sticker indices grouped into contiguous `(face_id, kind)` blocks, read only
 // by the particle pipeline to look up a particle's owning sticker, since

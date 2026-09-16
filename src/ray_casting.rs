@@ -276,7 +276,12 @@ fn get_face_debug_color(face_id: usize) -> [f32; 4] {
 }
 
 /// Find the sticker that the 3D mouse ray intersects
-/// Returns the sticker index and debug AABBs for intersected faces/stickers
+/// Returns the sticker index and debug AABBs for intersected faces/stickers.
+/// `restrict_facet_count`, when set, excludes any sticker whose piece
+/// doesn't have exactly that many stickers from being hoverable/clickable -
+/// used by the first-run tutorial to force the user's first click onto the
+/// piece type it's teaching.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn find_intersected_sticker(
     ray: &Ray,
     state: &HypercubeShaderState,
@@ -285,6 +290,7 @@ pub(crate) fn find_intersected_sticker(
     gap_distance_4d: f32,
     viewer_distance: f32,
     aabb_mode: AABBMode,
+    restrict_facet_count: Option<u8>,
 ) -> (Option<usize>, Vec<DebugInstanceWithDistance>) {
     let camera_pos = [state.camera.eye.x, state.camera.eye.y, state.camera.eye.z];
 
@@ -355,10 +361,14 @@ pub(crate) fn find_intersected_sticker(
                 && distance < closest_distance
             {
                 closest_distance = distance;
-                closest_sticker = if sticker.is_actionable {
+                let matches_restriction =
+                    restrict_facet_count.is_none_or(|target| sticker.facet_count() == target);
+                closest_sticker = if sticker.is_actionable && matches_restriction {
                     Some(sticker_index)
                 } else {
-                    // Don't highlight the center piece. No actions can be performed on it.
+                    // Don't highlight the center piece, or a piece type the
+                    // tutorial is restricting input away from. No actions
+                    // can be performed on either.
                     None
                 };
             }

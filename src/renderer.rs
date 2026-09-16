@@ -590,8 +590,10 @@ pub(crate) struct HighlightingUniform {
     hovered_sticker_index: u32,
     /// `Hypercube::pieces` slot of the hovered sticker's piece (u32::MAX if none)
     hovered_piece_slot: u32,
-    /// Padding for vec4 alignment
-    _padding: [u32; 2],
+    /// Facet counts (2..=4; `0` = unused) the first-run tutorial wants
+    /// pulse-highlighted this frame.
+    tutorial_flash_facet_count_a: u32,
+    tutorial_flash_facet_count_b: u32,
     /// Color and intensity (in `a`) for the exact hovered sticker
     highlight_color: [f32; 4],
     /// Color and intensity (in `a`) for the rest of the hovered piece's stickers
@@ -1239,7 +1241,8 @@ impl Renderer {
         let highlighting_uniform = HighlightingUniform {
             hovered_sticker_index: u32::MAX, // No sticker highlighted
             hovered_piece_slot: u32::MAX,    // No piece highlighted
-            _padding: [0; 2],
+            tutorial_flash_facet_count_a: 0,
+            tutorial_flash_facet_count_b: 0,
             highlight_color: [1.0, 1.0, 0.0, 0.3], // Yellow, 30% intensity
             piece_highlight_color: [0.2, 0.2, 0.2, 0.6], // Gray, 60% intensity
         };
@@ -3377,6 +3380,19 @@ impl Renderer {
         self.highlighting_uniform.hovered_piece_slot = hovered_sticker_index
             .map(|index| FACET_TABLE[index].piece_slot as u32)
             .unwrap_or(u32::MAX);
+
+        queue.write_buffer(
+            &self.highlighting_buffer,
+            0,
+            bytemuck::cast_slice(&[self.highlighting_uniform]),
+        );
+    }
+
+    /// Sets which facet counts (2..=4; `0` = unused) the first-run
+    /// tutorial's current step wants pulse-highlighted, if any.
+    pub(crate) fn update_tutorial_flash(&mut self, queue: &Queue, targets: [u8; 2]) {
+        self.highlighting_uniform.tutorial_flash_facet_count_a = targets[0] as u32;
+        self.highlighting_uniform.tutorial_flash_facet_count_b = targets[1] as u32;
 
         queue.write_buffer(
             &self.highlighting_buffer,
