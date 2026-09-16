@@ -769,7 +769,8 @@ pub fn sticker_instances_for_render(state: &HypercubeShaderState) -> Vec<Sticker
                 basis,
                 face_normal_4d,
                 kind: kind as u32,
-                _padding: [0; 3],
+                facet_count: facet.facet_count() as u32,
+                _padding: [0; 2],
             }
         })
         .collect()
@@ -5528,7 +5529,8 @@ mod clockwise_sign_tests {
                 } else {
                     0
                 },
-                _padding: [0; 3],
+                facet_count: 0,
+                _padding: [0; 2],
             })
             .collect()
     }

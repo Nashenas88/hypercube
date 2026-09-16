@@ -59,7 +59,10 @@ pub struct StickerInstance {
     /// Opaque sticker-kind identity; interpreted only by the active theme's
     /// shader.
     pub(crate) kind: u32,
-    pub(crate) _padding: [u32; 3],
+    /// How many stickers the piece this facet belongs to has (2..=4) - drives
+    /// the first-run tutorial's flash-the-target-pieces highlight.
+    pub(crate) facet_count: u32,
+    pub(crate) _padding: [u32; 2],
 }
 
 /// Maps a (axis, sign) side to one of the 8 face ids, reproducing the same
@@ -218,6 +221,16 @@ pub(crate) struct FacetGeometry {
     pub(crate) local_coords: [i8; 3],
 }
 
+impl FacetGeometry {
+    /// How many stickers the piece this facet belongs to has (2 = face-type,
+    /// 3 = edge-type, 4 = corner-type), i.e. `1 +` the number of nonzero
+    /// `local_coords` - `axis` itself is always nonzero and isn't counted in
+    /// `local_coords`.
+    pub(crate) fn facet_count(&self) -> u8 {
+        1 + self.local_coords.iter().filter(|c| **c != 0).count() as u8
+    }
+}
+
 fn facet_position_4d(position: [i8; 4], fixed_axis: usize) -> [f32; 4] {
     let mut pos = [0.0f32; 4];
     for axis in 0..4 {
@@ -295,7 +308,8 @@ pub(crate) fn generate_sticker_instances(hypercube: &Hypercube) -> Vec<StickerIn
                 basis: facet.basis,
                 face_normal_4d: FACE_CENTERS[facet.face_id].into(),
                 kind: kind as u32,
-                _padding: [0; 3],
+                facet_count: facet.facet_count() as u32,
+                _padding: [0; 2],
             }
         })
         .collect()
@@ -406,6 +420,7 @@ mod tests {
             assert_eq!(facet.face_id, face_id_for(facet.axis, facet.side_sign));
             let facet_count = position.iter().filter(|c| **c != 0).count();
             assert_eq!(facet.is_actionable, facet_count >= 2);
+            assert_eq!(facet.facet_count(), facet_count as u8);
             let axes = free_axes(facet.axis);
             assert_eq!(facet.free_axes, axes);
             assert_eq!(
@@ -439,6 +454,7 @@ mod tests {
             let expected_kind = cube.pieces[facet.piece_slot].kinds[facet.axis].unwrap();
             assert_eq!(instance.kind, expected_kind as u32);
             assert_eq!(instance.position_4d, facet.position_4d);
+            assert_eq!(instance.facet_count, facet.facet_count() as u32);
         }
     }
 }

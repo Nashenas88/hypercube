@@ -28,7 +28,10 @@ struct StickerInstance {
     basis: array<vec4<f32>, 3>,
     face_normal_4d: vec4<f32>,
     kind: u32,
-    _padding: array<u32, 3>,
+    // How many stickers the piece this facet belongs to has (2..=4) - drives
+    // the first-run tutorial's flash-the-target-pieces highlight.
+    facet_count: u32,
+    _padding: array<u32, 2>,
 }
 
 @group(0) @binding(0)

@@ -4120,7 +4120,8 @@ mod tests {
             basis: [[0.0; 4]; 3],
             face_normal_4d: [0.0; 4],
             kind,
-            _padding: [0; 3],
+            facet_count: 0,
+            _padding: [0; 2],
         }
     }
 
