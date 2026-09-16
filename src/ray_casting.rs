@@ -380,3 +380,88 @@ pub(crate) fn find_intersected_sticker(
 
     (closest_sticker, debug_instances)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math::VIEWER_DISTANCE;
+    use crate::shader_widget::{PRIMARY_FACE_GAP, PRIMARY_FACE_GAP_4D, PRIMARY_STICKER_SCALE};
+
+    /// A ray from `state.camera.eye` straight at the given facet's centroid,
+    /// guaranteed to hit it (absent restriction) since it's aimed at real,
+    /// on-screen sticker geometry rather than approximated by an AABB.
+    fn ray_at_facet(state: &HypercubeShaderState, sticker_index: usize) -> Ray {
+        let facet = &FACET_TABLE[sticker_index];
+        let world_vertices = transform_sticker_vertices_to_3d(
+            Vector4::from(facet.position_4d),
+            facet.face_id,
+            &state.rotation_4d,
+            PRIMARY_STICKER_SCALE,
+            PRIMARY_FACE_GAP,
+            PRIMARY_FACE_GAP_4D,
+            VIEWER_DISTANCE,
+        );
+        let centroid = world_vertices
+            .iter()
+            .fold(Vector3::zeros(), |acc, v| acc + v.coords)
+            / world_vertices.len() as f32;
+        let direction = (Point3::from(centroid) - state.camera.eye).normalize();
+        Ray {
+            origin: state.camera.eye,
+            direction,
+            inverse_direction: direction.map(|c| 1.0 / c),
+        }
+    }
+
+    /// The first actionable facet with the given piece-type sticker count,
+    /// on a face currently visible from `state`'s 4D orientation.
+    fn visible_facet_with_facet_count(state: &HypercubeShaderState, facet_count: u8) -> usize {
+        FACET_TABLE
+            .iter()
+            .position(|f| {
+                f.facet_count() == facet_count
+                    && is_face_visible(f.face_id, &state.rotation_4d, VIEWER_DISTANCE)
+            })
+            .expect("a visible facet with this facet_count exists at the default orientation")
+    }
+
+    fn find_at_facet(
+        state: &HypercubeShaderState,
+        sticker_index: usize,
+        restrict_facet_count: Option<u8>,
+    ) -> Option<usize> {
+        let ray = ray_at_facet(state, sticker_index);
+        find_intersected_sticker(
+            &ray,
+            state,
+            PRIMARY_STICKER_SCALE,
+            PRIMARY_FACE_GAP,
+            PRIMARY_FACE_GAP_4D,
+            VIEWER_DISTANCE,
+            AABBMode::None,
+            restrict_facet_count,
+        )
+        .0
+    }
+
+    #[test]
+    fn restrict_facet_count_finds_a_matching_sticker() {
+        let state = HypercubeShaderState::default();
+        let two_piece = visible_facet_with_facet_count(&state, 2);
+
+        assert_eq!(find_at_facet(&state, two_piece, Some(2)), Some(two_piece));
+    }
+
+    #[test]
+    fn restrict_facet_count_excludes_a_non_matching_sticker() {
+        let state = HypercubeShaderState::default();
+        let three_piece = visible_facet_with_facet_count(&state, 3);
+
+        assert_eq!(find_at_facet(&state, three_piece, Some(2)), None);
+        assert_eq!(
+            find_at_facet(&state, three_piece, None),
+            Some(three_piece),
+            "with no restriction, the same ray should still find the sticker"
+        );
+    }
+}

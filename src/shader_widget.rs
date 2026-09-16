@@ -3552,6 +3552,62 @@ mod tests {
         assert!(matches!(message, Some(Message::TutorialTurnedFace)));
     }
 
+    /// The first-run tutorial's "Turning other pieces" step unlocks once the
+    /// user turns a facet whose piece has 3+ stickers - `handle_facet_click`
+    /// must publish `TutorialTurnedOtherPiece` the first time that happens,
+    /// once `TutorialTurnedFace` has already been reported.
+    #[test]
+    fn clicking_an_edge_or_corner_facet_publishes_tutorial_turned_other_piece() {
+        let sticker_index = FACET_TABLE
+            .iter()
+            .position(|f| f.facet_count() >= 3)
+            .expect("at least one edge/corner-type facet exists");
+        let mut state = HypercubeShaderState {
+            tutorial_turned_face_reported: true,
+            hovered_sticker: Some(sticker_index),
+            ..Default::default()
+        };
+
+        let rotate_button = RotateButton::default();
+        let program = HypercubeShaderProgram::new(
+            0.9,
+            0.0,
+            1.0,
+            VIEWER_DISTANCE,
+            RenderMode::Standard,
+            Theme::Classic,
+            AABBMode::None,
+            false,
+            true,
+            rotate_button,
+            250,
+            0,
+            0,
+            0,
+            0,
+            false,
+            0,
+            0,
+            None,
+            0,
+            0,
+            SolveCommand::Stop,
+            None,
+            [0, 0],
+        );
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(Point::new(10.0, 10.0));
+
+        let message = published(program.update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(rotate_button.click_button())),
+            bounds,
+            cursor,
+        ));
+
+        assert!(matches!(message, Some(Message::TutorialTurnedOtherPiece)));
+    }
+
     /// Double-clicking a face to focus it must publish `TutorialFocusedFace`
     /// the first time, unlocking the tutorial's "Focusing a face" step.
     #[test]
